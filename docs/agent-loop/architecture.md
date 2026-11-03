@@ -12,17 +12,20 @@
 
 ## 1. 定位
 
-`bokaclaw-agent` 是一个可独立发布、可嵌入任意 Python 服务的轻量 Agent 运行时，v1 只负责三件事：
+`bokaclaw-agent` 是一个可独立发布、可嵌入任意 Python 服务的轻量 Agent 运行时，v1 负责四件事：
 
 1. **ReAct 循环**：把消息和工具定义发给模型，执行模型返回的 `tool_calls`，把结果回填为 `role="tool"` 消息，直到模型给出最终答案。
-2. **上下文管理**：一次 run 内的消息保存在内存；恢复会话时加载历史，并按配置裁剪发送给模型的视图。
-3. **会话持久化**：run 结束后把本次新增消息写入 Postgres（或内存），支持同一 `session_id` 继续对话。
+2. **流式输出**：`stream()` 在最终答案生成过程中逐段转发文本增量；工具调用分片在内部重组后才执行。
+3. **上下文管理**：一次 run 内的消息保存在内存；恢复会话时加载历史，并按配置裁剪发送给模型的视图。
+4. **会话持久化**：run 结束后把本次新增消息写入 Postgres（或内存），支持同一 `session_id` 继续对话。
+
+入口有三个：`run()`（阻塞返回完整结果）、`stream()`（同步生成器，边生成边 yield 文本）、`arun()`（`run()` 的异步包装）。
 
 明确的非目标（v1）：
 
-- token 级流式输出（当前只在 run 结束后返回结果；server 层自行把最终答案包装成 SSE）
 - token 计数、自动摘要、上下文压缩
 - 并行工具执行
+- 边收流边执行工具调用（必须等 tool_call 分片重组完成）
 - MCP 工具发现、内置网络搜索
 - 工具级权限与 OS 沙箱（由宿主应用决定）
 
@@ -35,10 +38,10 @@ flowchart TB
     App["宿主应用<br/>server / 脚本 / 其他服务"]
 
     subgraph SDK["bokaclaw_agent"]
-        Runtime["AgentRuntime<br/>ReAct 编排 + 持久化编排"]
+        Runtime["AgentRuntime<br/>ReAct 编排 + 持久化编排<br/>run / stream / arun"]
         Context["ContextManager<br/>system prompt / 历史 / 截断"]
         Registry["ToolRegistry<br/>注册 + JSON Schema + 分发"]
-        Provider["ModelProvider<br/>OpenAICompatibleProvider"]
+        Provider["ModelProvider<br/>+ 可选 stream_complete"]
         Store["SessionStore<br/>InMemory / Postgres"]
         Types["types / exceptions / utils"]
     end
@@ -47,12 +50,14 @@ flowchart TB
     DB[("Postgres<br/>sessions + messages")]
 
     App -->|"run() / arun()"| Runtime
+    App -->|"stream() 逐段读取"| Runtime
     Runtime --> Context
     Runtime --> Registry
     Runtime --> Provider
     Runtime --> Store
+    Runtime -.->|"文本增量"| App
     Registry -.->|"tools 定义"| Provider
-    Provider -->|"/chat/completions"| Model
+    Provider -->|"/chat/completions（可 stream）"| Model
     Store -->|"load_messages / persist_run"| DB
     Runtime -.-> Types
 ```
@@ -60,8 +65,8 @@ flowchart TB
 设计要点：
 
 - **Runtime 是唯一的编排者**：Context、Registry、Provider、Store 都不互相调用，便于单独替换和测试。
-- **模型层与存储层都是 Protocol**：宿主可以注入任意实现；默认实现只依赖 `openai` 和可选的 `psycopg`。
-- **同步核心 + 异步外壳**：`run()` 是同步实现，`arun()` 用 `asyncio.to_thread` 包一层；所有异步工具/Provider 都通过 `resolve_awaitable` 统一解析。
+- **模型层与存储层都是 Protocol**：宿主可以注入任意实现；默认实现只依赖 `openai` 和可选的 `psycopg`。流式能力是模型层的**可选协议**，不实现时自动退化。
+- **同步核心 + 异步/流式外壳**：`_execute()` 是唯一的 ReAct 实现，`run()` 与 `stream()` 只是以不同方式驱动它；`arun()` 用 `asyncio.to_thread` 包一层。所有异步工具/Provider 都通过 `resolve_awaitable` 统一解析。
 - **持久化与业务存储解耦**：SDK 的 Postgres 表只服务于独立使用场景。`server/` 集成时由服务端自己的 `conversations` 表负责持久化，SDK 不写库（见第 12 节）。
 
 ---
@@ -128,11 +133,35 @@ AgentRuntime(
 
 | 成员 | 作用 |
 |---|---|
-| `run(input, *, session_id=None, user_id=None, metadata=None, **model_kwargs)` | 执行一次完整的 ReAct 回合 |
-| `arun(...)` | `run()` 的异步包装，内部 `asyncio.to_thread` |
+| `run(input, *, session_id=None, user_id=None, metadata=None, **model_kwargs)` | 执行一次完整的 ReAct 回合，返回 `RunResult` |
+| `stream(...)` | 同一回合的流式版本：逐段 `yield` 文本增量，生成器耗尽时返回 `RunResult` |
+| `arun(...)` | `run()` 的异步包装，内部 `asyncio.to_thread`；不提供流式版本 |
 | `register_tool(tool)` | 运行期追加工具 |
 | `get_session / list_sessions / delete_session` | 会话管理；未配置 store 时返回空/空操作 |
 | `close / aclose` | 关闭 store 持有的连接池 |
+
+两个入口共享 `_execute()`（`runtime.py:161`）：
+
+```python
+def run(...):
+    turn = self._execute(..., stream=False, ...)
+    while True:
+        try:
+            next(turn)
+        except StopIteration as stop:
+            return stop.value          # 生成器的返回值就是 RunResult
+
+def stream(...):
+    turn = self._execute(..., stream=True, ...)
+    while True:
+        try:
+            delta = next(turn)
+        except StopIteration as stop:
+            return stop.value
+        yield delta                    # 只有文本增量会被 yield
+```
+
+因此持久化、工具执行、轮数控制只有一份实现。`stream()` 在耗尽前被关闭（消费者 `break` 或显式 `close()`）时，本轮不会持久化，已执行的工具结果也不会写库；宿主应消费到 `StopIteration`/`return` 才能得到完整会话。
 
 未注入 `provider` 时，必须提供 `config.model`，Runtime 会构造默认的 `OpenAICompatibleProvider`；两者都没有则在构造阶段抛 `ConfigurationError`。
 
@@ -150,18 +179,33 @@ def complete(
 ) -> ModelResponse: ...
 ```
 
-`OpenAICompatibleProvider` 是唯一内置实现，面向所有 OpenAI Chat Completions 兼容服务（OpenAI、DeepSeek、Qwen 兼容模式、vLLM、Ollama 等）。
+流式能力由可选的 `StreamingModelProvider` 协议描述：
+
+```python
+def stream_complete(
+    messages: list[dict],
+    *,
+    tools: list[dict] | None = None,
+    tool_choice: str | dict | None = "auto",
+    **kwargs,
+) -> Iterator[ModelStreamChunk]: ...
+```
+
+只实现 `complete()` 的 Provider 仍然可用：`_stream_complete()` 会回退到一次 `complete()`，把完整答案包装成单个 `ModelStreamChunk`。这保证了自定义 Provider 不必被迫支持流式。
+
+`OpenAICompatibleProvider` 是唯一内置实现，同时实现两个协议，面向所有 OpenAI Chat Completions 兼容服务（OpenAI、DeepSeek、Qwen 兼容模式、vLLM、Ollama 等）。`_build_params()` 由 `complete()` 和 `stream_complete()` 共用，后者额外设置 `stream=True`。
 
 关键行为：
 
 - **保留 `tool_call.id`**：这是 ReAct 回填的前提。`ToolCall` 同时保存解析后的 `arguments` 和原始 `raw_arguments`，回写 assistant 消息时优先使用原始字符串，避免 JSON 重新序列化带来的差异。
 - **坏 JSON 不崩溃**：`function.arguments` 解析失败时保留原文，并设置 `ToolCall.arguments_error`；工具层会把错误作为工具结果返回给模型。
+- **流式分片解析**：每个 chunk 转成 `ModelStreamChunk`；`delta.content` 直接转发，`delta.tool_calls[]` 按 `index` 保存 `id`、`name`、`arguments` 片段。空 chunk（keep-alive）会被丢弃；usage 可能出现在末尾一个没有 choices 的 chunk 中，仍会保留。
 - **兼容旧式 `function_call`**：生成 `call_<uuid4hex>` 作为 id。
 - **统一错误**：SDK/网络异常包装为 `ModelError`；无 choice 也抛 `ModelError`。
 - **usage 归一化**：只保留 `prompt_tokens`、`completion_tokens`、`total_tokens`。
 - **配置默认值**：`api_key` 缺省读 `OPENAI_API_KEY`，`base_url` 缺省读 `OPENAI_BASE_URL`，再回退官方地址；`temperature`、`max_tokens` 仅在设置时下发。
 
-Provider 可以返回 awaitable，Runtime 的 `_complete()` 会通过 `resolve_awaitable` 解析，并把 dict 形式的结果校验为 `ModelResponse`。
+Provider 可以返回 awaitable，Runtime 的 `_complete()` 会通过 `resolve_awaitable` 解析，并把 dict 形式的结果校验为 `ModelResponse`。流式 Provider 的 chunk 也允许是 dict，由 `_stream_complete()` 校验为 `ModelStreamChunk`。
 
 ### 4.3 工具层（`tools.py`）
 
@@ -247,6 +291,8 @@ build() = [system?] + truncate(history) + current
 |---|---|
 | `ToolCall` | 模型请求的工具调用（id、name、arguments、raw_arguments、arguments_error） |
 | `ModelResponse` | 归一化后的模型输出（content、tool_calls、finish_reason、usage） |
+| `ModelStreamChunk` | 流式 Provider 的单个增量（content、tool_calls、finish_reason、usage） |
+| `ToolCallDelta` | 流式 tool call 的一个分片（index、id、name、arguments 片段） |
 | `ToolResult` | 回填给模型的工具结果（tool_call_id、name、content、is_error） |
 | `RunResult` | 一次 run 的完整结果（session_id、content、stop_reason、new_messages、tool_results、iterations、usage） |
 | `AgentEvent` / `EventType` | 生命周期事件与枚举 |
@@ -268,11 +314,15 @@ AgentError
     └── SessionNotFoundError
 ```
 
+`utils.parse_tool_arguments()` 把 Provider 的原始参数统一成 `(dict, raw, error)`：dict 原样保留、JSON 字符串解析、坏 JSON 返回空对象与错误文本，供 `ToolCall.arguments_error` 使用。
+
 `utils.resolve_awaitable()` 是同步核心与异步扩展之间的桥：值不是 awaitable 时原样返回；是 awaitable 时用 `asyncio.run()` 执行。若调用方已处于事件循环中，会抛出带指引的 `RuntimeError`（应改用 `arun()`）。
 
 ---
 
 ## 5. 一次 run 的时序
+
+`run()` 与 `stream()` 共用同一条链路，区别只在模型调用与结果返回方式。
 
 ```mermaid
 sequenceDiagram
@@ -283,7 +333,7 @@ sequenceDiagram
     participant MD as ModelProvider
     participant TR as ToolRegistry
 
-    App->>RT: run(input, session_id, user_id, metadata)
+    App->>RT: run() 或 stream()
     RT->>ST: load_messages(session_id)
     ST-->>RT: 历史消息
     RT->>CTX: load_history(history)
@@ -292,8 +342,14 @@ sequenceDiagram
     loop 最多 max_iterations 次
         RT->>CTX: build()
         CTX-->>RT: [system] + 历史视图 + 本次消息
-        RT->>MD: complete(messages, tools, tool_choice)
-        MD-->>RT: ModelResponse
+        alt run
+            RT->>MD: complete(messages, tools, tool_choice)
+            MD-->>RT: ModelResponse
+        else stream
+            RT->>MD: stream_complete(messages, tools, tool_choice)
+            MD-->>RT: ModelStreamChunk（文本 / tool_call 分片）
+            RT-->>App: yield 文本增量
+        end
         RT->>CTX: append(assistant)
         alt 没有 tool_calls
             RT-->>App: RunResult(stop_reason=final/length/content_filter)
@@ -323,6 +379,44 @@ sequenceDiagram
 5. 有 `tool_calls` 时**串行**执行，每个调用都追加一条匹配 `tool_call_id` 的 tool 消息；工具异常按 `tool_error_mode` 处理。
 6. 循环耗尽仍没有最终答案时，写入 `failed` 状态，并抛 `MaxIterationsExceeded`，异常上带 `result`。
 7. 成功结束只调用一次 `persist_run`，写入本次新增消息和 `completed` 状态。
+
+### 5.1 流式模式（`stream()`）
+
+```mermaid
+sequenceDiagram
+    participant App as 宿主应用
+    participant RT as AgentRuntime.stream
+    participant MD as Provider.stream_complete
+    participant TR as ToolRegistry
+
+    App->>RT: stream(messages, session_id)
+    loop 每一轮模型调用
+        RT->>MD: stream_complete(messages, tools, tool_choice)
+        loop 每个 chunk
+            MD-->>RT: content 增量 / tool_call 分片
+            alt 有文本
+                RT-->>App: yield content
+            else 只有 tool_call 分片
+                Note over RT: 按 index 累积 id/name/arguments
+            end
+        end
+        RT->>RT: 重组完整 ModelResponse
+        alt 有 tool_calls
+            RT->>TR: 串行执行工具
+            RT->>RT: 追加 tool 消息，进入下一轮
+        else 没有 tool_calls
+            RT-->>App: return RunResult
+        end
+    end
+```
+
+要点：
+
+- **只有最终答案的文本会 yield**。模型如果先返回 `tool_calls`，那一轮没有可展示的文本；工具执行完后进入下一轮，下一轮的文本才继续转发。
+- **tool_call 分片必须先重组**。`_stream_response()` 按 `index` 累加 `name` 和 `arguments` 字符串，全部 chunk 结束后再用 `parse_tool_arguments()` 解析，然后交给 `ToolRegistry` 执行。
+- **usage 跨轮累加**。每个 chunk 的 usage 都并入本次 run 的总计。
+- **无流式能力的 Provider 自动降级**。`_stream_complete()` 检测不到 `stream_complete` 时调用一次 `complete()`，把整段答案作为单个 chunk 发出；调用方代码不需要分支。
+- **提前关闭等于放弃本轮**。生成器被 `close()` 时不会执行最后的 `persist_run()`，已完成的工具结果也不会落库；需要持久化就必须消费到 `StopIteration`。
 
 ---
 
@@ -436,6 +530,7 @@ CREATE TABLE IF NOT EXISTS bokaclaw_agent_messages (
 | 场景 | 行为 |
 |---|---|
 | 模型请求失败 / 返回结构非法 | `ModelError`；run 走失败持久化后原样抛出 |
+| 流式 Provider 中途失败 / chunk 类型非法 | `ModelError`；与普通请求相同，走失败持久化 |
 | 未知工具 | `return` 模式回填错误结果；`raise` 模式抛 `ToolNotFoundError` |
 | 工具参数不合法 | 同上，对应 `ToolArgumentError` |
 | 工具执行抛异常 | 同上，对应 `ToolExecutionError` |
@@ -463,16 +558,19 @@ CREATE TABLE IF NOT EXISTS bokaclaw_agent_messages (
 | `run_ended` | 正常结束或超轮数 | `stop_reason` |
 | `error` | 异常失败 | `error`、`type` |
 
-回调可以是同步函数，也可以返回 awaitable；回调异常只记录日志。Runtime 本身不输出流式 token，宿主（如 `server/`）可在 `run()` 结束后自行转成 SSE。
+回调可以是同步函数，也可以返回 awaitable；回调异常只记录日志。
+
+流式文本**不经过事件回调**：`stream()` 直接把增量 `yield` 给调用方；`model_response` 事件在 chunk 重组完成后发出，携带完整文本和 tool_calls。这样事件仍然是「生命周期」粒度，而不是逐 token 的日志。
 
 ---
 
 ## 10. 并发与异步模型
 
-- **同步核心**：`run()` 内部全部是同步调用，线程内不共享可变状态（每次 run 新建 `ContextManager` 和局部列表）。
-- **异步外壳**：`arun()` 用 `asyncio.to_thread` 把整个 run 放到工作线程，因此可以在异步框架中安全使用，也能解析异步工具。
+- **同步核心**：`_execute()` 是同步生成器，内部不共享可变状态（每次 run 新建 `ContextManager` 和局部列表）；`run()` 只是把它迭代到结束。
+- **流式生成器**：`stream()` 也是同步生成器。异步宿主应在工作线程中消费它，再通过线程安全队列桥接到事件循环（`server/` 即采用这种方式）。
+- **异步外壳**：`arun()` 用 `asyncio.to_thread` 把整个 `run()` 放到工作线程，因此可以在异步框架中安全使用，也能解析异步工具；`arun()` 不支持流式。
 - **异步工具**：`Tool.invoke()` 用 `resolve_awaitable()` 执行；在已有事件循环中调用同步 `run()` 会得到明确报错，而不是死锁。
-- **Provider 异步**：`complete()` 返回 awaitable 时同样由 `_complete()` 解析。
+- **Provider 异步**：`complete()` 返回 awaitable 时同样由 `_complete()` 解析；`stream_complete()` 目前按同步迭代器消费，异步实现应由宿主在线程中调用。
 - **存储线程安全**：
   - `InMemorySessionStore` 用 `RLock` 保护。
   - `PostgresSessionStore` 使用连接池；每个事务独立连接。
@@ -486,6 +584,7 @@ CREATE TABLE IF NOT EXISTS bokaclaw_agent_messages (
 | 扩展点 | 方式 |
 |---|---|
 | 自定义模型后端 | 实现 `ModelProvider.complete()`，构造时传 `provider=`；可同步或异步 |
+| 自定义流式后端 | 额外实现 `stream_complete() -> Iterator[ModelStreamChunk]`；不实现则自动退化为单 chunk |
 | 复用官方客户端 | `OpenAICompatibleProvider(config, client=...)` 注入已配置的 `openai.OpenAI` |
 | 自定义持久化 | 实现 `SessionStore` 协议（Redis、SQLite、业务库均可） |
 | 共享连接池 | `PostgresSessionStore(config, pool=...)` |
@@ -505,15 +604,16 @@ dashboard ── POST /agent ──▶ server（鉴权 / SSE / 会话存储）
                                 ├─ agent_runtime.build_runtime()
                                 │     ├─ memory tools: search_memories / save_memory
                                 │     └─ dev tools: Read / Write / Edit / ...
-                                └─ runtime.run(messages, session_id=conversation_id)
+                                └─ runtime.stream(messages, session_id=conversation_id)
 ```
 
 关键差异：
 
-- **服务端是会话的唯一事实来源**：Runtime 构造时**不传 `store`**，服务端从自己的 `conversations` / `conversation_messages` 表组装 `history`，再通过 `run(messages, ...)` 传入。SDK 的 Postgres 表不会与业务表重复。
+- **服务端是会话的唯一事实来源**：Runtime 构造时**不传 `store`**，服务端从自己的 `conversations` / `conversation_messages` 表组装 `history`，再通过 `stream(messages, ...)` 传入。SDK 的 Postgres 表不会与业务表重复。
 - **`session_id` 仅用于事件标识**：传入 `conversation_id` 便于日志关联；没有 store 时不产生 SDK 侧持久化。
 - **工具由服务端注入**：记忆工具按登录用户 UUID 限定作用域；开发者工具是否注册由 `AGENT_DEV_TOOLS`、`AGENT_TOOLS_ALLOW_SHELL` 控制。
-- **超时与错误映射在服务端完成**：`asyncio.wait_for` 控制整轮时限，`MaxIterationsExceeded` / `ConfigurationError` 等映射为 SSE 错误码（`agent_timeout`、`agent_not_configured`、`agent_upstream_error` 等）。
+- **同步生成器 → 异步 SSE 的桥接**：`stream_local_agent()` 在工作线程中消费 `runtime.stream()`，通过 `loop.call_soon_threadsafe` 把文本增量推入 `asyncio.Queue`，主协程再把每个增量转成 `message.delta` 事件。工具调用轮没有文本，因此不会产生 SSE 输出。
+- **超时与错误映射在服务端完成**：主协程按剩余时间 `asyncio.wait_for(queue.get())` 控制整轮时限；超时或客户端断开时设置停止标志并关闭 Runtime。`MaxIterationsExceeded` / `ConfigurationError` 等映射为 SSE 错误码（`agent_timeout`、`agent_not_configured`、`agent_upstream_error` 等）。
 - **可选远程执行器**：设置 `AGENT_LOOP_URL` 时，server 改走 HTTP/SSE 外部执行器，不再进程内调用 SDK；SDK 自身的部署方式不受影响。
 
 因此，SDK 的 `SessionStore` 面向「把 SDK 当独立 Agent 服务使用」的场景；把 SDK 嵌进已有业务系统时，宿主可以像 `server/` 一样自行管理会话并传入历史。
@@ -532,7 +632,8 @@ dashboard ── POST /agent ──▶ server（鉴权 / SSE / 会话存储）
 | SDK 自带幂等 DDL | 无需迁移框架、可与 mem0 共库；代价是 schema 演进能力有限 |
 | 失败时补齐 tool 消息 | 会话始终符合协议、可继续恢复；代价是数据库中出现合成的错误结果 |
 | Postgres 依赖放在 `postgres` extra | 纯内存场景无需安装数据库驱动；代价是用户需显式安装 |
-| 不内置流式 token | v1 范围可控；代价是宿主需要自己实现流式呈现 |
+| 同步生成器流式 + 工作线程桥接 | 核心与 Provider 保持同步、实现简单；代价是异步宿主需要队列/线程桥接，取消依赖关闭生成器 |
+| tool_call 分片全部到齐后才执行 | 解析和校验逻辑与非流式完全一致；代价是不能边收参数边启动工具 |
 
 ---
 
@@ -540,7 +641,7 @@ dashboard ── POST /agent ──▶ server（鉴权 / SSE / 会话存储）
 
 当前明确不做、但架构上已留出位置的能力：
 
-- **token 级流式输出**：Provider 返回 `ModelResponse`，可扩展为 async iterator；Runtime 已有 `on_event`。
+- **边收流边执行工具调用**：当前必须等 tool_call 的 `arguments` 分片全部到齐、解析成功后才执行；要做增量执行，需要按 `index` 维护可解析状态。
 - **上下文压缩 / 自动摘要**：`ContextManager.build()` 是唯一模型视图入口，可替换为摘要策略。
 - **并行工具执行**：`ToolRegistry.invoke()` 无状态，可并行化；需要保证结果顺序与 `tool_call_id` 对应。
 - **工具权限与沙箱**：由宿主在注册工具时封装（`server/agent_dev_tools.py` 即是这一层）。
@@ -555,8 +656,9 @@ dashboard ── POST /agent ──▶ server（鉴权 / SSE / 会话存储）
 - 单元测试不联网：`FakeProvider` 脚本化模型响应，`InMemorySessionStore` 验证会话行为。
 - 覆盖范围：
   - `test_tools.py`：schema 生成、docstring 解析、参数校验、同步/异步调用、错误模式
-  - `test_provider_openai.py`：`tool_call.id` 保留、坏 JSON、旧式 `function_call`、usage 映射
+  - `test_provider_openai.py`：`tool_call.id` 保留、坏 JSON、旧式 `function_call`、usage 映射、流式 chunk 解析
   - `test_runtime.py` / `test_arun.py`：完整 ReAct 往返、多轮工具、最大轮数、异常持久化、事件顺序
+  - `test_streaming.py`：文本增量顺序、tool_call 分片重组、无流式 Provider 的降级、无文本回合
   - `test_context.py`：system prompt、历史恢复、裁剪边界、持久化完整性
   - `test_session_memory.py` / `test_session_postgres.py`：会话 CRUD、seq、metadata 合并、DDL 幂等；真实 Postgres 集成测试由 `BOKACLAW_AGENT_TEST_DSN` 开启
 - 本地命令见 [`agent-loop/AGENTS.md`](../../agent-loop/AGENTS.md)：`ruff check`、`ruff format --check`、`pytest`。
