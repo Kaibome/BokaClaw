@@ -2,6 +2,7 @@
 # Start Postgres + BokaClaw server + dashboard as three containers.
 # Generates server/.env with random secrets when it is missing.
 # Recreate the server/dashboard containers with RECREATE=1 to pick up new images.
+# The agent workspace is bind-mounted from $WORKSPACE_HOST so files survive re-creation.
 set -euo pipefail
 
 REPO_ROOT=$(cd "$(dirname "$0")/../../../.." && pwd)
@@ -21,6 +22,8 @@ PG_PORT=${PG_PORT:-8432}
 API_PORT=${API_PORT:-8000}
 DASHBOARD_PORT=${DASHBOARD_PORT:-3000}
 API_PUBLIC_URL=${API_PUBLIC_URL:-http://localhost:${API_PORT}}
+# Agent file tools write here; bind-mounted so files survive container re-creation.
+WORKSPACE_HOST=${WORKSPACE_HOST:-/Users/pankaibo/BokaClaw/workspace}
 
 log() { printf '==> %s\n' "$*"; }
 
@@ -74,6 +77,8 @@ POSTGRES_USER=${POSTGRES_USER:-postgres}
 POSTGRES_DB=${POSTGRES_DB:-postgres}
 : "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in $ENV_FILE}"
 INSTANCE_NAME=${NEXT_PUBLIC_INSTANCE_NAME:-BokaClaw}
+WORKSPACE_CONTAINER=${AGENT_WORKSPACE_ROOT:-/app/workspace}
+mkdir -p "$WORKSPACE_HOST"
 
 docker image inspect "$SERVER_IMAGE" >/dev/null 2>&1 || {
   echo "error: image $SERVER_IMAGE not found; run bokaclaw-docker-stack/scripts/build-images.sh first." >&2
@@ -145,6 +150,7 @@ else
     --add-host host.docker.internal:host-gateway \
     -p "${API_PORT}:8000" \
     -v "${HISTORY_VOLUME}:/app/history" \
+    -v "${WORKSPACE_HOST}:${WORKSPACE_CONTAINER}" \
     "$SERVER_IMAGE" uvicorn main:app --host 0.0.0.0 --port 8000 >/dev/null
 fi
 
@@ -187,3 +193,4 @@ log "stack is ready"
 printf '    Dashboard: %s\n' "http://localhost:${DASHBOARD_PORT}"
 printf '    API:       %s\n' "$API_PUBLIC_URL"
 printf '    Postgres:  localhost:%s\n' "$PG_PORT"
+printf '    Workspace: %s -> %s\n' "$WORKSPACE_HOST" "$WORKSPACE_CONTAINER"

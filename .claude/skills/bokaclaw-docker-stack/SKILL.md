@@ -124,6 +124,12 @@ Postgres, **synchronises the Postgres password with `.env`**, idempotently
 adds the bridge rule to `pg_hba.conf`, runs `alembic upgrade head`, starts the
 server and dashboard, then waits for `/openapi.json` and `/api/health`.
 
+The agent workspace (`AGENT_WORKSPACE_ROOT`, default `/app/workspace`) is
+bind-mounted from `WORKSPACE_HOST`, default `/Users/pankaibo/BokaClaw/workspace`.
+Override it for another machine: `WORKSPACE_HOST=/path/to/workspace
+scripts/start-stack.sh`. Files written by the agent survive `RECREATE=1`
+because they live on the host, not in the container layer.
+
 Manual container commands are in `references/env-and-volumes.md` if the script
 fails and you need to isolate a step.
 
@@ -139,8 +145,10 @@ field meanings: `references/env-and-volumes.md`. Minimum for this stack:
   `MEM0_DEFAULT_EMBEDDER_MODEL=BAAI/bge-small-zh-v1.5`,
   `MEM0_DEFAULT_EMBEDDING_DIMS=512`, `HF_ENDPOINT=https://hf-mirror.com`)
   when reusing the 512-dim volume
-- `AGENT_LOOP_MOCK=true` for UI-only tests; real replies need `OPENAI_API_KEY`
-  and `AGENT_LOOP_MOCK=false`
+- `AGENT_LOOP_MOCK=true` for UI-only tests; real replies need
+  `AGENT_LOOP_MOCK=false` plus `AGENT_MODEL` / `AGENT_API_KEY` / `AGENT_BASE_URL`
+  (DeepSeek: `deepseek-flash`, `https://api.deepseek.com`)
+- `AGENT_WORKSPACE_ROOT=/app/workspace`, bind-mounted from `WORKSPACE_HOST`
 
 ### Reusing the old all-in-one volume
 

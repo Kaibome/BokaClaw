@@ -45,9 +45,13 @@ AGENT_LOOP_MAX_SECONDS=300
 AGENT_LOOP_HISTORY_MESSAGES=40
 AGENT_MAX_ITERATIONS=10
 AGENT_DEV_TOOLS=true
-AGENT_WORKSPACE_ROOT=/app/workspace
+AGENT_WORKSPACE_ROOT=/app/workspace   # bind-mounted from WORKSPACE_HOST
 AGENT_TOOLS_ALLOW_SHELL=false
 ```
+
+`start-stack.sh` creates `WORKSPACE_HOST` (default
+`/Users/pankaibo/BokaClaw/workspace`) and mounts it at `AGENT_WORKSPACE_ROOT`.
+Agent `Write` / `Edit` / `NotebookEdit` cannot escape that directory.
 
 When `POSTGRES_HOST` is set for a container run, it is overridden with
 `-e POSTGRES_HOST=bokaclaw-postgres`; the value in the file is only a default
@@ -76,6 +80,7 @@ docker run -d --name bokaclaw-server --network bokaclaw-net --restart unless-sto
   --env-file server/.env -e POSTGRES_HOST=bokaclaw-postgres -e POSTGRES_PORT=5432 \
   --add-host host.docker.internal:host-gateway \
   -p 8000:8000 -v mem0-local-history:/app/history \
+  -v /Users/pankaibo/BokaClaw/workspace:/app/workspace \
   bokaclaw-server:test uvicorn main:app --host 0.0.0.0 --port 8000
 
 docker run -d --name bokaclaw-dashboard --network bokaclaw-net --restart unless-stopped \
@@ -105,6 +110,7 @@ from `POSTGRES_DB`.
 |---|---|---|
 | `mem0-local-pg` | `/var/lib/postgresql/data` | The whole PG 17 cluster (both databases, `pgvector` extension, memories) |
 | `mem0-local-history` | `/app/history` | `history.db`, the mem0 message history SQLite file |
+| `/Users/pankaibo/BokaClaw/workspace` (host bind, `WORKSPACE_HOST`) | `AGENT_WORKSPACE_ROOT` (`/app/workspace`) | Files written by the agent's `Write` / `Edit` / `NotebookEdit` tools; survives container re-creation |
 
 `docker rm` does not delete volumes. `docker volume rm mem0-local-pg` **does**,
 and it wipes memories, users and conversations. Never run it without an
