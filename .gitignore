@@ -6,6 +6,7 @@ __pycache__/
 
 # Self-hosted server local runtime state
 server/history/
+server/workspace/
 server/.env
 
 # C extensions
@@ -58,6 +59,7 @@ coverage.xml
 *.py,cover
 .hypothesis/
 .pytest_cache/
+.ruff_cache/
 cover/
 
 # Translations

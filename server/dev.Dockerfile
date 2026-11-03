@@ -18,6 +18,11 @@ COPY README.md .
 COPY mem0 ./mem0
 RUN pip install -e .[graph]
 
+# Agent runtime used by POST /agent. Installed non-editable under /opt because
+# the compose command wipes /app/packages at startup.
+COPY agent-loop /opt/agent-loop
+RUN pip install --no-cache-dir /opt/agent-loop
+
 # Return to app directory and copy server code
 WORKDIR /app
 COPY server .

@@ -4,12 +4,14 @@ WORKDIR /app
 
 # Dependencies
 FROM base AS deps
+ARG NPM_REGISTRY=https://registry.npmjs.org
+ENV COREPACK_NPM_REGISTRY=${NPM_REGISTRY}
 COPY package.json yarn.lock* package-lock.json* pnpm-lock.yaml* ./
 RUN \
   if [ -f yarn.lock ]; then yarn --frozen-lockfile --network-timeout 600000; \
-  elif [ -f package-lock.json ]; then npm ci; \
-  elif [ -f pnpm-lock.yaml ]; then corepack enable pnpm && pnpm i; \
-  else npm install; \
+  elif [ -f package-lock.json ]; then npm ci --registry="${NPM_REGISTRY}"; \
+  elif [ -f pnpm-lock.yaml ]; then corepack enable pnpm && pnpm i --registry="${NPM_REGISTRY}"; \
+  else npm install --registry="${NPM_REGISTRY}"; \
   fi
 
 # Build

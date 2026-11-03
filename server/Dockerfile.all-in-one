@@ -59,6 +59,10 @@ WORKDIR /app
 COPY server/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# In-process agent runtime used by POST /agent.
+COPY agent-loop /opt/agent-loop
+RUN pip install --no-cache-dir /opt/agent-loop
+
 # Pre-download the bundled Chinese embedding model (~90 MB, ONNX/CPU) so the
 # first request does not wait on Hugging Face. If the mirror is unreachable the
 # build still succeeds and the model is fetched on first use instead.

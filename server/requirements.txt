@@ -26,3 +26,10 @@ posthog>=3.0,<8.0
 
 # Per-IP rate limiting on auth endpoints
 slowapi>=0.1.9,<1.0
+
+# Agent chat: HTTP client for an optional remote executor (AGENT_LOOP_URL).
+# The default in-process runtime is installed from ../agent-loop by the Dockerfiles.
+httpx>=0.27,<1.0
+
+# Agent Read tool: extract text from PDFs. Pure Python, no system libraries.
+pypdf>=5.0,<7.0

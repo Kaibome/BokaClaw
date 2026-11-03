@@ -33,6 +33,38 @@ export interface ApiRequestLog {
   auth_type: string;
 }
 
+export type ChatRole = "user" | "assistant" | "system" | "tool";
+export type MessageStatus = "completed" | "cancelled" | "failed";
+
+export interface Conversation {
+  id: string;
+  title: string;
+  agent_id: string | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChatMessage {
+  id: string;
+  conversation_id: string;
+  role: ChatRole;
+  content: string;
+  status: MessageStatus;
+  metadata: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface ConversationDetail extends Conversation {
+  messages: ChatMessage[];
+}
+
+export interface AgentInvokeResponse {
+  conversation: Conversation;
+  user_message: ChatMessage;
+  message: ChatMessage;
+}
+
 export type EntityType = "user" | "agent" | "run";
 
 export interface Entity {

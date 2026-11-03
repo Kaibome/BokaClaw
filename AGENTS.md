@@ -30,6 +30,7 @@ This is a polyglot monorepo and **every package sets its own rules**. Read the `
 | `mem0-ts/` | [`mem0-ts/AGENTS.md`](mem0-ts/AGENTS.md) | pnpm, tsup, Prettier, jest |
 | `cli/python/` | [`cli/python/AGENTS.md`](cli/python/AGENTS.md) | ruff **100**, pytest |
 | `cli/node/` | [`cli/node/AGENTS.md`](cli/node/AGENTS.md) | pnpm, tsup, Biome, vitest |
+| `agent-loop/` | [`agent-loop/AGENTS.md`](agent-loop/AGENTS.md) | hatch, ruff 120, pytest |
 | `integrations/` | [`integrations/AGENTS.md`](integrations/AGENTS.md) | varies per integration |
 | `server/` | [`server/AGENTS.md`](server/AGENTS.md) | Docker Compose, FastAPI |
 | `docs/` | [`docs/AGENTS.md`](docs/AGENTS.md) | Mintlify |
@@ -44,6 +45,7 @@ This is a polyglot monorepo and **every package sets its own rules**. Read the `
 | `mem0-ts/` | TypeScript SDK (`mem0ai` on npm): hosted client + OSS memory |
 | `cli/python/` | Python CLI (`mem0-cli` on PyPI), Typer-based, entry point `mem0` |
 | `cli/node/` | Node CLI (`@mem0/cli` on npm), Commander-based, entry point `mem0` |
+| `agent-loop/` | Standalone Python SDK (`bokaclaw-agent`): ReAct agent runtime with tool execution and Postgres session persistence |
 | `integrations/` | Agent and editor integrations, one self-contained directory each |
 | `server/` | FastAPI REST server for self-hosted Mem0 (Docker: FastAPI + pgvector + Neo4j) |
 | `skills/` | Claude Code skill definitions, published by raw URL |

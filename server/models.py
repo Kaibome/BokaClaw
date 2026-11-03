@@ -1,7 +1,8 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import CheckConstraint, DateTime, Float, ForeignKey, Index, Integer, String, Text, text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from db import Base
@@ -72,3 +73,52 @@ class Settings(Base):
         default=_utcnow,
         onupdate=_utcnow,
     )
+
+
+class Conversation(Base):
+    __tablename__ = "conversations"
+    __table_args__ = (Index("ix_conversations_created_by_updated", "created_by", "updated_at"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=_new_uuid)
+    # The dashboard account that owns this conversation. Distinct from the
+    # mem0 `user_id` memory scope, which is passed to the agent executor.
+    created_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    title: Mapped[str] = mapped_column(String(200))
+    agent_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # `metadata` is reserved by SQLAlchemy's declarative base, so map `meta`.
+    meta: Mapped[dict] = mapped_column(
+        "metadata",
+        JSONB,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+
+class ConversationMessage(Base):
+    __tablename__ = "conversation_messages"
+    __table_args__ = (
+        Index("ix_conversation_messages_conversation_created", "conversation_id", "created_at"),
+        CheckConstraint(
+            "role IN ('user', 'assistant', 'system', 'tool')",
+            name="ck_conversation_messages_role",
+        ),
+        CheckConstraint(
+            "status IN ('completed', 'cancelled', 'failed')",
+            name="ck_conversation_messages_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=_new_uuid)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("conversations.id", ondelete="CASCADE"))
+    role: Mapped[str] = mapped_column(String(20))
+    content: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(20), default="completed")
+    meta: Mapped[dict] = mapped_column(
+        "metadata",
+        JSONB,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)

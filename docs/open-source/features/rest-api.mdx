@@ -79,7 +79,8 @@ docker pull mem0/mem0-api-server
       </Tab>
       <Tab title="Build locally">
 ```bash
-docker build -t mem0-api-server .
+# From the repository root, so the image can install agent-loop/ for the agent runtime.
+docker build -f server/Dockerfile -t mem0-api-server .
 ```
       </Tab>
     </Tabs>
@@ -308,7 +309,60 @@ All `/api-keys` endpoints require a JWT.
 | `GET` | `/entities` | Distinct `user_id` / `agent_id` / `run_id` values with memory counts |
 | `DELETE` | `/entities/{entity_type}/{entity_id}` | Cascade-delete all memories for an entity; `entity_type` is `user`, `agent`, or `run` |
 
-The `/auth/*`, `/api-keys`, `/requests`, and `/entities` routes are new to the self-hosted server and primarily back the dashboard, but you can call them directly from your own tooling.
+### Agent chat
+
+`POST /agent` runs one ReAct turn in-process with the bundled
+`bokaclaw-agent` runtime and stores the conversation in the app database.
+The runtime reuses the LLM configured for mem0 when its provider is `openai`
+or `deepseek`, so `OPENAI_API_KEY` or `DEEPSEEK_API_KEY` is enough. For any
+other OpenAI-compatible endpoint, set `AGENT_MODEL`, `AGENT_API_KEY`, and
+`AGENT_BASE_URL`. If no model can be resolved, the endpoint returns `503`
+with `code: "agent_not_configured"`.
+
+Two memory tools are scoped to the signed-in user: `search_memories` and
+`save_memory`. The agent also gets Claude Code-style developer tools:
+`Read`, `Write`, `Edit`, `NotebookEdit`, `Glob`, `Grep`, and `WebFetch`.
+`Bash`, `PowerShell`, and `Monitor` are registered only when
+`AGENT_TOOLS_ALLOW_SHELL=true`; they have no OS-level sandbox. File tools are
+confined to `AGENT_WORKSPACE_ROOT` and reject `..` or symlink escapes. Set
+`AGENT_DEV_TOOLS=false` to disable the developer tools entirely.
+
+Set `AGENT_LOOP_URL` to delegate the turn to an external executor instead
+(base URL, no `/invoke` suffix). Set `AGENT_LOOP_MOCK=true` to stream a canned
+reply for local UI work.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/agent` | Run one turn; `stream: true` returns SSE, otherwise JSON. Rate limited to 30/minute |
+| `GET` | `/conversations` | List the caller's conversations, most recently updated first |
+| `POST` | `/conversations` | Create an empty conversation |
+| `GET` | `/conversations/{id}` | Conversation with its messages |
+| `PUT` | `/conversations/{id}` | Rename a conversation |
+| `DELETE` | `/conversations/{id}` | Delete a conversation and its messages |
+| `GET` | `/conversations/{id}/messages` | Paginated messages |
+
+Conversations are scoped to the authenticated account: another user's
+conversation returns `404`, not `403`. The `user_id` used for agent memory is
+the account UUID, so agent memory and the Memories page share a scope.
+
+```bash
+curl -N -X POST http://localhost:8888/agent \
+  -H "X-API-Key: $ADMIN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{"message": "What did I save about the launch?", "stream": true}'
+```
+
+The stream emits `meta` (conversation and stored user message),
+`message.delta` (incremental text), `message.completed` (the stored
+assistant message), and `done`. Failures emit `error` with a `code` of
+`agent_unreachable`, `agent_timeout`, `agent_upstream_error`,
+`agent_protocol_error`, or `conversation_deleted` before `done`. Use `fetch`
+with a streaming body rather than `EventSource`, which cannot send the
+`Authorization` header. The runtime and its tool/session API are documented
+in `agent-loop/README.md` in the server repository.
+
+The `/auth/*`, `/api-keys`, `/requests`, `/entities`, `/agent`, and `/conversations` routes are new to the self-hosted server and primarily back the dashboard, but you can call them directly from your own tooling.
 
 ---
 

@@ -112,10 +112,83 @@ Once logged in, the dashboard exposes:
 
 - **Requests** — live audit log of API calls (method, path, status, latency).
 - **Memories** — browse memories, filter by user ID.
+- **Agent** — chat with the agent runtime. Conversations and messages are stored in the app database.
 - **Entities** — list every `user_id`, `agent_id`, and `run_id` that owns memories, with counts. Delete an entity to cascade-delete its memories.
 - **API Keys** — create, label, and revoke per-user keys.
 - **Configuration** — runtime LLM and embedder override. Changes persist to the app database and reapply on restart, layered over the values from your `.env`.
 - **Settings** — account profile and password.
+
+## Agent chat
+
+`POST /agent` runs one agent turn for the signed-in user with the bundled
+[`bokaclaw-agent`](../agent-loop/README.md) ReAct runtime, in-process. The
+runtime reuses the LLM configured for mem0 (provider `openai` or `deepseek`),
+so `OPENAI_API_KEY` or `DEEPSEEK_API_KEY` is enough; set `AGENT_MODEL` /
+`AGENT_API_KEY` / `AGENT_BASE_URL` to use another OpenAI-compatible endpoint.
+Two memory tools are exposed to the model, both scoped to the signed-in user's
+UUID: `search_memories` and `save_memory`. The Claude Code-style developer
+tools are also registered by default: `Read`, `Write`, `Edit`, `NotebookEdit`,
+`Glob`, `Grep`, and `WebFetch`. `Bash`, `PowerShell`, and `Monitor` are added
+only when `AGENT_TOOLS_ALLOW_SHELL=true`.
+
+File paths are resolved inside `AGENT_WORKSPACE_ROOT`, and `..` or symlink
+escapes are rejected. There is **no OS-level sandbox** for the shell tools:
+once enabled, they can reach everything the server process can, including
+`.env` and database credentials. Keep shell access off unless the deployment
+is fully trusted, and mount a volume at the workspace root if the files must
+survive a container restart. `AGENT_DEV_TOOLS=false` removes the whole
+developer tool set.
+
+The server stores both sides of the conversation and is the only writer; the
+browser never talks to the model directly. Conversations are managed through
+`/conversations` (list, create, rename, delete, messages). Set `AGENT_LOOP_URL`
+to delegate the turn to an external executor over HTTP instead.
+
+```bash
+curl -N -X POST http://localhost:8888/agent \
+  -H "X-API-Key: $ADMIN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{"message": "What did I save about the launch?", "stream": true}'
+```
+
+The stream emits `meta`, `message.delta`, `message.completed`, and `done`,
+with `error` before `done` on failure. Omit `"stream": true` to get a single
+JSON response instead. Requests are rate limited to 30/minute per IP.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `AGENT_MODEL` | mem0's LLM model | Override the model used for agent turns. |
+| `AGENT_API_KEY` | mem0's provider key | Override the API key. |
+| `AGENT_BASE_URL` | provider default | OpenAI-compatible base URL (Qwen, vLLM, Ollama, OpenRouter, ...). |
+| `AGENT_SYSTEM_PROMPT` | built-in prompt | Replace the system prompt. |
+| `AGENT_MAX_ITERATIONS` | `10` | ReAct steps before the turn fails. |
+| `AGENT_TEMPERATURE` | `0.2` | Sampling temperature. |
+| `AGENT_MAX_TOKENS` | provider default | Max tokens per model call. |
+| `AGENT_REQUEST_TIMEOUT_SECONDS` | `60` | Timeout for one model call. |
+| `AGENT_MAX_RETRIES` | `2` | Model client retries. |
+| `AGENT_DEV_TOOLS` | `true` | Register the developer tool set. |
+| `AGENT_WORKSPACE_ROOT` | `/app/workspace` | File tools cannot escape this directory. Created on first use. |
+| `AGENT_TOOLS_ALLOW_SHELL` | `false` | Register `Bash`, `PowerShell`, and `Monitor`. No OS sandbox. |
+| `AGENT_TOOL_TIMEOUT_SECONDS` | `120` | Maximum runtime for one command. |
+| `AGENT_TOOL_MAX_OUTPUT_BYTES` | `200000` | Output cap per command or fetch. |
+| `AGENT_TOOL_MAX_FILE_BYTES` | `2000000` | Largest file the file tools will read or write. |
+| `AGENT_WEB_FETCH_TIMEOUT_SECONDS` | `30` | `WebFetch` request timeout. |
+| `AGENT_WEB_FETCH_MAX_BYTES` | `1000000` | `WebFetch` download cap. |
+| `AGENT_WEB_FETCH_ALLOW_PRIVATE` | `false` | Allow `WebFetch` to reach localhost / private networks. |
+| `AGENT_LOOP_URL` | — | External executor base URL, without `/invoke`. Takes precedence over the in-process runtime. |
+| `AGENT_LOOP_API_KEY` | — | Sent as `Authorization: Bearer ...` to the external executor. |
+| `AGENT_LOOP_MOCK` | `false` | Stream a canned reply for local UI work. |
+| `AGENT_LOOP_CONNECT_TIMEOUT_SECONDS` | `5` | Executor connect timeout. |
+| `AGENT_LOOP_READ_TIMEOUT_SECONDS` | `120` | Executor read timeout. |
+| `AGENT_LOOP_MAX_SECONDS` | `300` | Total wall clock for one turn. |
+| `AGENT_LOOP_HISTORY_MESSAGES` | `40` | Prior turns forwarded as context. |
+
+If no model can be resolved, `POST /agent` returns 503 `agent_not_configured`;
+set `AGENT_MODEL` (plus `AGENT_BASE_URL` for non-OpenAI providers). From inside
+the compose network, an external executor running on the host is reachable at
+`http://host.docker.internal:<port>`. The external executor contract is
+documented in [`../agent-loop/README.md`](../agent-loop/README.md).
 
 ## Telemetry
 
