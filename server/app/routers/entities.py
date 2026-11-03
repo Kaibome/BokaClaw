@@ -2,12 +2,12 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Any, Literal, Optional
 
-from auth import require_admin, verify_auth
-from errors import upstream_error
+from app.core.auth import require_admin, verify_auth
+from app.core.errors import upstream_error
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
-from schemas import MessageResponse
-from server_state import get_memory_instance
+from app.schemas import MessageResponse
+from app.core.server_state import get_memory_instance
 
 router = APIRouter(prefix="/entities", tags=["entities"])
 

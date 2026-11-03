@@ -5,9 +5,15 @@ import sys
 
 from sqlalchemy import select
 
-from auth import hash_password
-from db import SessionLocal
-from models import User
+# Allow `python scripts/<name>.py` from a checkout without PYTHONPATH.
+_SERVER_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _SERVER_DIR not in sys.path:
+    sys.path.insert(0, _SERVER_DIR)
+
+
+from app.core.auth import hash_password  # noqa: E402
+from app.core.db import SessionLocal  # noqa: E402
+from app.models import User  # noqa: E402
 
 MIN_PASSWORD_LENGTH = 8
 

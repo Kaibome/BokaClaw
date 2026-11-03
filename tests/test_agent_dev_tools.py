@@ -1,4 +1,4 @@
-"""Tests for the Claude Code-style developer tools in `server/agent_dev_tools.py`."""
+"""Tests for the Claude Code-style developer tools in `server/app/agent/dev_tools.py`."""
 
 import json
 import os
@@ -14,7 +14,7 @@ _SERVER_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "server")
 if _SERVER_DIR not in sys.path:
     sys.path.insert(0, _SERVER_DIR)
 
-from agent_dev_tools import DevToolConfig, build_dev_tools, load_dev_tool_config  # noqa: E402
+from app.agent.dev_tools import DevToolConfig, build_dev_tools, load_dev_tool_config  # noqa: E402
 
 
 class FakeTool:

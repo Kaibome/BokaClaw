@@ -3,10 +3,10 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-from db import Base, _build_database_url
+from app.core.db import Base, _build_database_url
 
 # Import models so Base.metadata picks up all tables
-import models  # noqa: F401
+from app import models  # noqa: F401
 
 config = context.config
 

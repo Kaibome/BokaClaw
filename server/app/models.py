@@ -5,7 +5,7 @@ from sqlalchemy import CheckConstraint, DateTime, Float, ForeignKey, Index, Inte
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
-from db import Base
+from app.core.db import Base
 
 
 def _utcnow() -> datetime:

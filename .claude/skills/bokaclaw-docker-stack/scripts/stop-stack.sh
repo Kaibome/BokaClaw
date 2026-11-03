@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Stop (or remove) the three local BokaClaw containers. Volumes are never touched.
+# Stop (or remove) the local BokaClaw containers. Volumes are never touched.
 # Usage: stop-stack.sh [--remove]
 set -euo pipefail
 
@@ -8,7 +8,7 @@ if [ "${1:-}" = "--remove" ]; then
   REMOVE=1
 fi
 
-CONTAINERS=${CONTAINERS:-"bokaclaw-dashboard bokaclaw-server bokaclaw-postgres"}
+CONTAINERS=${CONTAINERS:-"bokaclaw-dashboard bokaclaw-server bokaclaw-executor bokaclaw-postgres"}
 
 for name in $CONTAINERS; do
   if ! docker container inspect "$name" >/dev/null 2>&1; then

@@ -19,16 +19,16 @@ from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy.exc import DataError  # noqa: E402
 
-# server/ modules use bare imports (from auth import ...), so the server
-# directory itself must be importable, mirroring how it runs in Docker.
+# server/ code uses absolute `app.*` imports, so the server directory must be
+# on sys.path, mirroring how it runs in Docker.
 _SERVER_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "server")
 if _SERVER_DIR not in sys.path:
     sys.path.insert(0, _SERVER_DIR)
 
-from auth import require_auth  # noqa: E402
-from db import get_db  # noqa: E402
-from models import User  # noqa: E402
-from routers import api_keys as api_keys_router  # noqa: E402
+from app.core.auth import require_auth  # noqa: E402
+from app.core.db import get_db  # noqa: E402
+from app.models import User  # noqa: E402
+from app.routers import api_keys as api_keys_router  # noqa: E402
 
 
 class _RaisingSession:

@@ -215,7 +215,7 @@ Events: `run_started`, `model_request`, `model_response`, `tool_call`, `tool_res
 
 The dashboard's Agent page never talks to this package directly. It calls
 `POST /agent` on the BokaClaw server, and the server runs one turn in-process
-through `server/agent_runtime.py` (the Docker images install this package from
+through `server/app/agent/runtime.py` (the Docker images install this package from
 `agent-loop/`). The server owns conversation persistence and passes history
 explicitly, so the runtime is used without a `SessionStore`.
 

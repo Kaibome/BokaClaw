@@ -596,7 +596,7 @@ CREATE TABLE IF NOT EXISTS bokaclaw_agent_messages (
 
 ## 12. 与 `server/` 的集成关系
 
-`server/agent_runtime.py` 在**同一进程内**创建 SDK Runtime，但采用与独立使用不同的持久化策略：
+`server/app/agent/runtime.py` 在**同一进程内**创建 SDK Runtime，但采用与独立使用不同的持久化策略：
 
 ```text
 dashboard ── POST /agent ──▶ server（鉴权 / SSE / 会话存储）
@@ -644,7 +644,7 @@ dashboard ── POST /agent ──▶ server（鉴权 / SSE / 会话存储）
 - **边收流边执行工具调用**：当前必须等 tool_call 的 `arguments` 分片全部到齐、解析成功后才执行；要做增量执行，需要按 `index` 维护可解析状态。
 - **上下文压缩 / 自动摘要**：`ContextManager.build()` 是唯一模型视图入口，可替换为摘要策略。
 - **并行工具执行**：`ToolRegistry.invoke()` 无状态，可并行化；需要保证结果顺序与 `tool_call_id` 对应。
-- **工具权限与沙箱**：由宿主在注册工具时封装（`server/agent_dev_tools.py` 即是这一层）。
+- **工具权限与沙箱**：由宿主在注册工具时封装（`server/app/agent/dev_tools.py` 即是这一层）。
 - **MCP / WebSearch / LSP**：属于工具生态，可按需注册为普通 Tool。
 - **重试与退避策略**：目前依赖模型客户端自身的 `max_retries`。
 - **可观测性指标**：事件流已具备，可桥接到 OpenTelemetry / 日志系统。

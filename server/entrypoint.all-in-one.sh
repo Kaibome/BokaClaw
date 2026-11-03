@@ -152,7 +152,7 @@ DASH_PID=$!
 
 log "starting API on :8000"
 cd /app
-uvicorn main:app --host 0.0.0.0 --port 8000 &
+uvicorn app.main:app --host 0.0.0.0 --port 8000 &
 API_PID=$!
 
 cleanup() {

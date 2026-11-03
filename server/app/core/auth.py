@@ -3,11 +3,11 @@ import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from db import SessionLocal
+from app.core.db import SessionLocal
 from fastapi import Depends, HTTPException, Request
 from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
-from models import APIKey, RefreshTokenJti, User
+from app.models import APIKey, RefreshTokenJti, User
 from passlib.context import CryptContext
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
@@ -191,7 +191,12 @@ async def require_auth(
 
 
 _BOOTSTRAP_ADMIN = User(
-    id=uuid.UUID(int=0), name="admin_api_key", email="", password_hash="", role="admin", created_at=datetime.min.replace(tzinfo=timezone.utc),
+    id=uuid.UUID(int=0),
+    name="admin_api_key",
+    email="",
+    password_hash="",
+    role="admin",
+    created_at=datetime.min.replace(tzinfo=timezone.utc),
 )
 
 

@@ -132,12 +132,20 @@ tools are also registered by default: `Read`, `Write`, `Edit`, `NotebookEdit`,
 only when `AGENT_TOOLS_ALLOW_SHELL=true`.
 
 File paths are resolved inside `AGENT_WORKSPACE_ROOT`, and `..` or symlink
-escapes are rejected. There is **no OS-level sandbox** for the shell tools:
-once enabled, they can reach everything the server process can, including
-`.env` and database credentials. Keep shell access off unless the deployment
-is fully trusted, and mount a volume at the workspace root if the files must
-survive a container restart. `AGENT_DEV_TOOLS=false` removes the whole
-developer tool set.
+escapes are rejected. Shell tools are best run in the bundled executor
+container. Set `AGENT_EXECUTOR_URL` (for the local stack:
+`http://bokaclaw-executor:8099`) and `Bash`, `PowerShell`, and `Monitor` are
+delegated to `server/app/agent/executor_app.py` there. That container mounts only the
+workspace read-write at `AGENT_WORKSPACE_ROOT`, uses a read-only root
+filesystem (so `/app`, the bundled source, is readable but immutable), runs as
+UID 1000 with all capabilities dropped, and sits on an internal Docker network
+with no route to the internet or the other containers. Commands get a
+sanitised environment, so API keys and database credentials are not visible.
+
+Leaving `AGENT_EXECUTOR_URL` empty keeps the old behaviour: commands run inside
+the server process, where there is **no OS-level sandbox** and the shell can
+reach `.env` and database credentials. `AGENT_DEV_TOOLS=false` removes the
+whole developer tool set.
 
 The server stores both sides of the conversation and is the only writer; the
 browser never talks to the model directly. Conversations are managed through
@@ -169,7 +177,10 @@ JSON response instead. Requests are rate limited to 30/minute per IP.
 | `AGENT_MAX_RETRIES` | `2` | Model client retries. |
 | `AGENT_DEV_TOOLS` | `true` | Register the developer tool set. |
 | `AGENT_WORKSPACE_ROOT` | `/app/workspace` | File tools cannot escape this directory. Created on first use. |
-| `AGENT_TOOLS_ALLOW_SHELL` | `false` | Register `Bash`, `PowerShell`, and `Monitor`. No OS sandbox. |
+| `AGENT_TOOLS_ALLOW_SHELL` | `false` | Register `Bash`, `PowerShell`, and `Monitor`. |
+| `AGENT_EXECUTOR_URL` | — | Base URL of the sandboxed executor; empty runs shell tools in-process. |
+| `AGENT_EXECUTOR_TOKEN` | — | Bearer token sent to the executor. |
+| `AGENT_EXECUTOR_TIMEOUT_SECONDS` | `120` | HTTP timeout for executor requests. |
 | `AGENT_TOOL_TIMEOUT_SECONDS` | `120` | Maximum runtime for one command. |
 | `AGENT_TOOL_MAX_OUTPUT_BYTES` | `200000` | Output cap per command or fetch. |
 | `AGENT_TOOL_MAX_FILE_BYTES` | `2000000` | Largest file the file tools will read or write. |

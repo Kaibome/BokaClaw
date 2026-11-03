@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import select
 
-from agent_loop import (
+from app.agent.loop import (
     AgentCompleted,
     AgentDelta,
     AgentLoopError,
@@ -19,8 +19,8 @@ from agent_loop import (
     sse_event,
     stream_agent,
 )
-from agent_schemas import AgentInvokeRequest, AgentInvokeResponse, ConversationMessageOut, ConversationOut
-from agent_store import (
+from app.agent.schemas import AgentInvokeRequest, AgentInvokeResponse, ConversationMessageOut, ConversationOut
+from app.agent.store import (
     DEFAULT_TITLE,
     append_message,
     build_history,
@@ -31,11 +31,11 @@ from agent_store import (
     serialize_conversation,
     serialize_message,
 )
-from auth import require_auth
-from db import SessionLocal
-from errors import request_id_var
-from models import Conversation, User
-from rate_limit import limiter
+from app.core.auth import require_auth
+from app.core.db import SessionLocal
+from app.core.errors import request_id_var
+from app.models import Conversation, User
+from app.core.rate_limit import limiter
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 

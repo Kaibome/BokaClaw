@@ -36,8 +36,13 @@ echo "==> results: server=$server_status dashboard=$dashboard_status"
 
 fail=0
 if [ "$server_status" = "0" ]; then
+  # Importing app.main needs a full runtime env (JWT_SECRET, model credentials,
+  # a reachable Postgres); compile the package instead and import the modules
+  # that have no import-time side effects.
   docker run --rm --entrypoint python "$SERVER_IMAGE" \
-    -c 'import fastapi, httpx, sqlalchemy, alembic, bokaclaw_agent; print("server-ok")' || fail=1
+    -c 'import compileall, sys; sys.exit(0 if compileall.compile_dir("/app/app", quiet=1) else 1)' || fail=1
+  docker run --rm --entrypoint python "$SERVER_IMAGE" \
+    -c 'import fastapi, httpx, sqlalchemy, alembic, bokaclaw_agent, app.agent.executor, app.core.auth; print("server-ok")' || fail=1
 elif [ "$server_status" != "skipped" ]; then
   fail=1
 fi

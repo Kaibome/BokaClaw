@@ -7,7 +7,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from auth import (
+from app.core.auth import (
     consume_refresh_jti,
     create_access_token,
     create_refresh_token,
@@ -17,11 +17,11 @@ from auth import (
     require_auth,
     verify_password,
 )
-from db import get_db
-from models import User
-from rate_limit import limiter
-from schemas import MessageResponse
-from telemetry import capture_admin_registered, capture_onboarding_completed
+from app.core.db import get_db
+from app.models import User
+from app.core.rate_limit import limiter
+from app.schemas import MessageResponse
+from app.core.telemetry import capture_admin_registered, capture_onboarding_completed
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 

@@ -62,7 +62,7 @@ def _load_overrides() -> Dict[str, Any]:
     try:
         if _session_factory is None:
             return {}
-        from models import Settings
+        from app.models import Settings
 
         session = _session_factory()
         try:
@@ -80,7 +80,7 @@ def _save_overrides(overrides: Dict[str, Any]) -> None:
     try:
         if _session_factory is None:
             return
-        from models import Settings
+        from app.models import Settings
         from sqlalchemy.dialects.postgresql import insert
 
         session = _session_factory()

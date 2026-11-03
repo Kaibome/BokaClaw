@@ -1,4 +1,4 @@
-"""Tests for the in-process agent runtime wrapper in `server/agent_runtime.py`.
+"""Tests for the in-process agent runtime wrapper in `server/app/agent/runtime.py`.
 
 The ``bokaclaw-agent`` SDK is replaced with a fake, so these tests cover the
 server-side contract only: model resolution from mem0/env, payload validation,
@@ -15,8 +15,8 @@ _SERVER_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "server")
 if _SERVER_DIR not in sys.path:
     sys.path.insert(0, _SERVER_DIR)
 
-import agent_runtime  # noqa: E402
-from agent_events import AgentCompleted, AgentDelta, AgentLoopError  # noqa: E402
+import app.agent.runtime as agent_runtime  # noqa: E402
+from app.agent.events import AgentCompleted, AgentDelta, AgentLoopError  # noqa: E402
 
 
 class FakeMaxIterationsExceeded(Exception):
@@ -327,7 +327,7 @@ def test_memory_tools_are_scoped_to_the_user(monkeypatch):
             return {"results": []}
 
     fake_server_state = types.SimpleNamespace(get_memory_instance=lambda: FakeMemory())
-    monkeypatch.setitem(sys.modules, "server_state", fake_server_state)
+    monkeypatch.setitem(sys.modules, "app.core.server_state", fake_server_state)
 
     sdk = FakeSDK()
     tools = agent_runtime._memory_tools(sdk, "user-1")

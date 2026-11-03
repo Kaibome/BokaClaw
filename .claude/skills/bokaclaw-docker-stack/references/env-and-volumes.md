@@ -47,11 +47,21 @@ AGENT_MAX_ITERATIONS=10
 AGENT_DEV_TOOLS=true
 AGENT_WORKSPACE_ROOT=/app/workspace   # bind-mounted from WORKSPACE_HOST
 AGENT_TOOLS_ALLOW_SHELL=false
+AGENT_EXECUTOR_URL=http://bokaclaw-executor:8099   # appended by start-stack.sh
+AGENT_EXECUTOR_TOKEN=<random>                      # appended by start-stack.sh
 ```
 
 `start-stack.sh` creates `WORKSPACE_HOST` (default
 `/Users/pankaibo/BokaClaw/workspace`) and mounts it at `AGENT_WORKSPACE_ROOT`.
 Agent `Write` / `Edit` / `NotebookEdit` cannot escape that directory.
+
+With `AGENT_EXECUTOR_URL` set, `Bash` / `PowerShell` / `Monitor` run in
+`bokaclaw-executor`, which mounts the same workspace read-write but has a
+read-only root filesystem (so `/app` is readable and immutable), runs as
+UID 1000 with all capabilities dropped, and is attached only to the internal
+`bokaclaw-exec` network. Commands get a sanitised environment, so neither the
+executor token nor the server's API keys are visible. Clear the URL to fall
+back to running shell commands inside the server process (no sandbox).
 
 When `POSTGRES_HOST` is set for a container run, it is overridden with
 `-e POSTGRES_HOST=bokaclaw-postgres`; the value in the file is only a default
@@ -64,6 +74,7 @@ step; run them from the repository root.
 
 ```bash
 docker network create bokaclaw-net          # ignore "already exists"
+docker network create --internal bokaclaw-exec   # server <-> executor only
 
 docker run -d --name bokaclaw-postgres --network bokaclaw-net --restart unless-stopped \
   --env-file server/.env -p 8432:5432 \
@@ -76,12 +87,27 @@ docker run --rm --network bokaclaw-net --env-file server/.env \
   -v mem0-local-history:/app/history \
   bokaclaw-server:test alembic upgrade head
 
+docker run -d --name bokaclaw-executor --network bokaclaw-exec --restart unless-stopped \
+  --read-only --tmpfs /tmp:rw,size=256m,mode=1777 \
+  --cap-drop ALL --security-opt no-new-privileges \
+  --pids-limit 256 --memory 1g --cpus 2 --user 1000:1000 \
+  -e AGENT_DEV_TOOLS=true -e AGENT_TOOLS_ALLOW_SHELL=true \
+  -e AGENT_WORKSPACE_ROOT=/app/workspace \
+  -e AGENT_EXECUTOR_TOKEN="$AGENT_EXECUTOR_TOKEN" -e PYTHONDONTWRITEBYTECODE=1 \
+  -v /Users/pankaibo/BokaClaw/workspace:/app/workspace \
+  bokaclaw-server:test uvicorn app.agent.executor_app:app --host 0.0.0.0 --port 8099 --no-access-log
+
 docker run -d --name bokaclaw-server --network bokaclaw-net --restart unless-stopped \
   --env-file server/.env -e POSTGRES_HOST=bokaclaw-postgres -e POSTGRES_PORT=5432 \
+  -e AGENT_EXECUTOR_URL=http://bokaclaw-executor:8099 \
+  -e AGENT_EXECUTOR_TOKEN="$AGENT_EXECUTOR_TOKEN" \
   --add-host host.docker.internal:host-gateway \
   -p 8000:8000 -v mem0-local-history:/app/history \
   -v /Users/pankaibo/BokaClaw/workspace:/app/workspace \
-  bokaclaw-server:test uvicorn main:app --host 0.0.0.0 --port 8000
+  bokaclaw-server:test uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+# the server needs both bridges to reach the executor
+docker network connect bokaclaw-exec bokaclaw-server
 
 docker run -d --name bokaclaw-dashboard --network bokaclaw-net --restart unless-stopped \
   -e NEXT_PUBLIC_API_URL=http://localhost:8000 \
@@ -100,8 +126,8 @@ is useful in development but wastes CPU in a long-running local stack.
 | `POSTGRES_DB` | `postgres` | mem0's vector collection (`memories`) and the `vector` extension |
 | `APP_DB_NAME` | `mem0_app` | Alembic tables: `users`, `api_keys`, `settings`, `request_logs`, `conversations`, `conversation_messages` |
 
-Both live in the same Postgres instance and container. `server/db.py` builds
-the SQLAlchemy URL from `APP_DB_NAME`; `server/main.py` builds the mem0 config
+Both live in the same Postgres instance and container. `server/app/core/db.py` builds
+the SQLAlchemy URL from `APP_DB_NAME`; `server/app/main.py` builds the mem0 config
 from `POSTGRES_DB`.
 
 ## Volumes

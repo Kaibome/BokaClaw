@@ -4,14 +4,15 @@ description: >
   Builds and runs BokaClaw locally in Docker: two split images
   (`bokaclaw-server:test` from the repository root, `bokaclaw-dashboard:test`
   from `dashboard/`) with fast package mirrors for the Lima/Colima VM, then
-  three containers — `bokaclaw-postgres` (pgvector/pg17), `bokaclaw-server`
-  (FastAPI, port 8000) and `bokaclaw-dashboard` (Next.js, port 3000) — on a
-  shared `bokaclaw-net` bridge, including Alembic migrations, `server/.env`
-  generation and health checks. TRIGGER when: asked to build/rebuild BokaClaw
-  images, start or stop the local frontend + backend + Postgres, run
-  migrations, reset the admin password, or debug a build stuck on package
-  downloads / a dashboard that cannot reach the API or database. DO NOT
-  TRIGGER when: asked to change application code, or when working with the
+  four containers — `bokaclaw-postgres` (pgvector/pg17), `bokaclaw-server`
+  (FastAPI, port 8000), `bokaclaw-dashboard` (Next.js, port 3000) and
+  `bokaclaw-executor` (sandboxed agent shell, internal network only) — on
+  `bokaclaw-net` plus an internal `bokaclaw-exec` bridge, including Alembic
+  migrations, `server/.env` generation and health checks. TRIGGER when: asked
+  to build/rebuild BokaClaw images, start or stop the local frontend + backend
+  + Postgres, run migrations, reset the admin password, or debug a build stuck
+  on package downloads / a dashboard that cannot reach the API or database. DO
+  NOT TRIGGER when: asked to change application code, or when working with the
   legacy all-in-one image.
 license: Apache-2.0
 metadata:
@@ -23,7 +24,7 @@ metadata:
 
 # Build and run BokaClaw in Docker
 
-One skill for the whole local loop: build the two images, then run the three
+One skill for the whole local loop: build the two images, then run the four
 containers. Repository root is the working directory for every command.
 
 ```bash
@@ -32,8 +33,8 @@ containers. Repository root is the working directory for every command.
 ```
 
 After rebuilding an image, `RECREATE=1 start-stack.sh` replaces the existing
-server/dashboard containers with the new image. `stop-stack.sh [--remove]`
-stops or removes containers; it never touches volumes.
+server/dashboard/executor containers with the new image. `stop-stack.sh
+[--remove]` stops or removes containers; it never touches volumes.
 
 ## Run one half only
 
@@ -113,16 +114,19 @@ Build pitfalls (full log in `references/troubleshooting.md`):
 | `bokaclaw-postgres` | `pgvector/pgvector:pg17` | 8432 | `postgres` DB (mem0 memories) + `mem0_app` DB (users, conversations) |
 | `bokaclaw-server` | `bokaclaw-server:test` | 8000 | FastAPI; `/agent`, `/conversations`, `/memories`, `/auth` |
 | `bokaclaw-dashboard` | `bokaclaw-dashboard:test` | 3000 | Next.js UI; `/` redirects to `/login` |
+| `bokaclaw-executor` | `bokaclaw-server:test` | none | Sandboxed shell executor for agent `Bash` / `PowerShell` / `Monitor` |
 
 Browser → `http://localhost:3000`; browser API calls →
 `http://localhost:8000`; dashboard server-side calls →
-`http://bokaclaw-server:8000`.
+`http://bokaclaw-server:8000`; server shell tools →
+`http://bokaclaw-executor:8099` on the internal `bokaclaw-exec` network.
 
 `start-stack.sh` generates `server/.env` with random `POSTGRES_PASSWORD`,
 `JWT_SECRET`, `ADMIN_API_KEY` when missing, creates `bokaclaw-net`, starts
 Postgres, **synchronises the Postgres password with `.env`**, idempotently
 adds the bridge rule to `pg_hba.conf`, runs `alembic upgrade head`, starts the
-server and dashboard, then waits for `/openapi.json` and `/api/health`.
+sandboxed executor (read-only rootfs, non-root, workspace mounted rw), starts
+the server and dashboard, then waits for `/openapi.json` and `/api/health`.
 
 The agent workspace (`AGENT_WORKSPACE_ROOT`, default `/app/workspace`) is
 bind-mounted from `WORKSPACE_HOST`, default `/Users/pankaibo/BokaClaw/workspace`.
@@ -149,6 +153,9 @@ field meanings: `references/env-and-volumes.md`. Minimum for this stack:
   `AGENT_LOOP_MOCK=false` plus `AGENT_MODEL` / `AGENT_API_KEY` / `AGENT_BASE_URL`
   (DeepSeek: `deepseek-flash`, `https://api.deepseek.com`)
 - `AGENT_WORKSPACE_ROOT=/app/workspace`, bind-mounted from `WORKSPACE_HOST`
+- `AGENT_EXECUTOR_URL=http://bokaclaw-executor:8099` and
+  `AGENT_EXECUTOR_TOKEN` (both appended by `start-stack.sh`) so shell tools
+  run in the executor instead of the server process
 
 ### Reusing the old all-in-one volume
 
@@ -210,7 +217,8 @@ Build:
 - Both builds exit 0 and the smoke checks print `server-ok` / `dashboard-ok`.
 
 Run:
-- All three containers are `Up` with the ports above published.
+- All four containers are `Up`; postgres/server/dashboard publish the ports above, the executor publishes none.
 - `/openapi.json` and `/login` return 200.
 - `alembic_version` is the latest revision (`007`).
 - The Agent page streams a mock reply when `AGENT_LOOP_MOCK=true`.
+- `docker exec bokaclaw-server python -c "import urllib.request;print(urllib.request.urlopen('http://bokaclaw-executor:8099/healthz').read().decode())"` returns `status: ok`.

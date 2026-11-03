@@ -6,8 +6,8 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from agent_schemas import ConversationMessageOut, ConversationOut
-from models import Conversation, ConversationMessage
+from app.agent.schemas import ConversationMessageOut, ConversationOut
+from app.models import Conversation, ConversationMessage
 
 
 def _utcnow() -> datetime:

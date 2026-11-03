@@ -136,7 +136,7 @@ The Configuration page and `POST /configure` only accept providers from these li
 **To add another provider**, for example to run embeddings locally with `sentence-transformers`:
 
 1. Add the package to `server/requirements.txt` (e.g. `sentence-transformers>=2.0`).
-2. Extend `BUNDLED_LLM_PROVIDERS` or `BUNDLED_EMBEDDER_PROVIDERS` in `server/main.py`.
+2. Extend `BUNDLED_LLM_PROVIDERS` or `BUNDLED_EMBEDDER_PROVIDERS` in `server/app/main.py`.
 3. Rebuild the image (`make up` or `docker compose build`).
 
 Heavy providers (`sentence-transformers` pulls in PyTorch, ~2 GB) are intentionally kept out of the default image.

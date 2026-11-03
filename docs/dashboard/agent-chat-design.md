@@ -15,7 +15,7 @@
 - **信息架构**：`Agent` 作为 `ACTIVITY` 导航分组的直接子项，与 `Requests`、`Memories`、`Entities` 同级，不挂在 Memories 之下。
 - **页面**：`/dashboard/agent`，左侧会话列表，右侧消息流，底部输入框，SSE 打字机输出。
 - **后端**：按现有记忆接口的扁平命名风格实现 `POST /agent` 与 `/conversations*`；服务端负责鉴权、会话持久化、SSE 转发。
-- **执行层**：`server/agent_runtime.py` 在进程内调用 `bokaclaw-agent` 完成 ReAct 循环，并向模型暴露 `search_memories` / `save_memory` 两个记忆工具。
+- **执行层**：`server/app/agent/runtime.py` 在进程内调用 `bokaclaw-agent` 完成 ReAct 循环，并向模型暴露 `search_memories` / `save_memory` 两个记忆工具。
 - **视觉**：完全复用现有 shadcn/Radix 组件、语义颜色 token、`font-fustat`、`typo-*` 工具类，不引入新的 UI 库或视觉语言。
 
 ## 2. 关键决策
@@ -239,7 +239,7 @@ X-Request-ID: <rid>
 
 ### 4.5 内置工具
 
-进程内执行时，除 `search_memories` / `save_memory` 外，还注册与 Claude Code 对齐的开发工具（`server/agent_dev_tools.py`）：
+进程内执行时，除 `search_memories` / `save_memory` 外，还注册与 Claude Code 对齐的开发工具（`server/app/agent/dev_tools.py`）：
 
 | 工具 | 作用 | 注册条件 |
 | --- | --- | --- |
@@ -307,17 +307,17 @@ X-Request-ID: <rid>
 
 | 文件 | 变更 |
 | --- | --- |
-| `server/models.py` | 新增 `Conversation`、`ConversationMessage` |
+| `server/app/models.py` | 新增 `Conversation`、`ConversationMessage` |
 | `server/alembic/versions/007_create_conversations_and_messages.py` | 新建表、索引、CHECK、downgrade |
-| `server/agent_schemas.py` | 新增请求/响应 Pydantic 模型 |
-| `server/agent_store.py` | 会话/消息读写、UUID 解码、归属校验、标题生成、历史截断 |
-| `server/agent_loop.py` | 执行层选择（mock / 远程 / 进程内）、上游 HTTP/SSE 客户端、SSE 编解码、错误映射 |
-| `server/agent_events.py` | `AgentDelta` / `AgentCompleted` / `AgentLoopError` |
-| `server/agent_runtime.py` | 进程内 `bokaclaw-agent` 包装、模型配置解析、记忆工具 |
-| `server/agent_dev_tools.py` | Read / Write / Edit / NotebookEdit / Glob / Grep / Bash / PowerShell / WebFetch / Monitor |
-| `server/routers/conversations.py` | `/conversations*` 路由 |
-| `server/routers/agent.py` | `POST /agent` 路由与 SSE 生成器 |
-| `server/main.py` | 注册两个 router |
+| `server/app/agent/schemas.py` | 新增请求/响应 Pydantic 模型 |
+| `server/app/agent/store.py` | 会话/消息读写、UUID 解码、归属校验、标题生成、历史截断 |
+| `server/app/agent/loop.py` | 执行层选择（mock / 远程 / 进程内）、上游 HTTP/SSE 客户端、SSE 编解码、错误映射 |
+| `server/app/agent/events.py` | `AgentDelta` / `AgentCompleted` / `AgentLoopError` |
+| `server/app/agent/runtime.py` | 进程内 `bokaclaw-agent` 包装、模型配置解析、记忆工具 |
+| `server/app/agent/dev_tools.py` | Read / Write / Edit / NotebookEdit / Glob / Grep / Bash / PowerShell / WebFetch / Monitor |
+| `server/app/routers/conversations.py` | `/conversations*` 路由 |
+| `server/app/routers/agent.py` | `POST /agent` 路由与 SSE 生成器 |
+| `server/app/main.py` | 注册两个 router |
 | `server/requirements.txt` | 显式加入 `httpx`、`pypdf` |
 | `tests/test_agent_runtime.py`、`tests/test_agent_dev_tools.py`、`tests/test_agent_router.py` | 进程内执行、工具、路由与 SSE 测试 |
 | `agent-loop/README.md` | 记录 4.4 节的下游契约 |
@@ -333,7 +333,7 @@ router = APIRouter(prefix="/agent", tags=["agent"])
 - 会话接口：`require_auth` 保证有真实用户，用于归属校验；
 - Agent 接口：同样使用 `require_auth`；使用 `ADMIN_API_KEY` 或 `AUTH_DISABLED` 时归属到默认用户，与 `/api-keys` 行为一致；
 - 流式端点不要注入 `Depends(get_db)`，避免长连接一直占用 session；在 handler 与生成器内部使用 `with SessionLocal() as db:` 短事务；
-- 可加 `@limiter.limit("30/minute")`，与 `server/routers/auth.py` 一致。
+- 可加 `@limiter.limit("30/minute")`，与 `server/app/routers/auth.py` 一致。
 
 ### 6.3 `POST /agent` 处理流程
 
@@ -381,7 +381,7 @@ router = APIRouter(prefix="/agent", tags=["agent"])
 | `agent_protocol_error` | error | 上游 SSE/JSON 格式不合法 |
 | `conversation_deleted` | error | 流式过程中会话被删除 |
 
-错误体与 `server/errors.py` 保持一致：`{ "detail", "code", "request_id" }`。
+错误体与 `server/app/core/errors.py` 保持一致：`{ "detail", "code", "request_id" }`。
 
 ### 6.6 环境变量
 
@@ -677,10 +677,10 @@ AGENT_LOOP_URL=http://host.docker.internal:8890   # 或 compose 内的 http://ag
 
 ## 11. 实施顺序
 
-1. `server/models.py` + Alembic 007，跑通 upgrade → downgrade → upgrade；
-2. `server/agent_schemas.py`、`server/agent_store.py`；
-3. `server/agent_loop.py`（SSE 编解码、上游客户端、mock）；
-4. `server/routers/conversations.py`、`server/routers/agent.py`，在 `main.py` 注册；
+1. `server/app/models.py` + Alembic 007，跑通 upgrade → downgrade → upgrade；
+2. `server/app/agent/schemas.py`、`server/app/agent/store.py`；
+3. `server/app/agent/loop.py`（SSE 编解码、上游客户端、mock）；
+4. `server/app/routers/conversations.py`、`server/app/routers/agent.py`，在 `main.py` 注册；
 5. `requirements.txt`、`.env.example`、compose/entrypoint、文档；
 6. 前端类型、端点常量、`sse.ts`、`api.ts` 的 `postStream` 扩展；
 7. `use-agent-chat.ts` → 组件 → 页面 → 导航项；

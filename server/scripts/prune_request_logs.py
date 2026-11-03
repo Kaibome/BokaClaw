@@ -9,8 +9,14 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import delete
 
-from db import SessionLocal
-from models import RequestLog
+# Allow `python scripts/<name>.py` from a checkout without PYTHONPATH.
+_SERVER_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _SERVER_DIR not in sys.path:
+    sys.path.insert(0, _SERVER_DIR)
+
+
+from app.core.db import SessionLocal  # noqa: E402
+from app.models import RequestLog  # noqa: E402
 
 
 def main() -> int:

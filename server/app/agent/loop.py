@@ -6,8 +6,8 @@ from typing import Any, AsyncIterator
 
 import httpx
 
-from agent_events import AgentCompleted, AgentDelta, AgentEvent, AgentLoopError
-from agent_runtime import is_locally_configured, stream_local_agent
+from app.agent.events import AgentCompleted, AgentDelta, AgentEvent, AgentLoopError
+from app.agent.runtime import is_locally_configured, stream_local_agent
 
 MOCK_RESPONSE = (
     "你好！我是 BokaClaw Agent 的联调假回复。\n\n"

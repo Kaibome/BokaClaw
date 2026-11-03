@@ -3,14 +3,14 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
-from agent_schemas import (
+from app.agent.schemas import (
     ConversationCreate,
     ConversationDetailOut,
     ConversationMessageOut,
     ConversationOut,
     ConversationUpdate,
 )
-from agent_store import (
+from app.agent.store import (
     DEFAULT_TITLE,
     create_conversation,
     get_owned_conversation,
@@ -19,10 +19,10 @@ from agent_store import (
     serialize_conversation,
     serialize_message,
 )
-from auth import require_auth
-from db import get_db
-from models import User
-from schemas import MessageResponse
+from app.core.auth import require_auth
+from app.core.db import get_db
+from app.models import User
+from app.schemas import MessageResponse
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
 

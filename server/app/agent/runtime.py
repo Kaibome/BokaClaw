@@ -18,8 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
-from agent_dev_tools import build_dev_tools
-from agent_events import AgentCompleted, AgentDelta, AgentEvent, AgentLoopError
+from app.agent.dev_tools import build_dev_tools
+from app.agent.events import AgentCompleted, AgentDelta, AgentEvent, AgentLoopError
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +89,7 @@ class LocalAgentConfig:
 def _current_llm_config() -> Dict[str, Any]:
     """Return mem0's active LLM config, so the agent follows /configure."""
     try:
-        from server_state import get_current_config
+        from app.core.server_state import get_current_config
 
         return get_current_config().get("llm") or {}
     except Exception:
@@ -214,7 +214,7 @@ def _memory_tools(sdk, user_id: Optional[str]):
             query: What to look for, in natural language.
             limit: Maximum number of memories to return (1-20).
         """
-        from server_state import get_memory_instance
+        from app.core.server_state import get_memory_instance
 
         bounded = max(1, min(int(limit), 20))
         return get_memory_instance().search(query=query, filters={"user_id": user_id}, top_k=bounded)
@@ -225,7 +225,7 @@ def _memory_tools(sdk, user_id: Optional[str]):
         Args:
             content: The fact to remember, written as a complete sentence.
         """
-        from server_state import get_memory_instance
+        from app.core.server_state import get_memory_instance
 
         get_memory_instance().add(
             messages=[{"role": "user", "content": content}],

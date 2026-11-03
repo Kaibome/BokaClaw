@@ -6,10 +6,10 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from auth import generate_api_key, require_auth
-from db import get_db
-from models import APIKey, User
-from schemas import MessageResponse
+from app.core.auth import generate_api_key, require_auth
+from app.core.db import get_db
+from app.models import APIKey, User
+from app.schemas import MessageResponse
 
 router = APIRouter(prefix="/api-keys", tags=["api-keys"])
 

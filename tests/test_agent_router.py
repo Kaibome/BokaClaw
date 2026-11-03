@@ -28,22 +28,22 @@ from fastapi.testclient import TestClient  # noqa: E402
 from slowapi import _rate_limit_exceeded_handler  # noqa: E402
 from slowapi.errors import RateLimitExceeded  # noqa: E402
 
-# server/ modules use bare imports (from auth import ...), so the server
-# directory itself must be importable, mirroring how it runs in Docker.
+# server/ code uses absolute `app.*` imports, so the server directory must be
+# on sys.path, mirroring how it runs in Docker.
 _SERVER_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "server")
 if _SERVER_DIR not in sys.path:
     sys.path.insert(0, _SERVER_DIR)
 
-import agent_loop  # noqa: E402
-from agent_loop import MOCK_RESPONSE, sse_event  # noqa: E402
-from agent_schemas import ConversationMessageOut, ConversationOut  # noqa: E402
-from agent_store import DEFAULT_TITLE, MAX_TITLE_LENGTH, derive_title, get_owned_conversation  # noqa: E402
-from auth import require_auth  # noqa: E402
-from db import get_db  # noqa: E402
-from models import User  # noqa: E402
-from rate_limit import limiter  # noqa: E402
-from routers import agent as agent_router  # noqa: E402
-from routers import conversations as conversations_router  # noqa: E402
+import app.agent.loop as agent_loop  # noqa: E402
+from app.agent.loop import MOCK_RESPONSE, sse_event  # noqa: E402
+from app.agent.schemas import ConversationMessageOut, ConversationOut  # noqa: E402
+from app.agent.store import DEFAULT_TITLE, MAX_TITLE_LENGTH, derive_title, get_owned_conversation  # noqa: E402
+from app.core.auth import require_auth  # noqa: E402
+from app.core.db import get_db  # noqa: E402
+from app.models import User  # noqa: E402
+from app.core.rate_limit import limiter  # noqa: E402
+from app.routers import agent as agent_router  # noqa: E402
+from app.routers import conversations as conversations_router  # noqa: E402
 
 
 def _fake_user() -> User:

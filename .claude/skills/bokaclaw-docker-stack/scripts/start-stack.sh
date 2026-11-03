@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Start Postgres + BokaClaw server + dashboard as three containers.
+# Start Postgres + BokaClaw server + dashboard + sandboxed shell executor.
 # Generates server/.env with random secrets when it is missing.
-# Recreate the server/dashboard containers with RECREATE=1 to pick up new images.
+# Recreate the server/dashboard/executor containers with RECREATE=1 to pick up new images.
 # The agent workspace is bind-mounted from $WORKSPACE_HOST so files survive re-creation.
+# Shell tools reach the executor over the internal $EXECUTOR_NETWORK bridge; the
+# executor has no other network, a read-only root filesystem and a non-root user.
 set -euo pipefail
 
 REPO_ROOT=$(cd "$(dirname "$0")/../../../.." && pwd)
@@ -13,6 +15,12 @@ NETWORK=${NETWORK:-bokaclaw-net}
 PG_CONTAINER=${PG_CONTAINER:-bokaclaw-postgres}
 SERVER_CONTAINER=${SERVER_CONTAINER:-bokaclaw-server}
 DASHBOARD_CONTAINER=${DASHBOARD_CONTAINER:-bokaclaw-dashboard}
+EXECUTOR_CONTAINER=${EXECUTOR_CONTAINER:-bokaclaw-executor}
+EXECUTOR_NETWORK=${EXECUTOR_NETWORK:-bokaclaw-exec}
+EXECUTOR_PORT=${EXECUTOR_PORT:-8099}
+EXECUTOR_MEMORY=${EXECUTOR_MEMORY:-1g}
+EXECUTOR_CPUS=${EXECUTOR_CPUS:-2}
+EXECUTOR_PIDS_LIMIT=${EXECUTOR_PIDS_LIMIT:-256}
 SERVER_IMAGE=${SERVER_IMAGE:-bokaclaw-server:test}
 DASHBOARD_IMAGE=${DASHBOARD_IMAGE:-bokaclaw-dashboard:test}
 PG_IMAGE=${PG_IMAGE:-pgvector/pgvector:pg17}
@@ -68,6 +76,16 @@ AGENT_LOOP_HISTORY_MESSAGES=40
 EOF
 fi
 
+# Shell tools are delegated to the executor container. Both variables live in
+# .env so a manually started server container picks them up as well.
+if ! grep -q '^AGENT_EXECUTOR_URL=' "$ENV_FILE"; then
+  printf '\n# Sandboxed shell executor (Bash/PowerShell/Monitor).\nAGENT_EXECUTOR_URL=http://%s:%s\n' \
+    "$EXECUTOR_CONTAINER" "$EXECUTOR_PORT" >> "$ENV_FILE"
+fi
+if ! grep -q '^AGENT_EXECUTOR_TOKEN=' "$ENV_FILE"; then
+  printf 'AGENT_EXECUTOR_TOKEN=%s\n' "$(openssl rand -hex 24)" >> "$ENV_FILE"
+fi
+
 set -a
 # shellcheck disable=SC1090
 . "$ENV_FILE"
@@ -93,6 +111,12 @@ docker image inspect "$PG_IMAGE" >/dev/null 2>&1 || docker pull "$PG_IMAGE"
 docker network inspect "$NETWORK" >/dev/null 2>&1 || {
   log "creating network $NETWORK"
   docker network create "$NETWORK" >/dev/null
+}
+
+# Internal bridge: the executor can talk to the server, nothing else.
+docker network inspect "$EXECUTOR_NETWORK" >/dev/null 2>&1 || {
+  log "creating internal network $EXECUTOR_NETWORK"
+  docker network create --internal "$EXECUTOR_NETWORK" >/dev/null
 }
 
 # ---- Postgres --------------------------------------------------------------
@@ -134,9 +158,59 @@ docker run --rm --network "$NETWORK" --env-file "$ENV_FILE" \
   -v "${HISTORY_VOLUME}:/app/history" \
   "$SERVER_IMAGE" alembic upgrade head
 
+# ---- Shell executor ---------------------------------------------------------
+if [ "${RECREATE:-0}" = "1" ] && docker container inspect "$EXECUTOR_CONTAINER" >/dev/null 2>&1; then
+  log "recreating $EXECUTOR_CONTAINER"
+  docker rm -f "$EXECUTOR_CONTAINER" >/dev/null
+fi
+
+if docker container inspect "$EXECUTOR_CONTAINER" >/dev/null 2>&1; then
+  docker start "$EXECUTOR_CONTAINER" >/dev/null
+else
+  log "starting $EXECUTOR_CONTAINER"
+  docker run -d --name "$EXECUTOR_CONTAINER" --network "$EXECUTOR_NETWORK" --restart unless-stopped \
+    --read-only --tmpfs /tmp:rw,size=256m,mode=1777 \
+    --cap-drop ALL --security-opt no-new-privileges \
+    --pids-limit "$EXECUTOR_PIDS_LIMIT" --memory "$EXECUTOR_MEMORY" --cpus "$EXECUTOR_CPUS" \
+    --user 1000:1000 \
+    -e AGENT_DEV_TOOLS=true \
+    -e AGENT_TOOLS_ALLOW_SHELL=true \
+    -e AGENT_WORKSPACE_ROOT="$WORKSPACE_CONTAINER" \
+    -e AGENT_TOOL_TIMEOUT_SECONDS="${AGENT_TOOL_TIMEOUT_SECONDS:-120}" \
+    -e AGENT_EXECUTOR_TOKEN="$AGENT_EXECUTOR_TOKEN" \
+    -e PYTHONDONTWRITEBYTECODE=1 \
+    -v "${WORKSPACE_HOST}:${WORKSPACE_CONTAINER}" \
+    "$SERVER_IMAGE" uvicorn app.agent.executor_app:app --host 0.0.0.0 --port "$EXECUTOR_PORT" --no-access-log >/dev/null
+fi
+
+log "waiting for executor"
+executor_ready=0
+for _ in $(seq 1 60); do
+  if docker exec "$EXECUTOR_CONTAINER" python -c \
+    "import urllib.request; urllib.request.urlopen('http://127.0.0.1:${EXECUTOR_PORT}/healthz', timeout=2)" \
+    >/dev/null 2>&1; then
+    executor_ready=1
+    break
+  fi
+  sleep 0.5
+done
+if [ "$executor_ready" != "1" ]; then
+  echo "error: $EXECUTOR_CONTAINER did not become ready" >&2
+  docker logs --tail 40 "$EXECUTOR_CONTAINER" >&2
+  exit 1
+fi
+
 # ---- Server ----------------------------------------------------------------
 if [ "${RECREATE:-0}" = "1" ] && docker container inspect "$SERVER_CONTAINER" >/dev/null 2>&1; then
   log "recreating $SERVER_CONTAINER"
+  docker rm -f "$SERVER_CONTAINER" >/dev/null
+fi
+
+# A container created before the executor existed has no executor env; recreate it.
+if docker container inspect "$SERVER_CONTAINER" >/dev/null 2>&1 &&
+  ! docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$SERVER_CONTAINER" |
+    grep -q '^AGENT_EXECUTOR_URL=http'; then
+  log "$SERVER_CONTAINER predates the shell executor; recreating"
   docker rm -f "$SERVER_CONTAINER" >/dev/null
 fi
 
@@ -147,11 +221,19 @@ else
   docker run -d --name "$SERVER_CONTAINER" --network "$NETWORK" --restart unless-stopped \
     --env-file "$ENV_FILE" \
     -e POSTGRES_HOST="$PG_CONTAINER" -e POSTGRES_PORT=5432 \
+    -e AGENT_EXECUTOR_URL="http://${EXECUTOR_CONTAINER}:${EXECUTOR_PORT}" \
+    -e AGENT_EXECUTOR_TOKEN="$AGENT_EXECUTOR_TOKEN" \
     --add-host host.docker.internal:host-gateway \
     -p "${API_PORT}:8000" \
     -v "${HISTORY_VOLUME}:/app/history" \
     -v "${WORKSPACE_HOST}:${WORKSPACE_CONTAINER}" \
-    "$SERVER_IMAGE" uvicorn main:app --host 0.0.0.0 --port 8000 >/dev/null
+    "$SERVER_IMAGE" uvicorn app.main:app --host 0.0.0.0 --port 8000 >/dev/null
+fi
+
+if ! docker inspect -f '{{json .NetworkSettings.Networks}}' "$SERVER_CONTAINER" |
+  grep -q "\"${EXECUTOR_NETWORK}\""; then
+  log "connecting $SERVER_CONTAINER to $EXECUTOR_NETWORK"
+  docker network connect "$EXECUTOR_NETWORK" "$SERVER_CONTAINER" >/dev/null
 fi
 
 # ---- Dashboard -------------------------------------------------------------

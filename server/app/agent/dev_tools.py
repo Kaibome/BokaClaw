@@ -3,8 +3,9 @@
 Filesystem tools are confined to ``AGENT_WORKSPACE_ROOT``; any path that
 resolves outside it is rejected, including through symlinks. Shell tools
 (``Bash``, ``PowerShell``, ``Monitor``) are registered only when
-``AGENT_TOOLS_ALLOW_SHELL=true``; there is no OS-level sandbox, so enabling
-them lets the agent run anything the server process can run.
+``AGENT_TOOLS_ALLOW_SHELL=true``. When ``AGENT_EXECUTOR_URL`` is set they are
+delegated to the sandboxed executor container (see ``agent_executor.py``);
+otherwise they run in the server process, where there is no OS-level sandbox.
 
 The module deliberately has no import-time side effects: tools are built per
 run, and the workspace directory is created on first use.
@@ -14,6 +15,7 @@ import atexit
 import fnmatch
 import ipaddress
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -31,6 +33,10 @@ from typing import Any, Dict, List, Literal, Optional
 from urllib.parse import urljoin, urlparse
 
 import httpx
+
+from app.agent import executor as agent_executor
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_WORKSPACE = "/app/workspace"
 DEFAULT_MAX_OUTPUT_BYTES = 200_000
@@ -77,6 +83,7 @@ class DevToolConfig:
     web_timeout: float
     web_max_bytes: int
     web_allow_private: bool
+    executor: Optional[agent_executor.ExecutorConfig] = None
 
 
 def load_dev_tool_config() -> Optional[DevToolConfig]:
@@ -94,6 +101,7 @@ def load_dev_tool_config() -> Optional[DevToolConfig]:
         web_timeout=max(1.0, _env_float("AGENT_WEB_FETCH_TIMEOUT_SECONDS", 30.0)),
         web_max_bytes=max(1000, _env_int("AGENT_WEB_FETCH_MAX_BYTES", DEFAULT_WEB_MAX_BYTES)),
         web_allow_private=_env_bool("AGENT_WEB_FETCH_ALLOW_PRIVATE", False),
+        executor=agent_executor.load_executor_config(),
     )
 
 
@@ -402,11 +410,55 @@ def _collect_grep_files(config: DevToolConfig, base: Path, pattern: str) -> List
     return sorted(files)
 
 
+def execute_command(
+    config: DevToolConfig,
+    command: str,
+    description: str,
+    timeout_seconds: int,
+    *,
+    shell: str,
+) -> Dict[str, Any]:
+    """Run a command in the executor container when configured, else locally."""
+    if config.executor is not None:
+        return agent_executor.run_command(
+            config.executor,
+            command,
+            description,
+            timeout_seconds,
+            shell=shell,
+        )
+    return run_command(config, command, description, timeout_seconds, shell=shell)
+
+
+def execute_monitor(
+    config: DevToolConfig,
+    action: str,
+    command: str = "",
+    monitor_id: str = "",
+    wait_seconds: float = 1.0,
+    pattern: str = "",
+) -> Dict[str, Any]:
+    """Run a background command in the executor container when configured, else locally."""
+    if config.executor is not None:
+        return agent_executor.monitor_action(
+            config.executor,
+            action,
+            command,
+            monitor_id,
+            wait_seconds,
+            pattern,
+        )
+    return monitor_action(config, action, command, monitor_id, wait_seconds, pattern)
+
+
 def build_dev_tools(sdk, config: Optional[DevToolConfig] = None):
     """Build the developer tool set, or return ``[]`` when disabled."""
     cfg = config if config is not None else load_dev_tool_config()
     if cfg is None:
         return []
+
+    if cfg.allow_shell and cfg.executor is None:
+        logger.warning("Shell tools are enabled without AGENT_EXECUTOR_URL; commands run inside the server process.")
 
     def Read(file_path: str, offset: int = 0, limit: int = 2000, pages: str = "") -> Dict[str, Any]:
         """Read a text file, notebook, or PDF from the workspace.
@@ -699,7 +751,7 @@ def build_dev_tools(sdk, config: Optional[DevToolConfig] = None):
             description: Short note about what the command does.
             timeout_seconds: Timeout in seconds, capped by AGENT_TOOL_TIMEOUT_SECONDS.
         """
-        return _run_command(cfg, command, description, timeout_seconds, shell="bash")
+        return execute_command(cfg, command, description, timeout_seconds, shell="bash")
 
     def PowerShell(command: str, description: str = "", timeout_seconds: int = 120) -> Dict[str, Any]:
         """Run a PowerShell command in the workspace.
@@ -709,7 +761,7 @@ def build_dev_tools(sdk, config: Optional[DevToolConfig] = None):
             description: Short note about what the command does.
             timeout_seconds: Timeout in seconds, capped by AGENT_TOOL_TIMEOUT_SECONDS.
         """
-        return _run_command(cfg, command, description, timeout_seconds, shell="powershell")
+        return execute_command(cfg, command, description, timeout_seconds, shell="powershell")
 
     def WebFetch(url: str) -> Dict[str, Any]:
         """Fetch a public URL and return its text content.
@@ -735,7 +787,7 @@ def build_dev_tools(sdk, config: Optional[DevToolConfig] = None):
             wait_seconds: How long to wait for output (0-30).
             pattern: Return early when an output line matches this regex.
         """
-        return _monitor_action(cfg, action, command, monitor_id, wait_seconds, pattern)
+        return execute_monitor(cfg, action, command, monitor_id, wait_seconds, pattern)
 
     tools = [
         sdk.tool(Read, name="Read"),
@@ -758,7 +810,21 @@ def build_dev_tools(sdk, config: Optional[DevToolConfig] = None):
     return tools
 
 
-def _run_command(
+def command_env(config: DevToolConfig) -> Dict[str, str]:
+    """Environment for spawned commands: no API keys, DB credentials, or executor token."""
+    home = str(_workspace_root(config))
+    return {
+        "PATH": "/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin",
+        "HOME": home,
+        "PWD": home,
+        "TMPDIR": "/tmp",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "TERM": "dumb",
+    }
+
+
+def run_command(
     config: DevToolConfig,
     command: str,
     description: str,
@@ -789,6 +855,7 @@ def _run_command(
             text=True,
             errors="replace",
             timeout=timeout,
+            env=command_env(config),
         )
         stdout, stdout_truncated = _truncate(completed.stdout or "", config.max_output_bytes)
         stderr, stderr_truncated = _truncate(completed.stderr or "", config.max_output_bytes)
@@ -818,7 +885,7 @@ def _run_command(
         }
 
 
-def _monitor_action(
+def monitor_action(
     config: DevToolConfig,
     action: str,
     command: str,
@@ -840,6 +907,7 @@ def _monitor_action(
             errors="replace",
             bufsize=1,
             start_new_session=True,
+            env=command_env(config),
         )
         monitor = _Monitor(process, label=command)
         monitor_id = uuid.uuid4().hex[:12]

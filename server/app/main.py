@@ -4,11 +4,11 @@ import os
 import time
 from typing import Any, Dict, List, Optional
 
-import telemetry
-from auth import ADMIN_API_KEY, AUTH_DISABLED, JWT_SECRET, require_admin, verify_auth
-from db import SessionLocal
+from app.core import telemetry
+from app.core.auth import ADMIN_API_KEY, AUTH_DISABLED, JWT_SECRET, require_admin, verify_auth
+from app.core.db import SessionLocal
 from dotenv import load_dotenv
-from errors import (
+from app.core.errors import (
     UpstreamError,
     install_request_id_logging,
     new_request_id,
@@ -19,17 +19,17 @@ from errors import (
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
-from models import RequestLog, User
+from app.models import RequestLog, User
 from pydantic import BaseModel, Field
-from rate_limit import limiter
-from routers import agent as agent_router
-from routers import api_keys as api_keys_router
-from routers import auth as auth_router
-from routers import conversations as conversations_router
-from routers import entities as entities_router
-from routers import requests as requests_router
-from schemas import MessageResponse
-from server_state import (
+from app.core.rate_limit import limiter
+from app.routers import agent as agent_router
+from app.routers import api_keys as api_keys_router
+from app.routers import auth as auth_router
+from app.routers import conversations as conversations_router
+from app.routers import entities as entities_router
+from app.routers import requests as requests_router
+from app.schemas import MessageResponse
+from app.core.server_state import (
     get_current_config,
     get_memory_instance,
     initialize_state,
@@ -397,7 +397,16 @@ def add_memory(memory_create: MemoryCreate, _auth=Depends(verify_auth)):
 
 
 ALL_MEMORIES_LIMIT = 1000
-_RESERVED_PAYLOAD_KEYS = {"data", "user_id", "agent_id", "run_id", "hash", "created_at", "updated_at", "expiration_date"}
+_RESERVED_PAYLOAD_KEYS = {
+    "data",
+    "user_id",
+    "agent_id",
+    "run_id",
+    "hash",
+    "created_at",
+    "updated_at",
+    "expiration_date",
+}
 
 
 def _serialize_memory(row: Any) -> Dict[str, Any]:
@@ -440,9 +449,7 @@ def get_all_memories(
                 raise HTTPException(status_code=403, detail="Admin role required to list all memories.")
             # Admin all-memory listing is intentionally raw; scoped get_all below applies expiry visibility.
             return _list_all_memories(limit=top_k if top_k is not None else ALL_MEMORIES_LIMIT)
-        filters = {
-            k: v for k, v in {"user_id": user_id, "run_id": run_id, "agent_id": agent_id}.items() if v
-        }
+        filters = {k: v for k, v in {"user_id": user_id, "run_id": run_id, "agent_id": agent_id}.items() if v}
         params = {"filters": filters}
         if top_k is not None:
             params["top_k"] = top_k
@@ -549,9 +556,7 @@ def delete_all_memories(
     if not any([user_id, run_id, agent_id]):
         raise HTTPException(status_code=400, detail="At least one identifier is required.")
     try:
-        params = {
-            k: v for k, v in {"user_id": user_id, "run_id": run_id, "agent_id": agent_id}.items() if v
-        }
+        params = {k: v for k, v in {"user_id": user_id, "run_id": run_id, "agent_id": agent_id}.items() if v}
         get_memory_instance().delete_all(**params)
         return MessageResponse(message="All relevant memories deleted")
     except Exception:
