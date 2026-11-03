@@ -4,6 +4,7 @@ import * as React from "react";
 import Link from "next/link";
 import {
   Activity,
+  Bot,
   ChartLine,
   ChevronDown,
   FolderInput,
@@ -74,6 +75,12 @@ export function MainNav({
                     url: "/dashboard/memories",
                     icon: GalleryVerticalEnd,
                     active: pathname === "/dashboard/memories",
+                  },
+                  {
+                    title: "Agent",
+                    url: "/dashboard/agent",
+                    icon: Bot,
+                    active: pathname === "/dashboard/agent",
                   },
                   {
                     title: "Entities",

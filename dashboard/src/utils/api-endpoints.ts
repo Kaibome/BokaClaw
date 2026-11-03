@@ -32,3 +32,11 @@ export const ENTITY_ENDPOINTS = {
   BY_ID: (type: string, id: string) =>
     `/entities/${type}/${encodeURIComponent(id)}`,
 } as const;
+
+export const AGENT_ENDPOINTS = {
+  INVOKE: "/agent",
+  CONVERSATIONS: "/conversations",
+  CONVERSATION: (conversationId: string) => `/conversations/${conversationId}`,
+  MESSAGES: (conversationId: string) =>
+    `/conversations/${conversationId}/messages`,
+} as const;

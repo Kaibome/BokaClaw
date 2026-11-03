@@ -9,6 +9,10 @@ services:
       - "8888:8000"
     env_file:
       - .env
+    # Lets a development agent executor on the host be reached from the
+    # container at host.docker.internal (Docker Desktop already provides it).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       - mem0_network
     volumes:
