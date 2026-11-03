@@ -60,6 +60,26 @@ runtime.close()
 
 For OpenAI, omit `base_url` (or set `OPENAI_BASE_URL`). Any endpoint that speaks the OpenAI Chat Completions API works.
 
+## Streaming
+
+`stream()` is the incremental counterpart to `run()`. It yields assistant text
+deltas as the provider produces them and returns the same `RunResult` when the
+generator is exhausted:
+
+```python
+turn = runtime.stream("Explain pgvector in one paragraph.", session_id="user-42")
+try:
+    while True:
+        print(next(turn), end="", flush=True)
+except StopIteration as done:
+    result = done.value
+```
+
+Tool-call rounds are executed inside the generator; only the final answer is
+streamed. Providers that do not implement `stream_complete` fall back to a
+single delta containing `result.content`. Closing the generator before
+exhaustion abandons the turn without persisting it.
+
 ## Tools
 
 `@tool` derives a JSON Schema from type hints and the docstring:
@@ -185,7 +205,7 @@ Events: `run_started`, `model_request`, `model_response`, `tool_call`, `tool_res
 
 ## v1 limits
 
-- No streaming output.
+- `stream()` forwards text from the final answer; tool-call rounds produce no text.
 - No token counting or automatic summarisation; only message-count truncation on resume.
 - Tool calls returned in one model turn are executed sequentially, in order.
 - One active run per session is recommended. Concurrent writers are serialised by a row lock and `UNIQUE(session_id, seq)`, but turn ordering is not guaranteed.
@@ -261,10 +281,9 @@ data: {}
 - `: ping` comment lines are ignored, so they work as heartbeats.
 
 A non-SSE JSON body of `{"content": "...", "finish_reason": "stop"}` is also
-accepted and treated as a single-shot reply. Since this runtime does not
-stream yet, a first wrapper version can call `runtime.run(...)` and emit one
-`message.delta` with `result.content`; the Agent page renders it without
-typewriter progress.
+accepted and treated as a single-shot reply. A wrapper can call
+`runtime.stream(...)` and forward each yielded delta as a `message.delta`;
+`runtime.run(...)` remains available for one-shot replies.
 
 A non-2xx response is surfaced to the browser as `agent_upstream_error` with
 the first 500 bytes of the body. Transport failures and timeouts become

@@ -119,3 +119,74 @@ def test_missing_api_key_raises_configuration_error(monkeypatch):
 
     with pytest.raises(ConfigurationError, match="API key"):
         OpenAICompatibleProvider(ModelConfig(model="test-model"))
+
+
+def _stream_chunk(content=None, tool_calls=None, finish_reason=None, usage=None):
+    delta = SimpleNamespace(content=content, tool_calls=tool_calls)
+    choice = SimpleNamespace(delta=delta, finish_reason=finish_reason)
+    return SimpleNamespace(choices=[choice], usage=usage)
+
+
+def test_stream_complete_yields_content_and_usage(mocker):
+    usage = SimpleNamespace(prompt_tokens=1, completion_tokens=2, total_tokens=3)
+    chunks = [
+        _stream_chunk(content="Hel"),
+        _stream_chunk(content="lo"),
+        _stream_chunk(finish_reason="stop", usage=usage),
+    ]
+    client = mocker.Mock()
+    client.chat.completions.create.return_value = iter(chunks)
+    provider = OpenAICompatibleProvider(ModelConfig(model="test-model", api_key="k"), client=client)
+
+    result = list(provider.stream_complete([{"role": "user", "content": "hi"}]))
+
+    assert [chunk.content for chunk in result] == ["Hel", "lo", None]
+    assert result[-1].finish_reason == "stop"
+    assert result[-1].usage == {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3}
+    assert client.chat.completions.create.call_args.kwargs["stream"] is True
+
+
+def test_stream_complete_reassembles_tool_call_fragments(mocker):
+    chunks = [
+        _stream_chunk(
+            tool_calls=[
+                SimpleNamespace(
+                    index=0,
+                    id="call_1",
+                    function=SimpleNamespace(name="add", arguments='{"a": 1'),
+                )
+            ]
+        ),
+        _stream_chunk(
+            tool_calls=[
+                SimpleNamespace(
+                    index=0,
+                    id=None,
+                    function=SimpleNamespace(name=None, arguments=', "b": 2}'),
+                )
+            ],
+            finish_reason="tool_calls",
+        ),
+    ]
+    client = mocker.Mock()
+    client.chat.completions.create.return_value = iter(chunks)
+    provider = OpenAICompatibleProvider(ModelConfig(model="test-model", api_key="k"), client=client)
+
+    result = list(provider.stream_complete([{"role": "user", "content": "add"}]))
+
+    first_call = result[0].tool_calls[0]
+    assert first_call.index == 0
+    assert first_call.id == "call_1"
+    assert first_call.name == "add"
+    assert first_call.arguments == '{"a": 1'
+    assert result[1].tool_calls[0].arguments == ', "b": 2}'
+    assert result[1].finish_reason == "tool_calls"
+
+
+def test_stream_errors_are_wrapped(mocker):
+    client = mocker.Mock()
+    client.chat.completions.create.side_effect = RuntimeError("rate limited")
+    provider = OpenAICompatibleProvider(ModelConfig(model="test-model", api_key="k"), client=client)
+
+    with pytest.raises(ModelError, match="rate limited"):
+        list(provider.stream_complete([{"role": "user", "content": "go"}]))

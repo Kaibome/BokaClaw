@@ -36,6 +36,32 @@ class ModelResponse(BaseModel):
     raw: Any = Field(default=None, exclude=True)
 
 
+class ToolCallDelta(BaseModel):
+    """One incremental fragment of a streamed tool call.
+
+    The provider sends ``id`` and ``name`` once, then appends JSON fragments to
+    ``arguments`` across chunks; the runtime reassembles them by ``index``.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    index: int = 0
+    id: str | None = None
+    name: str | None = None
+    arguments: str = ""
+
+
+class ModelStreamChunk(BaseModel):
+    """One incremental chunk from a streaming provider."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    content: str | None = None
+    tool_calls: list[ToolCallDelta] = Field(default_factory=list)
+    finish_reason: str | None = None
+    usage: dict[str, int] = Field(default_factory=dict)
+
+
 class ToolResult(BaseModel):
     """The string result that is fed back to the model as a ``tool`` message."""
 

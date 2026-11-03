@@ -4,7 +4,30 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 from typing import Any
+
+
+def parse_tool_arguments(raw_arguments: Any) -> tuple[dict[str, Any], str | None, str | None]:
+    """Normalize a provider's tool arguments into ``(object, raw, error)``.
+
+    Returns an empty object and a human-readable error when the arguments are
+    not a JSON object, so a malformed call can still be reported to the model.
+    """
+
+    if isinstance(raw_arguments, dict):
+        return dict(raw_arguments), json.dumps(raw_arguments, ensure_ascii=False), None
+
+    raw = raw_arguments if isinstance(raw_arguments, str) else ""
+    if not raw.strip():
+        return {}, raw, None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return {}, raw, str(exc)
+    if not isinstance(parsed, dict):
+        return {}, raw, "tool arguments must be a JSON object"
+    return parsed, raw, None
 
 
 def resolve_awaitable(value: Any) -> Any:

@@ -49,6 +49,7 @@ class FakeRuntime:
         self.config = config
         self.tools = list(tools)
         self.run_calls = []
+        self.stream_calls = []
         self.closed = False
 
     def run(self, messages, **kwargs):
@@ -59,6 +60,19 @@ class FakeRuntime:
             time.sleep(self.sdk.delay)
         if self.sdk.error is not None:
             raise self.sdk.error
+        return self.sdk.result
+
+    def stream(self, messages, **kwargs):
+        self.stream_calls.append((messages, kwargs))
+        if self.sdk.delay:
+            import time
+
+            time.sleep(self.sdk.delay)
+        if self.sdk.error is not None:
+            raise self.sdk.error
+        content = self.sdk.result.content or ""
+        for index in range(0, len(content), 5):
+            yield content[index : index + 5]
         return self.sdk.result
 
     def close(self):
@@ -358,13 +372,15 @@ async def test_stream_local_agent_emits_final_answer(monkeypatch):
 
     events = await _collect(_payload())
 
-    assert events[0] == AgentDelta("final answer")
-    assert events[1] == AgentCompleted(
+    deltas = [event.delta for event in events if isinstance(event, AgentDelta)]
+    assert "".join(deltas) == "final answer"
+    assert len(deltas) > 1
+    assert events[-1] == AgentCompleted(
         metadata={"usage": {"total_tokens": 7}, "finish_reason": "final", "run_id": "run-1"}
     )
     assert len(sdk.runtimes) == 1
     runtime = sdk.runtimes[0]
-    assert runtime.run_calls == [
+    assert runtime.stream_calls == [
         (
             [
                 {"role": "assistant", "content": "hi"},

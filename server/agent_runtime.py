@@ -13,6 +13,7 @@ import asyncio
 import logging
 import os
 import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
@@ -255,11 +256,25 @@ def build_runtime(sdk, config: LocalAgentConfig, payload: Dict[str, Any]):
     return sdk.AgentRuntime(agent_config, tools=tools)
 
 
-async def stream_local_agent(payload: Dict[str, Any]) -> AsyncIterator[AgentEvent]:
-    """Run one ReAct turn in a worker thread and emit its final answer.
+def _completion_metadata(payload: Dict[str, Any], result: Any) -> Dict[str, Any]:
+    metadata: Dict[str, Any] = {}
+    usage = getattr(result, "usage", None)
+    if usage:
+        metadata["usage"] = usage
+    stop_reason = getattr(result, "stop_reason", None)
+    if stop_reason:
+        metadata["finish_reason"] = stop_reason
+    if payload.get("run_id"):
+        metadata["run_id"] = payload["run_id"]
+    return metadata
 
-    The SDK does not stream tokens yet, so a completed turn produces one
-    ``message.delta`` followed by ``message.completed`` metadata.
+
+async def stream_local_agent(payload: Dict[str, Any]) -> AsyncIterator[AgentEvent]:
+    """Run one ReAct turn, streaming the SDK's text deltas as they arrive.
+
+    The SDK is synchronous, so the turn runs in a worker thread and pushes
+    deltas into an asyncio queue. Tool-call rounds produce no text; the final
+    answer is forwarded chunk by chunk.
     """
     config = load_local_config()
     if config is None:
@@ -273,42 +288,82 @@ async def stream_local_agent(payload: Dict[str, Any]) -> AsyncIterator[AgentEven
     runtime = build_runtime(sdk, config, payload)
     conversation_id = payload.get("conversation_id")
 
-    try:
-        result = await asyncio.wait_for(
-            asyncio.to_thread(
-                runtime.run,
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue[Tuple[str, Any]] = asyncio.Queue()
+    stop = threading.Event()
+
+    def put(kind: str, value: Any = None) -> None:
+        try:
+            loop.call_soon_threadsafe(queue.put_nowait, (kind, value))
+        except RuntimeError:  # pragma: no cover - the loop is already closed
+            pass
+
+    def worker() -> None:
+        try:
+            turn = runtime.stream(
                 messages,
                 session_id=conversation_id,
                 user_id=payload.get("user_id"),
-            ),
-            timeout=config.max_seconds,
-        )
-    except asyncio.TimeoutError as exc:
-        raise AgentLoopError("agent_timeout", "Agent turn timed out.") from exc
-    except sdk.MaxIterationsExceeded as exc:
-        raise AgentLoopError("agent_upstream_error", "Agent exceeded the maximum number of steps.") from exc
-    except sdk.ConfigurationError as exc:
-        raise AgentLoopError("agent_not_configured", str(exc)) from exc
-    except Exception as exc:
-        logger.exception("Agent runtime failed for conversation %s", conversation_id)
-        raise AgentLoopError("agent_upstream_error", f"Agent runtime failed: {exc}") from exc
+            )
+            while not stop.is_set():
+                try:
+                    delta = next(turn)
+                except StopIteration as finished:
+                    result = finished.value
+                    if stop.is_set():
+                        return
+                    if not (getattr(result, "content", None) or "").strip():
+                        put("error", AgentLoopError("agent_protocol_error", "Agent produced no content."))
+                        return
+                    put("completed", result)
+                    return
+                if stop.is_set():
+                    break
+                put("delta", delta)
+            turn.close()
+        except sdk.MaxIterationsExceeded:
+            put("error", AgentLoopError("agent_upstream_error", "Agent exceeded the maximum number of steps."))
+        except sdk.ConfigurationError as exc:
+            put("error", AgentLoopError("agent_not_configured", str(exc)))
+        except Exception as exc:
+            logger.exception("Agent runtime failed for conversation %s", conversation_id)
+            put("error", AgentLoopError("agent_upstream_error", f"Agent runtime failed: {exc}"))
+        finally:
+            try:
+                runtime.close()
+            except Exception:  # pragma: no cover - defensive
+                logger.warning("Failed to close the agent runtime", exc_info=True)
+            put("end")
+
+    thread = threading.Thread(
+        target=worker,
+        name=f"agent-{conversation_id or 'turn'}",
+        daemon=True,
+    )
+    thread.start()
+
+    deadline = loop.time() + config.max_seconds
+    try:
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise AgentLoopError("agent_timeout", "Agent turn timed out.")
+            try:
+                kind, value = await asyncio.wait_for(queue.get(), timeout=remaining)
+            except asyncio.TimeoutError:
+                raise AgentLoopError("agent_timeout", "Agent turn timed out.") from None
+
+            if kind == "delta":
+                yield AgentDelta(value)
+            elif kind == "completed":
+                yield AgentCompleted(metadata=_completion_metadata(payload, value))
+            elif kind == "error":
+                raise value
+            elif kind == "end":
+                return
     finally:
+        stop.set()
         try:
             runtime.close()
         except Exception:  # pragma: no cover - defensive
-            logger.warning("Failed to close the agent runtime", exc_info=True)
-
-    content = (result.content or "").strip()
-    if not content:
-        raise AgentLoopError("agent_protocol_error", "Agent produced no content.")
-
-    yield AgentDelta(content)
-
-    metadata: Dict[str, Any] = {}
-    if result.usage:
-        metadata["usage"] = result.usage
-    if result.stop_reason:
-        metadata["finish_reason"] = result.stop_reason
-    if payload.get("run_id"):
-        metadata["run_id"] = payload["run_id"]
-    yield AgentCompleted(metadata=metadata)
+            pass

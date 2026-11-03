@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import json
 import os
+from collections.abc import Iterator
 from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
@@ -12,7 +12,8 @@ from openai import OpenAI
 
 from ..config import ModelConfig
 from ..exceptions import ConfigurationError, ModelError
-from ..types import ModelResponse, ToolCall
+from ..types import ModelResponse, ModelStreamChunk, ToolCall, ToolCallDelta
+from ..utils import parse_tool_arguments
 
 
 class OpenAICompatibleProvider:
@@ -45,14 +46,14 @@ class OpenAICompatibleProvider:
             default_headers=config.extra_headers or None,
         )
 
-    def complete(
+    def _build_params(
         self,
         messages: list[dict[str, Any]],
         *,
-        tools: list[dict[str, Any]] | None = None,
-        tool_choice: str | dict[str, Any] | None = "auto",
+        tools: list[dict[str, Any]] | None,
+        tool_choice: str | dict[str, Any] | None,
         **kwargs: Any,
-    ) -> ModelResponse:
+    ) -> dict[str, Any]:
         params: dict[str, Any] = {
             "model": self.config.model,
             "messages": messages,
@@ -68,6 +69,17 @@ class OpenAICompatibleProvider:
         if self.config.extra_body:
             params["extra_body"] = self.config.extra_body
         params.update(kwargs)
+        return params
+
+    def complete(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = "auto",
+        **kwargs: Any,
+    ) -> ModelResponse:
+        params = self._build_params(messages, tools=tools, tool_choice=tool_choice, **kwargs)
 
         try:
             response = self._client.chat.completions.create(**params)
@@ -76,21 +88,36 @@ class OpenAICompatibleProvider:
 
         return self._parse_response(response)
 
+    def stream_complete(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = "auto",
+        **kwargs: Any,
+    ) -> Iterator[ModelStreamChunk]:
+        """Yield the assistant turn incrementally (``stream=True``).
+
+        Tool calls arrive as fragments split across chunks; the runtime
+        reassembles them by ``index`` before executing the tool.
+        """
+        params = self._build_params(messages, tools=tools, tool_choice=tool_choice, **kwargs)
+        params["stream"] = True
+
+        try:
+            stream = self._client.chat.completions.create(**params)
+            for chunk in stream:
+                parsed = self._parse_stream_chunk(chunk)
+                if parsed is not None:
+                    yield parsed
+        except ModelError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - provider errors are normalized
+            raise ModelError(f"Model request failed: {exc}") from exc
+
     @staticmethod
     def _parse_arguments(raw_arguments: Any) -> tuple[dict[str, Any], str | None, str | None]:
-        if isinstance(raw_arguments, dict):
-            return dict(raw_arguments), json.dumps(raw_arguments, ensure_ascii=False), None
-
-        raw = raw_arguments if isinstance(raw_arguments, str) else ""
-        if not raw.strip():
-            return {}, raw, None
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            return {}, raw, str(exc)
-        if not isinstance(parsed, dict):
-            return {}, raw, "tool arguments must be a JSON object"
-        return parsed, raw, None
+        return parse_tool_arguments(raw_arguments)
 
     @classmethod
     def _parse_tool_call(cls, raw_call: Any) -> ToolCall | None:
@@ -123,6 +150,47 @@ class OpenAICompatibleProvider:
         )
 
     @classmethod
+    def _parse_stream_chunk(cls, chunk: Any) -> ModelStreamChunk | None:
+        usage = cls._parse_usage(getattr(chunk, "usage", None))
+        choices = getattr(chunk, "choices", None) or []
+        if not choices:
+            return ModelStreamChunk(usage=usage) if usage else None
+
+        choice = choices[0]
+        delta = getattr(choice, "delta", None)
+        content = getattr(delta, "content", None) if delta is not None else None
+
+        tool_calls: list[ToolCallDelta] = []
+        for raw_call in getattr(delta, "tool_calls", None) or []:
+            function = getattr(raw_call, "function", None)
+            tool_calls.append(
+                ToolCallDelta(
+                    index=int(getattr(raw_call, "index", 0) or 0),
+                    id=getattr(raw_call, "id", None) or None,
+                    name=(getattr(function, "name", None) if function is not None else None) or None,
+                    arguments=(getattr(function, "arguments", None) if function is not None else None) or "",
+                )
+            )
+
+        finish_reason = getattr(choice, "finish_reason", None)
+        if content is None and not tool_calls and finish_reason is None and not usage:
+            return None
+        return ModelStreamChunk(
+            content=content,
+            tool_calls=tool_calls,
+            finish_reason=finish_reason,
+            usage=usage,
+        )
+
+    @staticmethod
+    def _parse_usage(usage_obj: Any) -> dict[str, int]:
+        if usage_obj is None:
+            return {}
+        return {
+            key: int(getattr(usage_obj, key, 0) or 0) for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+        }
+
+    @classmethod
     def _parse_response(cls, response: Any) -> ModelResponse:
         try:
             choice = response.choices[0]
@@ -144,13 +212,7 @@ class OpenAICompatibleProvider:
             if parsed is not None:
                 tool_calls.append(parsed)
 
-        usage: dict[str, int] = {}
-        usage_obj = getattr(response, "usage", None)
-        if usage_obj is not None:
-            usage = {
-                key: int(getattr(usage_obj, key, 0) or 0)
-                for key in ("prompt_tokens", "completion_tokens", "total_tokens")
-            }
+        usage = cls._parse_usage(getattr(response, "usage", None))
 
         return ModelResponse(
             content=content,

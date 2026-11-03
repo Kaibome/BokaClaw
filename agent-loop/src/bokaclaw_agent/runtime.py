@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Generator, Iterable, Iterator
 from typing import Any
 from uuid import uuid4
 
@@ -16,8 +16,17 @@ from .providers.base import ModelProvider
 from .providers.openai_compatible import OpenAICompatibleProvider
 from .sessions.base import SessionRecord, SessionStore
 from .tools import Tool, ToolRegistry
-from .types import AgentEvent, EventType, ModelResponse, RunResult, ToolCall, ToolResult
-from .utils import resolve_awaitable
+from .types import (
+    AgentEvent,
+    EventType,
+    ModelResponse,
+    ModelStreamChunk,
+    RunResult,
+    ToolCall,
+    ToolCallDelta,
+    ToolResult,
+)
+from .utils import parse_tool_arguments, resolve_awaitable
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +104,72 @@ class AgentRuntime:
             **model_kwargs: Forwarded to the provider's ``complete``.
         """
 
+        turn = self._execute(
+            input,
+            session_id=session_id,
+            user_id=user_id,
+            metadata=metadata,
+            stream=False,
+            model_kwargs=model_kwargs,
+        )
+        while True:
+            try:
+                next(turn)
+            except StopIteration as stop:
+                return stop.value
+
+    def stream(
+        self,
+        input: str | list[dict[str, Any]],
+        *,
+        session_id: str | None = None,
+        user_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        **model_kwargs: Any,
+    ) -> Generator[str, None, RunResult]:
+        """Run the ReAct loop, yielding assistant text deltas as they arrive.
+
+        The final :class:`RunResult` is returned when the generator is
+        exhausted. Providers that do not implement ``stream_complete`` are
+        supported through a one-chunk fallback. Closing the generator before
+        exhaustion abandons the turn without persisting it.
+
+        Args:
+            input: A user string or a list of OpenAI wire-format messages.
+            session_id: Existing session to resume, or a new id. Generated
+                when omitted.
+            user_id: Optional owner recorded on the session row.
+            metadata: Session metadata merged into the existing JSONB object.
+            **model_kwargs: Forwarded to the provider's ``stream_complete``.
+        """
+
+        turn = self._execute(
+            input,
+            session_id=session_id,
+            user_id=user_id,
+            metadata=metadata,
+            stream=True,
+            model_kwargs=model_kwargs,
+        )
+        while True:
+            try:
+                delta = next(turn)
+            except StopIteration as stop:
+                return stop.value
+            yield delta
+
+    def _execute(
+        self,
+        input: str | list[dict[str, Any]],
+        *,
+        session_id: str | None,
+        user_id: str | None,
+        metadata: dict[str, Any] | None,
+        stream: bool,
+        model_kwargs: dict[str, Any],
+    ) -> Generator[str, None, RunResult]:
+        """Shared ReAct loop. Yields text deltas only when ``stream`` is true."""
+
         user_messages = normalize_input(input)
         session_id = session_id or uuid4().hex
         context = ContextManager(self.config.system_prompt, self.config.max_history_messages)
@@ -131,8 +206,11 @@ class AgentRuntime:
                     iteration,
                     {"messages": messages, "tools": tool_specs},
                 )
-                response = self._complete(messages, **model_kwargs)
-                self._merge_usage(usage, response.usage)
+                if stream:
+                    response = yield from self._stream_response(messages, usage, model_kwargs)
+                else:
+                    response = self._complete(messages, **model_kwargs)
+                    self._merge_usage(usage, response.usage)
                 self._emit(
                     EventType.MODEL_RESPONSE,
                     session_id,
@@ -307,6 +385,99 @@ class AgentRuntime:
         if not isinstance(response, ModelResponse):
             raise ModelError(f"Provider returned {type(response).__name__}, expected ModelResponse")
         return response
+
+    def _stream_response(
+        self,
+        messages: list[dict[str, Any]],
+        usage: dict[str, int],
+        model_kwargs: dict[str, Any],
+    ) -> Generator[str, None, ModelResponse]:
+        """Consume provider chunks, forwarding text and reassembling tool calls."""
+
+        content_parts: list[str] = []
+        call_parts: dict[int, dict[str, str]] = {}
+        finish_reason: str | None = None
+
+        for chunk in self._stream_complete(messages, **model_kwargs):
+            if chunk.content:
+                content_parts.append(chunk.content)
+                yield chunk.content
+            for delta in chunk.tool_calls:
+                entry = call_parts.setdefault(delta.index, {"id": "", "name": "", "arguments": ""})
+                if delta.id:
+                    entry["id"] = delta.id
+                if delta.name:
+                    entry["name"] += delta.name
+                entry["arguments"] += delta.arguments
+            if chunk.finish_reason:
+                finish_reason = chunk.finish_reason
+            self._merge_usage(usage, chunk.usage)
+
+        return ModelResponse(
+            content="".join(content_parts) or None,
+            tool_calls=self._tool_calls_from_parts(call_parts),
+            finish_reason=finish_reason,
+        )
+
+    def _stream_complete(self, messages: list[dict[str, Any]], **model_kwargs: Any) -> Iterator[ModelStreamChunk]:
+        stream_method = getattr(self.provider, "stream_complete", None)
+        if stream_method is None:
+            response = self._complete(messages, **model_kwargs)
+            tool_calls = [
+                ToolCallDelta(
+                    index=index,
+                    id=call.id,
+                    name=call.name,
+                    arguments=call.raw_arguments
+                    if call.raw_arguments is not None
+                    else json.dumps(call.arguments, ensure_ascii=False),
+                )
+                for index, call in enumerate(response.tool_calls)
+            ]
+            yield ModelStreamChunk(
+                content=response.content,
+                tool_calls=tool_calls,
+                finish_reason=response.finish_reason,
+                usage=response.usage,
+            )
+            return
+
+        try:
+            chunks = stream_method(
+                messages,
+                tools=self.tools.specs(),
+                tool_choice=self.config.tool_choice,
+                **model_kwargs,
+            )
+            for chunk in chunks:
+                if isinstance(chunk, dict):
+                    chunk = ModelStreamChunk.model_validate(chunk)
+                if not isinstance(chunk, ModelStreamChunk):
+                    raise ModelError(f"Provider streamed {type(chunk).__name__}, expected ModelStreamChunk")
+                yield chunk
+        except AgentError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - normalize provider errors
+            raise ModelError(f"Model request failed: {exc}") from exc
+
+    @staticmethod
+    def _tool_calls_from_parts(parts: dict[int, dict[str, str]]) -> list[ToolCall]:
+        calls: list[ToolCall] = []
+        for index in sorted(parts):
+            entry = parts[index]
+            if not entry["name"]:
+                continue
+            arguments, raw, error = parse_tool_arguments(entry["arguments"])
+            calls.append(
+                ToolCall(
+                    id=entry["id"] or f"call_{uuid4().hex}",
+                    name=entry["name"],
+                    arguments=arguments,
+                    raw_arguments=raw,
+                    arguments_error=error,
+                )
+            )
+        return calls
 
     @staticmethod
     def _merge_usage(total: dict[str, int], usage: dict[str, int] | None) -> None:
