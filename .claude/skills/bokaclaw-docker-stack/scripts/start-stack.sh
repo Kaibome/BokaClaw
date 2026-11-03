@@ -76,11 +76,11 @@ POSTGRES_DB=${POSTGRES_DB:-postgres}
 INSTANCE_NAME=${NEXT_PUBLIC_INSTANCE_NAME:-BokaClaw}
 
 docker image inspect "$SERVER_IMAGE" >/dev/null 2>&1 || {
-  echo "error: image $SERVER_IMAGE not found; run build-bokaclaw-images first." >&2
+  echo "error: image $SERVER_IMAGE not found; run bokaclaw-docker-stack/scripts/build-images.sh first." >&2
   exit 1
 }
 docker image inspect "$DASHBOARD_IMAGE" >/dev/null 2>&1 || {
-  echo "error: image $DASHBOARD_IMAGE not found; run build-bokaclaw-images first." >&2
+  echo "error: image $DASHBOARD_IMAGE not found; run bokaclaw-docker-stack/scripts/build-images.sh first." >&2
   exit 1
 }
 docker image inspect "$PG_IMAGE" >/dev/null 2>&1 || docker pull "$PG_IMAGE"

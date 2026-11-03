@@ -6,16 +6,15 @@ the published SDK. Claude Code loads skills in this directory automatically.
 
 | Skill | Use when |
 |---|---|
-| [`build-bokaclaw-images`](build-bokaclaw-images/SKILL.md) | Building or rebuilding `bokaclaw-server:test` / `bokaclaw-dashboard:test`, or a Docker build is stuck on package downloads |
-| [`run-bokaclaw-stack`](run-bokaclaw-stack/SKILL.md) | Starting, stopping, migrating or health-checking the three local containers |
+| [`bokaclaw-docker-stack`](bokaclaw-docker-stack/SKILL.md) | Building or rebuilding the split images, or starting, stopping, migrating and health-checking the local Postgres + server + dashboard containers |
 
-Each skill has a `scripts/` directory that implements the same steps:
+Scripts (also documented in the skill):
 
 ```bash
-.claude/skills/build-bokaclaw-images/scripts/build-images.sh [all|server|dashboard]
-.claude/skills/run-bokaclaw-stack/scripts/start-stack.sh
-.claude/skills/run-bokaclaw-stack/scripts/stop-stack.sh [--remove]
+.claude/skills/bokaclaw-docker-stack/scripts/build-images.sh [all|server|dashboard]
+.claude/skills/bokaclaw-docker-stack/scripts/start-stack.sh
+.claude/skills/bokaclaw-docker-stack/scripts/stop-stack.sh [--remove]
 ```
 
-Both scripts resolve the repository root from their own location, so they can
+All scripts resolve the repository root from their own location, so they can
 be invoked from any working directory.

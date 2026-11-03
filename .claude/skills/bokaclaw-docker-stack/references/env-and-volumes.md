@@ -53,6 +53,41 @@ When `POSTGRES_HOST` is set for a container run, it is overridden with
 `-e POSTGRES_HOST=bokaclaw-postgres`; the value in the file is only a default
 for compose-style setups.
 
+## Manual container commands
+
+`start-stack.sh` automates all of this. Use these commands to isolate a failing
+step; run them from the repository root.
+
+```bash
+docker network create bokaclaw-net          # ignore "already exists"
+
+docker run -d --name bokaclaw-postgres --network bokaclaw-net --restart unless-stopped \
+  --env-file server/.env -p 8432:5432 \
+  -v mem0-local-pg:/var/lib/postgresql/data \
+  pgvector/pgvector:pg17 postgres -c listen_addresses='*'
+
+# one-off migration (the image does NOT migrate on start)
+docker run --rm --network bokaclaw-net --env-file server/.env \
+  -e POSTGRES_HOST=bokaclaw-postgres -e POSTGRES_PORT=5432 \
+  -v mem0-local-history:/app/history \
+  bokaclaw-server:test alembic upgrade head
+
+docker run -d --name bokaclaw-server --network bokaclaw-net --restart unless-stopped \
+  --env-file server/.env -e POSTGRES_HOST=bokaclaw-postgres -e POSTGRES_PORT=5432 \
+  --add-host host.docker.internal:host-gateway \
+  -p 8000:8000 -v mem0-local-history:/app/history \
+  bokaclaw-server:test uvicorn main:app --host 0.0.0.0 --port 8000
+
+docker run -d --name bokaclaw-dashboard --network bokaclaw-net --restart unless-stopped \
+  -e NEXT_PUBLIC_API_URL=http://localhost:8000 \
+  -e API_INTERNAL_URL=http://bokaclaw-server:8000 \
+  -e NEXT_PUBLIC_INSTANCE_NAME=BokaClaw \
+  -p 3000:3000 bokaclaw-dashboard:test
+```
+
+The server command overrides the image `CMD`, which includes `--reload`; that
+is useful in development but wastes CPU in a long-running local stack.
+
 ## Two databases, one cluster
 
 | Variable | Database | Used for |
