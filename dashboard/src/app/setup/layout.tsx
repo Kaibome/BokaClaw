@@ -1,16 +1,15 @@
 import "@/styles/globals.css";
-import React from "react";
-import { Inter, InterDisplay, Roboto, Fustat, DMMono } from "../(root)/fonts";
+import { Inter, Fustat, Roboto, DMMono, InterDisplay } from "../(root)/fonts";
 import { cn } from "@/lib/utils";
 import { ThemeProvider } from "@/components/theme-provider";
 import { AuthProvider } from "@/lib/auth";
 
 export const metadata = {
-  title: "Mem0 - Log in",
-  description: "Log in to Mem0",
+  title: "Setup | BokaClaw",
+  description: "Set up your BokaClaw instance",
 };
 
-export default function AuthLayout({
+export default function SetupLayout({
   children,
 }: {
   children: React.ReactNode;
@@ -31,8 +30,7 @@ export default function AuthLayout({
         <AuthProvider>
           <ThemeProvider
             attribute="class"
-            defaultTheme="system"
-            enableSystem
+            defaultTheme="light"
             disableTransitionOnChange
           >
             {children}

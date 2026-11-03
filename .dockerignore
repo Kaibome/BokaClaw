@@ -1,0 +1,12 @@
+# Applies to Docker builds whose context is the repository root,
+# e.g. server/dev.Dockerfile and server/Dockerfile.all-in-one.
+.git
+.idea
+**/node_modules
+**/.next
+**/__pycache__
+**/*.pyc
+**/.venv
+**/.DS_Store
+**/.env
+**/.env.local

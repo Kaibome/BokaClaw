@@ -78,14 +78,14 @@ export default function LoginForm() {
                     ? "/images/logos/logo-light.png"
                     : "/images/logos/logo-dark.png"
                 }
-                alt="Mem0"
+                alt="BokaClaw"
                 width={41}
                 height={41}
               />
             )}
           </div>
           <h1 className="text-2xl font-semibold text-onSurface-default-primary text-center mb-6 font-fustat">
-            Sign in to Mem0
+            Sign in to BokaClaw
           </h1>
           <div className="flex flex-col gap-4 border p-8 border-memBorder-primary rounded-xl">
             {error && (

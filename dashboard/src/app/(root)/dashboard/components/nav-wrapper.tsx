@@ -35,7 +35,7 @@ export default function NavWrapper() {
   );
   const { user, logout } = useAuth();
 
-  const instanceName = process.env.NEXT_PUBLIC_INSTANCE_NAME || "Mem0";
+  const instanceName = process.env.NEXT_PUBLIC_INSTANCE_NAME || "BokaClaw";
 
   const handleToggle = useCallback(() => {
     dispatch(toggleSidebar());

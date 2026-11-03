@@ -1,4 +1,4 @@
-name: mem0-dev
+name: bokaclaw-dev
 
 services:
   mem0:
@@ -50,7 +50,7 @@ services:
         - "8432:5432"
 
   mem0-dashboard:
-    build: ./dashboard
+    build: ../dashboard
     ports:
       - "3000:3000"
     networks:
@@ -58,7 +58,7 @@ services:
     environment:
       - NEXT_PUBLIC_API_URL=http://localhost:8888
       - API_INTERNAL_URL=http://mem0:8000
-      - NEXT_PUBLIC_INSTANCE_NAME=Mem0
+      - NEXT_PUBLIC_INSTANCE_NAME=BokaClaw
     depends_on:
       mem0:
         condition: service_started

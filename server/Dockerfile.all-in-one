@@ -2,7 +2,8 @@
 
 # ---------------------------------------------------------------------------
 # All-in-one image: FastAPI API + Next.js dashboard + PostgreSQL 17/pgvector
-# Build context: server/
+# Build context: repository root. Build with:
+#   docker build -f server/Dockerfile.all-in-one -t bokaclaw-all-in-one:test .
 # ---------------------------------------------------------------------------
 
 # ---- dashboard build -------------------------------------------------------
@@ -55,7 +56,7 @@ RUN apt-get update \
 COPY --from=node:20-bookworm-slim /usr/local/bin/node /usr/local/bin/node
 
 WORKDIR /app
-COPY requirements.txt .
+COPY server/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Pre-download the bundled Chinese embedding model (~90 MB, ONNX/CPU) so the
@@ -64,14 +65,14 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN python -c "from fastembed import TextEmbedding; TextEmbedding(model_name='BAAI/bge-small-zh-v1.5')" \
     || echo "WARNING: fastembed model pre-download failed; it will be fetched at runtime"
 
-COPY . .
+COPY server/ .
 # Drop the dashboard source; only the built standalone app is shipped.
 RUN rm -rf /app/dashboard
 COPY --from=dashboard-build /build/.next/standalone /app/dashboard
 COPY --from=dashboard-build /build/.next/static /app/dashboard/.next/static
 COPY --from=dashboard-build /build/public /app/dashboard/public
 
-COPY entrypoint.all-in-one.sh /usr/local/bin/entrypoint.sh
+COPY server/entrypoint.all-in-one.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh \
     && mkdir -p /app/history \
     && chown -R postgres:postgres /var/lib/postgresql

@@ -1,4 +1,4 @@
-# Mem0 Self-Hosted Server
+# BokaClaw Self-Hosted Server
 
 Mem0 ships a self-hosted FastAPI server plus a local dashboard. It is secure by default, supports dashboard login and API keys, and exposes OpenAPI docs at `/docs`.
 
@@ -128,7 +128,7 @@ Set `MEM0_TELEMETRY=false` to opt out.
 
 ## Security headers
 
-The dashboard sets the following response headers on every path (see `server/dashboard/next.config.mjs`):
+The dashboard sets the following response headers on every path (see `dashboard/next.config.mjs`):
 
 - `X-Frame-Options: DENY`
 - `Content-Security-Policy: frame-ancestors 'none'`

@@ -218,7 +218,7 @@ export default function ApiKeysPage() {
       ) : keys.length === 0 ? (
         <EmptyState
           title="No API keys yet"
-          description="Create your first API key to start using the Mem0 API."
+          description="Create your first API key to start using the BokaClaw API."
         />
       ) : (
         <Card className="border-memBorder-primary overflow-hidden">

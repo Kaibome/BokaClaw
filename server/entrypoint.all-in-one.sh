@@ -27,7 +27,7 @@ export POSTGRES_PASSWORD POSTGRES_USER POSTGRES_DB POSTGRES_HOST POSTGRES_PORT A
 export API_INTERNAL_URL=${API_INTERNAL_URL:-http://127.0.0.1:8000}
 export DASHBOARD_URL=${DASHBOARD_URL:-http://localhost:3000}
 export NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8000}
-export NEXT_PUBLIC_INSTANCE_NAME=${NEXT_PUBLIC_INSTANCE_NAME:-Mem0}
+export NEXT_PUBLIC_INSTANCE_NAME=${NEXT_PUBLIC_INSTANCE_NAME:-BokaClaw}
 export HISTORY_DB_PATH=${HISTORY_DB_PATH:-/app/history/history.db}
 
 # Default to a CPU-only local embedder so the image works without an embedding
