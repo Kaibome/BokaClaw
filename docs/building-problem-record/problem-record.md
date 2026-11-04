@@ -314,13 +314,14 @@
     - 修复：检索改为「`question_key` 精确命中 + 向量召回不同问法」双路径（精确路径仍受 TTL 约束，按 id 去重），新增 3 条单测；相关三文件 `88 passed`。
     - 修复后 C 的日志出现 `research memory injected user=... chunk_chars=1520`，注入块包含「saved 2026-11-04, today」、上次结论和来源；模型按提示复核后采用了新结论（Qwen3.8-27B，与上次的 Qwen3-8B 不同）。
     - 效果：**注入链路已验证**，但本次样本的工具调用没有减少（6 → 9），且模型运行间策略波动很大（无注入的 B 只有 3 次），因此「减少重复研究」还不能下结论；需要多次 A/B 对照，并考虑按记忆年龄给出更强的复用指引（如 7 天内同题默认直接回答）。
+- **复测中发现的新问题（2026-11-04，P-08 复测时）**：与 Qwen 完全无关的问题「DeepSeek 官方 API 价格」也命中了旧的 Qwen 结论并注入（`chunk_chars=1520`），说明中文短问句的向量相似度可能普遍高于 0.5，向量路径存在**误注入**；精确路径（`question_key`）不会误命中。后续需要提高阈值、加入实体/关键词过滤，或让模型在注入块里看到相似度分数。
 - **可复用结论**：跨会话复用研究结论，必须把「结论 + 来源 + 抓取时间」一起持久化，并在注入时明确标注年龄和「可复核」；只存一段摘要会让模型无法判断时效与出处。写入用 `infer=False` + 稳定 `question_key` 才能保证原文不被二次改写、同问题不重复堆积。
 
 ---
 
 ## P-08 跨 run 工具轨迹未回灌模型（每次 run 从零开始）
 
-- **状态**：已解决（2026-11-04；跨 run 真实复测待执行）
+- **状态**：已解决（2026-11-04 已实现并完成跨 run 真实复测）
 - **发现时间**：2026-11-04
 - **解决时间**：2026-11-04
 - **现象**：同一会话内第二次提问时，模型只能看到上一轮的 user/assistant 文本，看不到上一轮 `WebFetch` / `WebSearch` / `Read` / `Bash` 的调用与结果。P-06 的跨 run 重复抓取（`models` / `qwen-coder` / `coding-plan` 各 4 次）与 P-07 的「结论不沉淀」都受此影响。
@@ -337,7 +338,13 @@
   - 新增 `AGENT_LOOP_HISTORY_TOOL_TRACE`（默认 `true`，设为 `false` 退化为纯文本历史）。
 - **解决后效果**：
   - `tests/test_agent_history.py` 与 `tests/test_agent_runtime.py` 新增 11 条用例，覆盖重建、参数/结果截断、失败 run 轨迹、开关、空消息、预算成对丢弃、孤儿 tool 结果过滤；
-  - server agent 相关 `103 passed`；跨 run 线上复测尚未执行。
+  - server agent 相关 `103 passed`；
+  - 跨 run 真实复测（2026-11-04，`deepseek-flash`，临时关闭 P-07 注入以隔离变量）：
+    - A（新会话，研究轮）：2 次工具调用（`WebFetch` 定价页 + `WebSearch`），5.97s，`completed`；assistant 消息 `metadata.tool_trace` 落库 2 条（`["WebFetch","WebSearch"]`）。
+    - B（同会话追问，要求不使用工具、原样列出上一轮搜索结果）：0 次工具调用，6.2s，逐条列出 5 个搜索结果的标题与 URL，以及抓取请求 URL、重定向后的最终 URL、`cached: false` 与重定向提示——这些只存在于上一轮的 `tool` 消息里，证明历史已按 `assistant.tool_calls` + `tool` 的 wire format 回灌。
+    - 对照（新会话问同一问题）：0 次工具调用，1.3s，仅回答「上下文里没有原始记录」，没有编造。
+  - 复测暴露回灌上限：B 看到的抓取正文在 2,000 字符处被 `AGENT_LOOP_HISTORY_TOOL_RESULT_MAX_CHARS` 截断，价格表恰好落在截断之后，模型主动声明「上一轮价格表在当前上下文中没有原始依据」。默认 2,000 字符对表格/数据页偏小，需要时可调大。
+  - 第一次复测时 P-07 注入仍开着，结论记忆直接污染了对照（模型声称抓取过 `example.com`），正式对照因此关闭了 `AGENT_RESEARCH_MEMORY`；两项特性的评估必须分开做。
 - **可复用结论**：持久化工具调用只是第一步；下一轮必须在历史里以**配对的 `assistant.tool_calls` + `tool` 消息**回灌，模型才能真正复用结果。只存事件表而不重建 wire format，等于没有上下文。
 
 ---
@@ -378,3 +385,4 @@
 | 2026-11-04 | 追加 P-08：server 历史重建回灌每次 run 的 `metadata.tool_trace`，按 `assistant.tool_calls` + `tool` 消息传入 SDK；结果/参数分别截断，预算不足整块丢弃；新增 `AGENT_LOOP_HISTORY_TOOL_TRACE` 等配置；相关 103 tests passed，跨 run 复测待执行 |
 | 2026-11-04 | 追加 P-09：Dashboard Memory Detail 抽屉补 `flex flex-col` + 正文 `flex-1 min-h-0 overflow-y-auto`，长内容可滚动；文案加 `break-words whitespace-pre-wrap`；`tsc` 与 `next build` 通过 |
 | 2026-11-04 | 记录规则新增「发现时间 / 解决时间」；P-01 ~ P-09 的发现时间均记为 2026-11-04，已解决条目解决时间记为 2026-11-04，部分缓解的 P-05 / P-07 解决时间留空 |
+| 2026-11-04 | P-08 跨 run 真实复测：同会话追问 0 次工具调用即可原样复述上一轮搜索标题/URL 与抓取重定向信息，新会话对照只答「上下文里没有原始记录」；同时发现回灌结果 2,000 字符上限会截掉表格，以及 P-07 对无关中文问题误注入 |
