@@ -136,6 +136,16 @@ URL (ignoring the fragment) returns the earlier result with `"cached": true`
 instead of making another request. Failed fetches are not cached. The cache is
 per run, so a new turn or a retry fetches pages again.
 
+Across runs, the server persists each run's tool trace in the assistant
+message's `metadata.tool_trace` (and in `agent_run_events`). On the next turn it
+rebuilds those records as OpenAI wire-format `assistant.tool_calls` plus `tool`
+messages and sends them to the runtime as history, so the model can reuse pages,
+file reads, and command output it already gathered instead of starting from a
+blank slate. A failed or cancelled run contributes its tool trace but never a
+fabricated answer. Replayed results and arguments are capped individually and
+count toward the history character budget. Set
+`AGENT_LOOP_HISTORY_TOOL_TRACE=false` to send text-only history.
+
 File paths are resolved inside `AGENT_WORKSPACE_ROOT`, and `..` or symlink
 escapes are rejected. Shell tools are best run in the bundled executor
 container. Set `AGENT_EXECUTOR_URL` (for the local stack:
@@ -215,6 +225,9 @@ JSON response instead. Requests are rate limited to 30/minute per IP.
 | `AGENT_LOOP_READ_TIMEOUT_SECONDS` | `120` | Executor read timeout. |
 | `AGENT_LOOP_MAX_SECONDS` | `300` | Total wall clock for one turn. |
 | `AGENT_LOOP_HISTORY_MESSAGES` | `40` | Prior turns forwarded as context. |
+| `AGENT_LOOP_HISTORY_TOOL_TRACE` | `true` | Replay each prior run's persisted tool calls and results into the next turn's history. Set to `false` for text-only history. |
+| `AGENT_LOOP_HISTORY_TOOL_RESULT_MAX_CHARS` | `2000` | Per-tool-result cap while replaying history; `0` disables the cap. |
+| `AGENT_LOOP_HISTORY_TOOL_ARGUMENT_MAX_CHARS` | `1000` | Per-tool-call argument cap while replaying history; `0` disables the cap. |
 
 The `AGENT_CONTEXT_*` / `AGENT_TOOL_RESULT_*` variables apply only to the
 in-process runtime. A remote executor set through `AGENT_LOOP_URL` uses its own

@@ -77,7 +77,7 @@ class ActiveRunConflict(Exception):
 class PreparedTurn:
     conversation: ConversationOut
     user_message: ConversationMessageOut
-    history: list[dict[str, str]]
+    history: list[dict[str, Any]]
 
 
 @dataclass

@@ -296,6 +296,28 @@
 
 ---
 
+## P-08 跨 run 工具轨迹未回灌模型（每次 run 从零开始）
+
+- **状态**：已解决（2026-11-04；跨 run 真实复测待执行）
+- **现象**：同一会话内第二次提问时，模型只能看到上一轮的 user/assistant 文本，看不到上一轮 `WebFetch` / `WebSearch` / `Read` / `Bash` 的调用与结果。P-06 的跨 run 重复抓取（`models` / `qwen-coder` / `coding-plan` 各 4 次）与 P-07 的「结论不沉淀」都受此影响。
+- **根因（事实）**：
+  1. 工具调用与结果已经持久化：run 期间写入 `agent_run_events`（`tool.call` / `tool.result`），终态 assistant 消息的 `metadata.tool_trace` 保存有界快照；
+  2. 但 `store.build_history()` 只查询 `role in ('user','assistant')` 且 `status='completed'`、`content != ''` 的消息，只返回 `{role, content}`；
+  3. `runtime.build_messages()` 又只接受 `user/assistant/system`，`role='tool'` 与 `tool_calls` 在进入 SDK 前被丢弃。SDK `ContextManager` 本身支持完整的 OpenAI wire format，因此瓶颈在 server 的历史重建。
+- **解决措施**：
+  - `store.build_history()` 查询 `status='completed'` 的 user/assistant 消息，以及带 `metadata.tool_trace` 的 assistant 消息（包括失败/取消的 run，但只回灌工具记录，不伪造终答）；
+  - 每条 assistant 记录重建为 `assistant(tool_calls)` + 每个调用一条 `tool` 消息 + 有终答时再追加一条 assistant 文本，保持 `tool_call_id` 配对；
+  - 复用 `arguments` / `raw_arguments`，非法 JSON 参数回退为 `{}`；工具结果与参数分别按 `AGENT_LOOP_HISTORY_TOOL_RESULT_MAX_CHARS`（默认 2,000）与 `AGENT_LOOP_HISTORY_TOOL_ARGUMENT_MAX_CHARS`（默认 1,000）截断；
+  - 历史字符预算按整个 tool block 计费，并保证保留 assistant 时同时保留其前一条 user 问题；预算不足时整块丢弃，不产生孤儿 `tool` 消息；
+  - `runtime.build_messages()` 按 OpenAI wire format 透传 `tool_calls` / `role='tool'`，并丢弃孤儿或格式错误的工具记录，避免上游校验失败；
+  - 新增 `AGENT_LOOP_HISTORY_TOOL_TRACE`（默认 `true`，设为 `false` 退化为纯文本历史）。
+- **解决后效果**：
+  - `tests/test_agent_history.py` 与 `tests/test_agent_runtime.py` 新增 11 条用例，覆盖重建、参数/结果截断、失败 run 轨迹、开关、空消息、预算成对丢弃、孤儿 tool 结果过滤；
+  - server agent 相关 `103 passed`；跨 run 线上复测尚未执行。
+- **可复用结论**：持久化工具调用只是第一步；下一轮必须在历史里以**配对的 `assistant.tool_calls` + `tool` 消息**回灌，模型才能真正复用结果。只存事件表而不重建 wire format，等于没有上下文。
+
+---
+
 ## 变更记录
 
 | 日期 | 变更 |
@@ -306,3 +328,4 @@
 | 2026-11-04 | 实现 P-04 的 S1（事实账本）+ S3（步数感知收尾）+ S5（可行动的工具反馈）；三次同题复测 `finish_reason=final`（10 轮 29s / 16 轮 25s，均 10 次工具调用），P-04 改为已解决，P-06 效果补测 |
 | 2026-11-04 | 实现 P-04 第二批：S2（无进展守卫，nudge 3 / 强制终答 5、`stop_reason=no_progress`、`NoProgressError` / `agent_no_progress`）；修复 HTML 表格单元格分隔、缓存抓取返回摘要（`full=true` 取全文）、搜索缓存 key 纳入 `max_results`；agent-loop 156 passed / server agent 131 passed；两次同题复测 `final`（58.7s/17 调用、29.1s/12 调用） |
 | 2026-11-04 | 追加 P-07：实现跨会话「可复用研究结论」——成功 run 后把结论 + 来源 + 抓取时间写入 mem0（`infer=False`、`kind=research_conclusion`、同问题 update），下一轮按相似度 + TTL 检索并注入 system prompt；新增 20 条用例、三文件 85 passed，跨会话复测待执行 |
+| 2026-11-04 | 追加 P-08：server 历史重建回灌每次 run 的 `metadata.tool_trace`，按 `assistant.tool_calls` + `tool` 消息传入 SDK；结果/参数分别截断，预算不足整块丢弃；新增 `AGENT_LOOP_HISTORY_TOOL_TRACE` 等配置；相关 103 tests passed，跨 run 复测待执行 |

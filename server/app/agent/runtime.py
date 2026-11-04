@@ -283,15 +283,76 @@ def is_locally_configured() -> bool:
     return True
 
 
+def _history_tool_calls(value: Any) -> List[Dict[str, Any]]:
+    """Keep only well-formed OpenAI tool calls from a history item."""
+    if not isinstance(value, list):
+        return []
+    calls: List[Dict[str, Any]] = []
+    for call in value:
+        if not isinstance(call, dict):
+            continue
+        call_id = call.get("id")
+        function = call.get("function")
+        if not isinstance(call_id, str) or not call_id or not isinstance(function, dict):
+            continue
+        name = function.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        arguments = function.get("arguments")
+        calls.append(
+            {
+                "id": call_id,
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "arguments": arguments if isinstance(arguments, str) else "{}",
+                },
+            }
+        )
+    return calls
+
+
 def build_messages(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Turn a server payload into the message list sent to the model."""
+    """Turn a server payload into the message list sent to the model.
+
+    History may include the tool calls and results persisted for earlier runs.
+    They are forwarded in OpenAI wire format so the model can reuse facts it
+    already gathered. Orphaned or malformed tool records are dropped rather
+    than sent upstream, where they would fail validation.
+    """
     messages: List[Dict[str, Any]] = []
+    pending_tool_calls: set[str] = set()
     for item in payload.get("history") or []:
         if not isinstance(item, dict):
             continue
         role = item.get("role")
         content = item.get("content")
-        if role in {"user", "assistant", "system"} and isinstance(content, str):
+
+        if role == "tool":
+            tool_call_id = item.get("tool_call_id")
+            if isinstance(tool_call_id, str) and tool_call_id in pending_tool_calls and isinstance(content, str):
+                pending_tool_calls.discard(tool_call_id)
+                messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": content})
+            continue
+
+        if role == "assistant":
+            tool_calls = _history_tool_calls(item.get("tool_calls"))
+            if tool_calls:
+                pending_tool_calls = {call["id"] for call in tool_calls}
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": content if isinstance(content, str) else "",
+                        "tool_calls": tool_calls,
+                    }
+                )
+            elif isinstance(content, str):
+                pending_tool_calls = set()
+                messages.append({"role": "assistant", "content": content})
+            continue
+
+        if role in {"user", "system"} and isinstance(content, str):
+            pending_tool_calls = set()
             messages.append({"role": role, "content": content})
 
     message = payload.get("message")

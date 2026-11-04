@@ -530,6 +530,99 @@ def test_build_messages_filters_history_and_appends_user_turn():
     ]
 
 
+def test_build_messages_forwards_persisted_tool_history():
+    messages = agent_runtime.build_messages(
+        {
+            "history": [
+                {"role": "user", "content": "compare qwen models"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "WebFetch", "arguments": '{"url": "https://example.com"}'},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_1",
+                    "content": '{"url": "https://example.com", "content": "page"}',
+                },
+                {"role": "assistant", "content": "answer"},
+            ],
+            "message": "follow up",
+        }
+    )
+
+    assert messages == [
+        {"role": "user", "content": "compare qwen models"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "WebFetch", "arguments": '{"url": "https://example.com"}'},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": '{"url": "https://example.com", "content": "page"}',
+        },
+        {"role": "assistant", "content": "answer"},
+        {"role": "user", "content": "follow up"},
+    ]
+
+
+def test_build_messages_drops_orphan_tool_results():
+    messages = agent_runtime.build_messages(
+        {
+            "history": [
+                {"role": "tool", "tool_call_id": "missing", "content": "stale"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {"id": "call_1", "type": "function", "function": {"name": "Read", "arguments": "{}"}},
+                        {"id": "bad", "type": "function", "function": {}},
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_1", "content": "file"},
+                {"role": "tool", "tool_call_id": "bad", "content": "dropped"},
+            ],
+            "message": "next",
+        }
+    )
+
+    assert [message["role"] for message in messages] == ["assistant", "tool", "user"]
+    assert messages[0]["tool_calls"] == [
+        {"id": "call_1", "type": "function", "function": {"name": "Read", "arguments": "{}"}}
+    ]
+    assert messages[1] == {"role": "tool", "tool_call_id": "call_1", "content": "file"}
+
+
+def test_build_messages_keeps_assistant_text_without_valid_tool_calls():
+    messages = agent_runtime.build_messages(
+        {
+            "history": [
+                {"role": "assistant", "content": "partial answer", "tool_calls": [{"id": "x"}]},
+            ],
+            "message": "next",
+        }
+    )
+
+    assert messages == [
+        {"role": "assistant", "content": "partial answer"},
+        {"role": "user", "content": "next"},
+    ]
+
+
 def test_build_messages_requires_a_message():
     with pytest.raises(AgentLoopError) as excinfo:
         agent_runtime.build_messages({"history": []})
