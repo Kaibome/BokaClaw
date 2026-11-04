@@ -1,19 +1,6 @@
 ---
 name: bokaclaw-docker-stack
-description: >
-  Builds and runs BokaClaw locally in Docker: two split images
-  (`bokaclaw-server:test` from the repository root, `bokaclaw-dashboard:test`
-  from `dashboard/`) with fast package mirrors for the Lima/Colima VM, then
-  four containers — `bokaclaw-postgres` (pgvector/pg17), `bokaclaw-server`
-  (FastAPI, port 8000), `bokaclaw-dashboard` (Next.js, port 3000) and
-  `bokaclaw-executor` (sandboxed agent shell, internal network only) — on
-  `bokaclaw-net` plus an internal `bokaclaw-exec` bridge, including Alembic
-  migrations, `server/.env` generation and health checks. TRIGGER when: asked
-  to build/rebuild BokaClaw images, start or stop the local frontend + backend
-  + Postgres, run migrations, reset the admin password, or debug a build stuck
-  on package downloads / a dashboard that cannot reach the API or database. DO
-  NOT TRIGGER when: asked to change application code, or when working with the
-  legacy all-in-one image.
+description: 在 Docker 中本地构建并运行 BokaClaw：从仓库根目录构建 `bokaclaw-server:test`、从 `dashboard/` 构建 `bokaclaw-dashboard:test` 两个镜像（为 Lima/Colima 虚拟机配置了快速软件源），然后在 `bokaclaw-net` 和内部 `bokaclaw-exec` 网桥上启动四个容器——`bokaclaw-postgres`（pgvector/pg17）、`bokaclaw-server`（FastAPI，端口 8000）、`bokaclaw-dashboard`（Next.js，端口 3000）和 `bokaclaw-executor`（沙箱化的 Agent shell，仅内网可达）——并负责 Alembic 迁移、`server/.env` 生成和健康检查。触发场景：要求构建/重建 BokaClaw 镜像，启动或停止本地前端 + 后端 + Postgres，执行数据库迁移，重置管理员密码，或排查构建卡在软件包下载、dashboard 连不上 API/数据库的问题。不触发场景：要求修改应用代码，或仍在处理旧版 all-in-one 镜像。
 license: Apache-2.0
 metadata:
   author: BokaClaw
