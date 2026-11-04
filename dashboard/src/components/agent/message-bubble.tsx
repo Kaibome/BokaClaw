@@ -1,5 +1,6 @@
 import { AlertCircle, RotateCcw } from "lucide-react";
 
+import { RunIdBadge } from "@/components/agent/run-id-badge";
 import { ToolTrace } from "@/components/agent/tool-trace";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -37,6 +38,10 @@ export function MessageBubble({
     (message.runStatus === "cancelled" || message.status === "cancelled");
   const isReconnecting = message.reconnecting === true;
   const isStopping = message.cancelRequested === true && message.streaming;
+  const runId =
+    typeof message.metadata?.run_id === "string"
+      ? message.metadata.run_id
+      : null;
   const canRetry =
     !isUser &&
     !message.streaming &&
@@ -72,6 +77,8 @@ export function MessageBubble({
       {!isUser && message.toolTrace?.length ? (
         <ToolTrace entries={message.toolTrace} />
       ) : null}
+
+      {!isUser && runId ? <RunIdBadge runId={runId} /> : null}
 
       {isReconnecting && (
         <span className="typo-caption-sm text-onSurface-default-tertiary">

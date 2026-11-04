@@ -207,6 +207,8 @@ data: {"run_id":"uuid","conversation_id":"uuid","status":"completed","last_seq":
 
 失败、取消或中断时，不发送 `message.completed`，顺序为：悬挂工具补发的 `tool.result(status="aborted")` → `error` → `done`。`done` 不是成功信号，必须读 `status`。
 
+助手消息的 `metadata` 会写入本次执行的 `run_id`（`agent_runs.id`），以及中断时的 `run_status`、`error_code` 和 `tool_trace`。dashboard 从消息行读取 `metadata.run_id`，在助手消息下方显示短 id 并提供一键复制完整 UUID；该字段随 `/conversations/{id}` 和历史消息一起返回，刷新页面后仍可复制。
+
 ```text
 event: error
 data: {

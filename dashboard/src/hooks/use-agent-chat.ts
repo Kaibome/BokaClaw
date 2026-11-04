@@ -876,6 +876,11 @@ export function useAgentChat() {
             (message.streaming || message.id === assistantIdRef.current)
               ? {
                   ...message,
+                  metadata:
+                    payload?.run_id &&
+                    typeof message.metadata?.run_id !== "string"
+                      ? { ...message.metadata, run_id: payload.run_id }
+                      : message.metadata,
                   streaming: false,
                   reconnecting: false,
                   runStatus: finalStatus,
