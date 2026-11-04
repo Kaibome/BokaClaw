@@ -418,6 +418,7 @@ closing the request cancels the upstream turn.
 | `AGENT_CONTEXT_KEEP_RECENT_TOKENS` | — | Recent tokens kept verbatim; empty uses half the budget. |
 | `AGENT_CONTEXT_COMPRESSION` | `summary` | `summary` or `truncate`; anything else falls back to `summary`. |
 | `AGENT_TOOL_RESULT_MAX_CHARS` | `16000` | In-process runtime tool-result cap; `0` / `off` disables it. |
+| `AGENT_CONTEXT_DEBUG` | off | Log the resolved context settings once per turn and each `context_compressed` event at INFO. Diagnostics only; the event is never forwarded to clients. |
 
 The `AGENT_CONTEXT_*` / `AGENT_TOOL_RESULT_*` variables apply only when the
 server runs this package in-process; they are not part of the remote `/invoke`

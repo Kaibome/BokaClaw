@@ -98,6 +98,23 @@ def _env_compression_mode(name: str, default: str = "summary") -> str:
     return value if value in {"summary", "truncate"} else default
 
 
+_CONTEXT_DEBUG_ENV = "AGENT_CONTEXT_DEBUG"
+_context_logger = logging.getLogger("app.agent.context")
+
+
+def _context_debug(message: str, *args: Any) -> None:
+    """Log context-compression diagnostics when ``AGENT_CONTEXT_DEBUG`` is on.
+
+    ``app.main`` already configures INFO logging for the server; the fallback keeps
+    these lines visible when this module is imported without it (CLI, scripts).
+    """
+    if (os.environ.get(_CONTEXT_DEBUG_ENV) or "").strip().lower() not in {"1", "true", "yes", "on"}:
+        return
+    if not logging.getLogger().handlers:
+        logging.basicConfig(level=logging.INFO)
+    _context_logger.info(message, *args)
+
+
 @dataclass(frozen=True)
 class LocalAgentConfig:
     """Model and loop settings for the in-process runtime."""
@@ -288,9 +305,26 @@ def _bridge_tool_event(event: Any, put: Callable[[str, Any], None]) -> None:
     """Map one SDK event to an ``AgentToolCall`` / ``AgentToolResult``.
 
     Runs on the SDK worker thread, so it only calls ``put``; the queue write is
-    hopped back to the event loop by ``stream_local_agent``.
+    hopped back to the event loop by ``stream_local_agent``. ``context_compressed``
+    events are diagnostics only: they are logged when ``AGENT_CONTEXT_DEBUG`` is
+    on and never forwarded to the client.
     """
     event_type = getattr(getattr(event, "type", None), "value", getattr(event, "type", None))
+    if event_type == "context_compressed":
+        stats = getattr(event, "data", None) or {}
+        if isinstance(stats, dict):
+            _context_debug(
+                "context_compressed session=%s iteration=%s before_tokens=%s after_tokens=%s "
+                "dropped_messages=%s summarized=%s fallback=%s",
+                getattr(event, "session_id", "-"),
+                getattr(event, "iteration", 0),
+                stats.get("before_tokens"),
+                stats.get("after_tokens"),
+                stats.get("dropped_messages"),
+                stats.get("summarized"),
+                stats.get("fallback"),
+            )
+        return
     if event_type not in {"tool_call", "tool_result"}:
         return
 
@@ -385,6 +419,16 @@ def build_runtime(
         context_keep_recent_tokens=config.context_keep_recent_tokens,
         context_compression=config.context_compression,
         tool_result_max_chars=config.tool_result_max_chars,
+    )
+    _context_debug(
+        "agent context config: model=%s max_iterations=%s context_max_tokens=%s "
+        "context_keep_recent_tokens=%s context_compression=%s tool_result_max_chars=%s",
+        config.model,
+        config.max_iterations,
+        config.context_max_tokens,
+        config.context_keep_recent_tokens,
+        config.context_compression,
+        config.tool_result_max_chars,
     )
     tools = [*_memory_tools(sdk, payload.get("user_id")), *build_dev_tools(sdk)]
     return sdk.AgentRuntime(agent_config, tools=tools, on_event=on_event)

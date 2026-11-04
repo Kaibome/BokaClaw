@@ -155,6 +155,7 @@ def clean_agent_env(monkeypatch):
         "AGENT_CONTEXT_MAX_TOKENS",
         "AGENT_CONTEXT_KEEP_RECENT_TOKENS",
         "AGENT_CONTEXT_COMPRESSION",
+        "AGENT_CONTEXT_DEBUG",
         "AGENT_TOOL_RESULT_MAX_CHARS",
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
@@ -674,6 +675,64 @@ def test_build_runtime_forwards_context_settings():
     assert kwargs["context_keep_recent_tokens"] == 2000
     assert kwargs["context_compression"] == "truncate"
     assert kwargs["tool_result_max_chars"] == 1000
+
+
+def test_context_debug_is_silent_by_default(monkeypatch, caplog):
+    monkeypatch.setattr(agent_runtime, "_current_llm_config", lambda: {})
+    monkeypatch.setenv("AGENT_MODEL", "test-model")
+    monkeypatch.setenv("AGENT_API_KEY", "test-key")
+    config = agent_runtime.load_local_config()
+
+    with caplog.at_level("INFO", logger="app.agent.context"):
+        agent_runtime.build_runtime(FakeSDK(), config, {"user_id": None, "message": "hi"})
+
+    assert caplog.records == []
+
+
+def test_context_debug_logs_the_resolved_budget(monkeypatch, caplog):
+    monkeypatch.setattr(agent_runtime, "_current_llm_config", lambda: {})
+    monkeypatch.setenv("AGENT_MODEL", "test-model")
+    monkeypatch.setenv("AGENT_API_KEY", "test-key")
+    monkeypatch.setenv("AGENT_CONTEXT_DEBUG", "1")
+    config = agent_runtime.load_local_config()
+
+    with caplog.at_level("INFO", logger="app.agent.context"):
+        agent_runtime.build_runtime(FakeSDK(), config, {"user_id": None, "message": "hi"})
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert len(messages) == 1
+    assert "agent context config:" in messages[0]
+    assert "context_max_tokens=32000" in messages[0]
+    assert "context_compression=summary" in messages[0]
+    assert "tool_result_max_chars=16000" in messages[0]
+
+
+def test_context_debug_logs_compression_events_without_forwarding(monkeypatch, caplog):
+    monkeypatch.setenv("AGENT_CONTEXT_DEBUG", "1")
+    forwarded = []
+    event = types.SimpleNamespace(
+        type=types.SimpleNamespace(value="context_compressed"),
+        session_id="conv-1",
+        iteration=6,
+        data={
+            "before_tokens": 34000,
+            "after_tokens": 16000,
+            "dropped_messages": 8,
+            "summarized": True,
+            "fallback": False,
+        },
+    )
+
+    with caplog.at_level("INFO", logger="app.agent.context"):
+        agent_runtime._bridge_tool_event(event, lambda kind, value=None: forwarded.append(kind))
+
+    assert forwarded == []
+    messages = [record.getMessage() for record in caplog.records]
+    assert len(messages) == 1
+    assert "context_compressed session=conv-1 iteration=6" in messages[0]
+    assert "before_tokens=34000" in messages[0]
+    assert "after_tokens=16000" in messages[0]
+    assert "summarized=True" in messages[0]
 
 
 def test_available_sdk_with_config_is_configured(monkeypatch):

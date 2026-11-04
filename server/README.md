@@ -179,6 +179,7 @@ JSON response instead. Requests are rate limited to 30/minute per IP.
 | `AGENT_CONTEXT_KEEP_RECENT_TOKENS` | half the budget | Recent tokens kept verbatim by compression. |
 | `AGENT_CONTEXT_COMPRESSION` | `summary` | `summary` (model summary, truncation fallback) or `truncate` (drop only). |
 | `AGENT_TOOL_RESULT_MAX_CHARS` | `16000` | Per-tool-result cap in the model view; full content is still stored. `0` / `off` disables it. |
+| `AGENT_CONTEXT_DEBUG` | off | Log the resolved model-view settings once per turn and each `context_compressed` decision at INFO. Diagnostics only; the event is never sent to the client. |
 | `AGENT_DEV_TOOLS` | `true` | Register the developer tool set. |
 | `AGENT_WORKSPACE_ROOT` | `/app/workspace` | File tools cannot escape this directory. Created on first use. |
 | `AGENT_TOOLS_ALLOW_SHELL` | `false` | Register `Bash`, `PowerShell`, and `Monitor`. |
