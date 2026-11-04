@@ -191,6 +191,9 @@ JSON response instead. Requests are rate limited to 30/minute per IP.
 | `AGENT_PROGRESS_GUARD` | `true` | Detect tool calls that return no new evidence; after a few the agent is nudged to change course, then forced to answer. Set to `false` to disable. |
 | `AGENT_PROGRESS_NUDGE_AFTER` | `3` | Consecutive no-progress calls before the nudge; values below 2 are raised to 2. |
 | `AGENT_PROGRESS_STOP_AFTER` | `5` | Consecutive no-progress calls before the forced final answer; raised to the nudge threshold when lower. |
+| `AGENT_RESEARCH_MEMORY` | `true` | Save conclusions from completed web-research turns to mem0, and offer fresh similar conclusions to later turns. Set to `false` to disable both halves. |
+| `AGENT_RESEARCH_MEMORY_TTL_DAYS` | `30` | Saved conclusions older than this are not offered to the model; values below 1 are raised to 1. |
+| `AGENT_RESEARCH_MEMORY_MIN_SCORE` | `0.5` | Minimum similarity for a saved conclusion to be offered; clamped to 0–1. |
 | `AGENT_CONTEXT_DEBUG` | on | Log the resolved model-view settings once per turn and each `context_compressed` decision at INFO. Diagnostics only; the event is never sent to the client. Set to `0` / `false` / `no` / `off` to silence. |
 | `AGENT_DEV_TOOLS` | `true` | Register the developer tool set. |
 | `AGENT_WORKSPACE_ROOT` | `/app/workspace` | File tools cannot escape this directory. Created on first use. |
@@ -216,6 +219,28 @@ JSON response instead. Requests are rate limited to 30/minute per IP.
 The `AGENT_CONTEXT_*` / `AGENT_TOOL_RESULT_*` variables apply only to the
 in-process runtime. A remote executor set through `AGENT_LOOP_URL` uses its own
 configuration.
+
+### Reusable research memory
+
+After a completed turn whose tool trace contains a successful `WebSearch` or
+`WebFetch`, the server stores the final answer, the deduplicated source URLs,
+the question, and the capture time as one mem0 memory scoped to the signed-in
+user (`kind="research_conclusion"`, written with `infer=False` so nothing is
+paraphrased). An identical question updates that memory instead of appending a
+duplicate.
+
+Before a turn, the in-process runtime searches those memories with the current
+message. Conclusions that are older than `AGENT_RESEARCH_MEMORY_TTL_DAYS` or
+below `AGENT_RESEARCH_MEMORY_MIN_SCORE` are dropped; the rest are added to the
+system prompt with their age and an explicit instruction to re-verify facts
+that may have changed. The block is view-only and is not persisted as a
+message. Memory failures never fail the turn.
+
+This half applies to the in-process runtime only; a remote executor does not
+receive the block. Saving, however, runs for any completed turn whose trace
+contains web tool events, including a remote executor that emits `tool.*`
+events. Set `AGENT_RESEARCH_MEMORY=false` to disable both storing and
+retrieval.
 
 If no model can be resolved, `POST /agent` returns 503 `agent_not_configured`;
 set `AGENT_MODEL` (plus `AGENT_BASE_URL` for non-OpenAI providers). From inside

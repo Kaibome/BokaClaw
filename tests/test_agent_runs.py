@@ -30,6 +30,7 @@ if _SERVER_DIR not in sys.path:
     sys.path.insert(0, _SERVER_DIR)
 
 import app.routers.agent as agent_router  # noqa: E402
+import app.agent.runner as agent_runner  # noqa: E402
 from app.agent.events import AgentCompleted, AgentDelta, AgentLoopError, AgentToolCall, AgentToolResult  # noqa: E402
 from app.agent.runner import AgentRunManager, RunConfig  # noqa: E402
 from app.agent.schemas import ConversationMessageOut, ConversationOut  # noqa: E402
@@ -306,6 +307,58 @@ async def test_manager_persists_ordered_events_and_completes():
     assert message.content == "hello"
     assert message.status == "completed"
     assert message.meta["tool_trace"][0]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_manager_saves_research_memory_after_completion(monkeypatch):
+    saved = []
+
+    def fake_remember(payload, content, entries):
+        saved.append((payload, content, entries))
+        return "mem-1"
+
+    monkeypatch.setattr(agent_runner, "remember_research", fake_remember)
+
+    async def executor(_payload, _request_id, *, cancel_event=None, max_seconds=None):
+        yield AgentToolCall(
+            tool_call_id="t1",
+            name="WebFetch",
+            iteration=1,
+            arguments={"url": "https://a.example"},
+        )
+        yield AgentToolResult(
+            tool_call_id="t1",
+            name="WebFetch",
+            content='{"url": "https://a.example", "content": "body"}',
+            iteration=1,
+        )
+        yield AgentDelta("answer")
+        yield AgentCompleted(metadata={"finish_reason": "stop"})
+
+    repo = FakeRepo()
+    run = repo.add_run(
+        _run(
+            request_payload={
+                "message": "which model?",
+                "user_id": "user-1",
+                "run_id": "client-run-1",
+            }
+        )
+    )
+    manager = AgentRunManager(_config(), repo=repo, executor=executor)
+
+    manager.submit(run.id)
+    await manager.wait(run.id, timeout=2)
+    await manager.shutdown()
+
+    assert repo.runs[run.id].status == "completed"
+    assert len(saved) == 1
+    payload, content, entries = saved[0]
+    assert payload["user_id"] == "user-1"
+    assert payload["message"] == "which model?"
+    assert content == "answer"
+    assert entries[0]["name"] == "WebFetch"
+    assert entries[0]["status"] == "completed"
 
 
 @pytest.mark.asyncio

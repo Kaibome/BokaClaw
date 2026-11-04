@@ -481,11 +481,15 @@ closing the request cancels the upstream turn.
 | `AGENT_PROGRESS_GUARD` | `true` | In-process runtime: detect tool calls that return no new evidence and stop the loop when the model keeps repeating itself. |
 | `AGENT_PROGRESS_NUDGE_AFTER` | `3` | Consecutive no-progress calls before the model is nudged; values below 2 are raised to 2. |
 | `AGENT_PROGRESS_STOP_AFTER` | `5` | Consecutive no-progress calls before a final answer is forced; raised to the nudge threshold when lower. |
+| `AGENT_RESEARCH_MEMORY` | `true` | Save conclusions from completed web-research runs to mem0; the in-process runtime also offers fresh similar ones on later turns. |
+| `AGENT_RESEARCH_MEMORY_TTL_DAYS` | `30` | Saved conclusions older than this are not offered; values below 1 are raised to 1. |
+| `AGENT_RESEARCH_MEMORY_MIN_SCORE` | `0.5` | Minimum similarity for a saved conclusion to be offered; clamped to 0–1. |
 | `AGENT_CONTEXT_DEBUG` | off | Log the resolved context settings once per turn and each `context_compressed` event at INFO. Diagnostics only; the event is never forwarded to clients. |
 
 The `AGENT_CONTEXT_*` / `AGENT_TOOL_RESULT_*` variables apply only when the
 server runs this package in-process; they are not part of the remote `/invoke`
-contract.
+contract. `AGENT_RESEARCH_MEMORY` retrieval is also in-process only; saving
+runs after any completed turn whose trace contains web tool events.
 
 From inside the compose network, a wrapper running on the host is reachable
 at `http://host.docker.internal:<port>`.

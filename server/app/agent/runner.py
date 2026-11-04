@@ -37,6 +37,7 @@ from app.agent.events import (
 from app.agent.loop import stream_agent
 from app.agent.payloads import attach_trace, should_persist_reply, tool_call_payload, tool_result_payload
 from app.agent.repo import RunRepository, utcnow
+from app.agent.research_memory import remember_research
 from app.agent.schemas import ActiveRunOut, AgentRunOut
 from app.agent.store import serialize_message
 from app.agent.trace import ToolTrace
@@ -662,6 +663,19 @@ class AgentRunManager:
                 },
             ),
         )
+
+        if status == "completed":
+            # Save the conclusion after the client already received "done" so a
+            # slow embedding call cannot delay the turn.
+            try:
+                await asyncio.to_thread(
+                    remember_research,
+                    dict(run.request_payload or {}),
+                    writer.content,
+                    trace.snapshot(),
+                )
+            except Exception:
+                logger.warning("Failed to record research memory for run %s", run.id, exc_info=True)
 
     # -------------------------------------------------------------- recovery
 

@@ -268,6 +268,34 @@
 
 ---
 
+## P-07 跨会话重复研究同一问题（结论不沉淀）
+
+- **状态**：部分缓解（2026-11-04 已实现，待跨会话复测）
+- **场景**：同一用户反复问「qwen 系列最适合个人开发者的模型」；P-06 的 4 次 run 分布在多个会话中。
+- **现象**：每次提问都从零开始 `WebSearch` → `WebFetch`，前一晚已经得到的结论、来源和抓取时间完全没有被下一次运行使用；同一批 URL 被跨 run 反复抓取（P-06 统计：`models` / `qwen-coder` / `coding-plan` 各 4 次）。
+- **根因**：
+  1. 对话历史只按 `conversation_id` 读取，跨会话不可见；
+  2. mem0 里只有模型显式调用 `save_memory` 才会写入的「用户事实」，没有「本轮研究结论 + 来源 + 抓取时间」的结构化记录；
+  3. 新会话没有「先查已有结论、再决定是否重查」的提示或工具调用约束。
+- **解决措施**：
+  - 新增 `server/app/agent/research_memory.py`，把「问题 + 终答 + 去重后的来源 URL + 抓取/保存时间」写成一条 user 级 mem0 记忆：
+    - 仅当 run 状态为 `completed`、终答非空、工具轨迹里至少有一个成功的 `WebSearch` / `WebFetch` 时写入；
+    - `kind="research_conclusion"`、`infer=False`，结论和来源按原文保存，最多 8 个来源、终答最多 4,000 字符；
+    - `question_key` 为规范化问题的哈希：同一问题再次研究时用 `memory.update()` 覆盖旧结论，不产生重复记忆；不同问法仍作为新记忆保存，由向量检索召回。
+  - 在 `stream_local_agent` 构建运行时之前，用当前 `message` 检索该用户的 `research_conclusion`：
+    - 只保留 `captured_at` 在 `AGENT_RESEARCH_MEMORY_TTL_DAYS`（默认 30 天）内、相似度不低于 `AGENT_RESEARCH_MEMORY_MIN_SCORE`（默认 0.5）的记忆；
+    - 渲染成带「保存日期 / 距今多久 / 可能过期 / 可用 WebSearch/WebFetch 复核」说明的 system prompt 块，最多 3 条、总长约 3,000 字符；该块只进模型视图，不落库为消息；
+    - 检索失败、mem0 未初始化或结果异常时静默回退，不阻断 turn。
+  - `runner._finalize()` 在 `done` 事件发出后异步写入记忆，embedding 慢或失败都不影响用户收到终答；恢复路径不重复写入。
+  - 新增 `AGENT_RESEARCH_MEMORY`（默认 `true`，总开关）、`AGENT_RESEARCH_MEMORY_TTL_DAYS`、`AGENT_RESEARCH_MEMORY_MIN_SCORE`；远程 `AGENT_LOOP_URL` 执行器不接这层，文档已注明。
+- **解决后效果**：
+  - 新增 20 条单测（`tests/test_agent_research_memory.py` 14 条，`tests/test_agent_runtime.py` 5 条，`tests/test_agent_runs.py` 1 条），覆盖来源提取、错误/非 Web 工具过滤、同问题 update、无关记忆不覆盖、无来源/无用户/关闭开关不写、mem0 异常不抛、TTL/相似度/kind 过滤、注入块长度上限、system prompt 注入、无 `user_id` 不检索、检索异常不影响 run、`_finalize` 完成态才写入；
+  - 本次改动相关三个测试文件 `85 passed`（含并行 P-08 新增用例）；server agent 全量 `180 passed`；
+  - 跨会话真实复测尚未执行（工作区同时存在 P-08 的「跨轮工具轨迹」未提交改动，避免把两批改动混在同一次镜像里评估）；预期第二次相同问题会命中记忆、减少 `WebSearch/WebFetch` 调用，但需要 run id 与调用数对比后才能把状态改为「已解决」。
+- **可复用结论**：跨会话复用研究结论，必须把「结论 + 来源 + 抓取时间」一起持久化，并在注入时明确标注年龄和「可复核」；只存一段摘要会让模型无法判断时效与出处。写入用 `infer=False` + 稳定 `question_key` 才能保证原文不被二次改写、同问题不重复堆积。
+
+---
+
 ## 变更记录
 
 | 日期 | 变更 |
@@ -277,3 +305,4 @@
 | 2026-11-04 | P-04 补充量化证据（16 轮工具结果 ≈50,880 tokens > 32,000 预算）、外部调研（LangChain / OpenAI Agents SDK / AutoGen / OpenHands / PraisonAI / 4 篇论文）与 6 个候选方案及推荐顺序 |
 | 2026-11-04 | 实现 P-04 的 S1（事实账本）+ S3（步数感知收尾）+ S5（可行动的工具反馈）；三次同题复测 `finish_reason=final`（10 轮 29s / 16 轮 25s，均 10 次工具调用），P-04 改为已解决，P-06 效果补测 |
 | 2026-11-04 | 实现 P-04 第二批：S2（无进展守卫，nudge 3 / 强制终答 5、`stop_reason=no_progress`、`NoProgressError` / `agent_no_progress`）；修复 HTML 表格单元格分隔、缓存抓取返回摘要（`full=true` 取全文）、搜索缓存 key 纳入 `max_results`；agent-loop 156 passed / server agent 131 passed；两次同题复测 `final`（58.7s/17 调用、29.1s/12 调用） |
+| 2026-11-04 | 追加 P-07：实现跨会话「可复用研究结论」——成功 run 后把结论 + 来源 + 抓取时间写入 mem0（`infer=False`、`kind=research_conclusion`、同问题 update），下一轮按相似度 + TTL 检索并注入 system prompt；新增 20 条用例、三文件 85 passed，跨会话复测待执行 |

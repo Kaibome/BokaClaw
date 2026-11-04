@@ -139,6 +139,8 @@ def _config(**overrides):
         "system_prompt": "system",
         "max_iterations": 5,
         "max_seconds": 5.0,
+        # Most tests focus on streaming; research reuse has its own tests.
+        "research_memory": False,
     }
     values.update(overrides)
     return agent_runtime.LocalAgentConfig(**values)
@@ -169,6 +171,9 @@ def clean_agent_env(monkeypatch):
         "AGENT_PROGRESS_GUARD",
         "AGENT_PROGRESS_NUDGE_AFTER",
         "AGENT_PROGRESS_STOP_AFTER",
+        "AGENT_RESEARCH_MEMORY",
+        "AGENT_RESEARCH_MEMORY_TTL_DAYS",
+        "AGENT_RESEARCH_MEMORY_MIN_SCORE",
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
         "DEEPSEEK_API_KEY",
@@ -350,6 +355,44 @@ def test_progress_stop_is_clamped_to_the_nudge_threshold(monkeypatch):
     assert config.progress_nudge_after == 6
     # A stop before the nudge would make the SDK config invalid; clamp instead.
     assert config.progress_stop_after == 6
+
+
+def test_research_memory_defaults_and_can_be_tuned(monkeypatch):
+    monkeypatch.setattr(agent_runtime, "_current_llm_config", lambda: {})
+    monkeypatch.setenv("AGENT_MODEL", "m")
+    monkeypatch.setenv("AGENT_API_KEY", "k")
+
+    config = agent_runtime.load_local_config()
+
+    assert config is not None
+    assert config.research_memory is True
+    assert config.research_memory_ttl_days == 30
+    assert config.research_memory_min_score == 0.5
+
+    monkeypatch.setenv("AGENT_RESEARCH_MEMORY", "false")
+    monkeypatch.setenv("AGENT_RESEARCH_MEMORY_TTL_DAYS", "7")
+    monkeypatch.setenv("AGENT_RESEARCH_MEMORY_MIN_SCORE", "0.75")
+
+    tuned = agent_runtime.load_local_config()
+
+    assert tuned is not None
+    assert tuned.research_memory is False
+    assert tuned.research_memory_ttl_days == 7
+    assert tuned.research_memory_min_score == 0.75
+
+
+def test_research_memory_settings_are_clamped(monkeypatch):
+    monkeypatch.setattr(agent_runtime, "_current_llm_config", lambda: {})
+    monkeypatch.setenv("AGENT_MODEL", "m")
+    monkeypatch.setenv("AGENT_API_KEY", "k")
+    monkeypatch.setenv("AGENT_RESEARCH_MEMORY_TTL_DAYS", "0")
+    monkeypatch.setenv("AGENT_RESEARCH_MEMORY_MIN_SCORE", "2")
+
+    config = agent_runtime.load_local_config()
+
+    assert config is not None
+    assert config.research_memory_ttl_days == 1
+    assert config.research_memory_min_score == 1.0
 
 
 def test_context_budgets_can_be_overridden(monkeypatch):
@@ -688,6 +731,65 @@ async def test_stream_local_agent_maps_no_progress(monkeypatch):
         await _collect(_payload())
 
     assert excinfo.value.code == "agent_no_progress"
+
+
+@pytest.mark.asyncio
+async def test_stream_local_agent_injects_prior_research(monkeypatch):
+    sdk = FakeSDK(result=_result("answer"))
+    monkeypatch.setattr(agent_runtime, "load_local_config", lambda: _config(research_memory=True))
+    monkeypatch.setattr(agent_runtime, "_load_sdk", lambda: sdk)
+    calls = {}
+
+    def fake_block(user_id, question, **kwargs):
+        calls["args"] = (user_id, question, kwargs)
+        return "## Reusable research\nA prior conclusion."
+
+    monkeypatch.setattr(agent_runtime, "prior_research_block", fake_block)
+
+    await _collect(_payload(message="a similar question"))
+
+    prompt = sdk.runtimes[0].config.kwargs["system_prompt"]
+    assert prompt.startswith("system")
+    assert "## Reusable research" in prompt
+    assert calls["args"] == (
+        "user-1",
+        "a similar question",
+        {"ttl_days": 30, "min_score": 0.5},
+    )
+
+
+@pytest.mark.asyncio
+async def test_stream_local_agent_skips_prior_research_without_a_user(monkeypatch):
+    sdk = FakeSDK(result=_result("answer"))
+    monkeypatch.setattr(agent_runtime, "load_local_config", lambda: _config(research_memory=True))
+    monkeypatch.setattr(agent_runtime, "_load_sdk", lambda: sdk)
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("no user should not query research memory")
+
+    monkeypatch.setattr(agent_runtime, "prior_research_block", unexpected)
+
+    await _collect(_payload(user_id=None))
+
+    assert sdk.runtimes[0].config.kwargs["system_prompt"] == "system"
+
+
+@pytest.mark.asyncio
+async def test_stream_local_agent_survives_a_research_lookup_failure(monkeypatch):
+    sdk = FakeSDK(result=_result("answer"))
+    monkeypatch.setattr(agent_runtime, "load_local_config", lambda: _config(research_memory=True))
+    monkeypatch.setattr(agent_runtime, "_load_sdk", lambda: sdk)
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("memory offline")
+
+    monkeypatch.setattr(agent_runtime, "prior_research_block", broken)
+
+    events = await _collect(_payload())
+
+    assert isinstance(events[-1], AgentCompleted)
+    assert all(isinstance(event, AgentDelta) for event in events[:-1])
+    assert sdk.runtimes[0].config.kwargs["system_prompt"] == "system"
 
 
 @pytest.mark.asyncio

@@ -15,7 +15,7 @@ import logging
 import os
 import sys
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Tuple
 
@@ -28,6 +28,7 @@ from app.agent.events import (
     AgentToolCall,
     AgentToolResult,
 )
+from app.agent.research_memory import prior_research_block
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +152,9 @@ class LocalAgentConfig:
     progress_guard: bool = True
     progress_nudge_after: int = 3
     progress_stop_after: int = 5
+    research_memory: bool = True
+    research_memory_ttl_days: int = 30
+    research_memory_min_score: float = 0.5
 
 
 def _current_llm_config() -> Dict[str, Any]:
@@ -216,6 +220,9 @@ def load_local_config() -> Optional[LocalAgentConfig]:
 
     nudge_after = max(2, _env_int("AGENT_PROGRESS_NUDGE_AFTER", 3))
     stop_after = max(nudge_after, _env_int("AGENT_PROGRESS_STOP_AFTER", 5))
+    research_min_score = _env_optional_float("AGENT_RESEARCH_MEMORY_MIN_SCORE", 0.5)
+    if research_min_score is None:
+        research_min_score = 0.5
     return LocalAgentConfig(
         model=str(model),
         api_key=str(api_key),
@@ -238,6 +245,9 @@ def load_local_config() -> Optional[LocalAgentConfig]:
         progress_guard=_env_flag("AGENT_PROGRESS_GUARD", True),
         progress_nudge_after=nudge_after,
         progress_stop_after=stop_after,
+        research_memory=_env_flag("AGENT_RESEARCH_MEMORY", True),
+        research_memory_ttl_days=max(1, _env_int("AGENT_RESEARCH_MEMORY_TTL_DAYS", 30)),
+        research_memory_min_score=min(1.0, max(0.0, research_min_score)),
     )
 
 
@@ -510,6 +520,25 @@ async def stream_local_agent(
         )
 
     sdk = _load_sdk()
+    if config.research_memory and payload.get("user_id"):
+        try:
+            block = await asyncio.to_thread(
+                prior_research_block,
+                str(payload.get("user_id")),
+                str(payload.get("message") or ""),
+                ttl_days=config.research_memory_ttl_days,
+                min_score=config.research_memory_min_score,
+            )
+        except Exception:
+            logger.warning("Prior research lookup failed; continuing without it", exc_info=True)
+            block = ""
+        if block:
+            config = replace(config, system_prompt=f"{config.system_prompt}\n\n{block}")
+            _context_debug(
+                "research memory injected user=%s chunk_chars=%d",
+                payload.get("user_id"),
+                len(block),
+            )
     messages = build_messages(payload)
     conversation_id = payload.get("conversation_id")
 
