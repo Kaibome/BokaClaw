@@ -1,0 +1,13 @@
+[
+  {
+    "eval_case_id": "case-1",
+    "input": "Find the answer in the workspace notes.",
+    "expected_output": "The answer is 42.",
+    "expected_tools": [
+      {
+        "name": "search_memories",
+        "input_parameters": {"query": "answer"}
+      }
+    ]
+  }
+]

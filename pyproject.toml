@@ -80,6 +80,11 @@ test = [
     "pytest-mock>=3.14.0",
     "pytest-asyncio>=0.23.7",
 ]
+eval = [
+    # Offline evaluation only. deepeval 4.3.3 needs pydantic >= 2.11 while the
+    # server pins 2.10.4, so install this group in a separate environment.
+    "deepeval==4.3.3",
+]
 dev = [
     "ruff==0.16.0",
     "isort>=5.13.2",
