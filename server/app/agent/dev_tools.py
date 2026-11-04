@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlunparse
 
 import httpx
 
@@ -319,7 +319,43 @@ def _validate_public_url(url: str, allow_private: bool) -> None:
             )
 
 
-def _fetch_url(config: DevToolConfig, url: str) -> Dict[str, Any]:
+def _normalize_fetch_url(url: str) -> str:
+    """Build the cache key for a URL.
+
+    Fragments never reach the server, so they are dropped; scheme and host are
+    case-insensitive. Path, parameters, and query are kept verbatim because
+    they select different resources.
+    """
+    parsed = urlparse(url.strip())
+    return urlunparse(
+        (parsed.scheme.lower(), parsed.netloc.lower(), parsed.path or "/", parsed.params, parsed.query, "")
+    )
+
+
+def _fetch_url(
+    config: DevToolConfig,
+    url: str,
+    *,
+    cache: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Fetch a URL, reusing a result already fetched in this run.
+
+    ``cache`` is scoped to one agent run by ``build_dev_tools``. Failed fetches
+    raise before anything is stored, so a later attempt still hits the network.
+    """
+    key = _normalize_fetch_url(url)
+    if cache is not None:
+        cached = cache.get(key)
+        if cached is not None:
+            return {**cached, "cached": True}
+
+    result = _fetch_url_uncached(config, url)
+    if cache is not None:
+        cache[key] = result
+    return {**result, "cached": False}
+
+
+def _fetch_url_uncached(config: DevToolConfig, url: str) -> Dict[str, Any]:
     current = url
     response: Optional[httpx.Response] = None
     body = b""
@@ -824,13 +860,20 @@ def build_dev_tools(sdk, config: Optional[DevToolConfig] = None):
         """
         return execute_command(cfg, command, description, timeout_seconds, shell="powershell")
 
+    # Per-run dedup cache: a repeated WebFetch returns the earlier result
+    # instead of hitting the network again.
+    fetch_cache: Dict[str, Dict[str, Any]] = {}
+
     def WebFetch(url: str) -> Dict[str, Any]:
         """Fetch a public URL and return its text content.
+
+        Repeating a URL within the same run returns the cached result with
+        ``cached: true`` instead of fetching the page again.
 
         Args:
             url: HTTP or HTTPS URL. Private and loopback addresses are rejected unless explicitly allowed.
         """
-        return _fetch_url(cfg, url)
+        return _fetch_url(cfg, url, cache=fetch_cache)
 
     def Monitor(
         action: Literal["start", "poll", "stop"],

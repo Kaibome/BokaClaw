@@ -380,6 +380,14 @@ class _PageHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+class _CountingPageHandler(_PageHandler):
+    hits = 0
+
+    def do_GET(self):
+        type(self).hits += 1
+        super().do_GET()
+
+
 class _HtmlWithoutContentTypeHandler(_PageHandler):
     def do_GET(self):
         body = b"<!doctype html><html><head><title>T</title></head><body><h1>Hello</h1><p>World</p></body></html>"
@@ -408,8 +416,9 @@ class _MislabeledHtmlHandler(_PageHandler):
         self.wfile.write(body)
 
 
-class _NotFoundPageHandler(_PageHandler):
+class _NotFoundPageHandler(_CountingPageHandler):
     def do_GET(self):
+        type(self).hits += 1
         body = (
             "<!doctype html><html><head><title>404错误页-帮助中心</title></head>"
             "<body><nav>首页 | 文档</nav><p>页面不存在</p></body></html>"
@@ -459,6 +468,42 @@ def _serve(handler_cls):
 def page_server():
     with _serve(_PageHandler) as url:
         yield url
+
+
+def test_webfetch_reuses_a_url_within_one_run(tmp_path):
+    _CountingPageHandler.hits = 0
+    tools = _tools(tmp_path, web_allow_private=True)
+
+    with _serve(_CountingPageHandler) as url:
+        first = tools["WebFetch"](url)
+        second = tools["WebFetch"](url + "#pricing")
+
+    assert _CountingPageHandler.hits == 1
+    assert first["cached"] is False
+    assert second["cached"] is True
+    assert second["content"] == first["content"]
+
+
+def test_webfetch_cache_is_scoped_to_one_run(tmp_path):
+    _CountingPageHandler.hits = 0
+
+    with _serve(_CountingPageHandler) as url:
+        _tools(tmp_path, web_allow_private=True)["WebFetch"](url)
+        _tools(tmp_path, web_allow_private=True)["WebFetch"](url)
+
+    assert _CountingPageHandler.hits == 2
+
+
+def test_webfetch_cache_does_not_store_failures(tmp_path):
+    _NotFoundPageHandler.hits = 0
+    tools = _tools(tmp_path, web_allow_private=True)
+
+    with _serve(_NotFoundPageHandler) as url:
+        for _ in range(2):
+            with pytest.raises(RuntimeError, match="reports itself as not found"):
+                tools["WebFetch"](url)
+
+    assert _NotFoundPageHandler.hits == 2
 
 
 def test_webfetch_blocks_private_addresses_by_default(tmp_path, page_server):

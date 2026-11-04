@@ -131,6 +131,11 @@ tools are also registered by default: `Read`, `Write`, `Edit`, `NotebookEdit`,
 `Glob`, `Grep`, and `WebFetch`. `Bash`, `PowerShell`, and `Monitor` are added
 only when `AGENT_TOOLS_ALLOW_SHELL=true`.
 
+`WebFetch` caches every successful page for the duration of one run: repeating a
+URL (ignoring the fragment) returns the earlier result with `"cached": true`
+instead of making another request. Failed fetches are not cached. The cache is
+per run, so a new turn or a retry fetches pages again.
+
 File paths are resolved inside `AGENT_WORKSPACE_ROOT`, and `..` or symlink
 escapes are rejected. Shell tools are best run in the bundled executor
 container. Set `AGENT_EXECUTOR_URL` (for the local stack:
