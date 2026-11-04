@@ -10,10 +10,10 @@ from uuid import uuid4
 
 from openai import OpenAI
 
-from ..config import ModelConfig
-from ..exceptions import ConfigurationError, ModelError
-from ..types import ModelResponse, ModelStreamChunk, ToolCall, ToolCallDelta
-from ..utils import parse_tool_arguments
+from ..core.config import ModelConfig
+from ..core.exceptions import ConfigurationError, ModelError
+from ..core.types import ModelResponse, ModelStreamChunk, ToolCall, ToolCallDelta
+from ..core.utils import parse_tool_arguments
 
 
 class OpenAICompatibleProvider:

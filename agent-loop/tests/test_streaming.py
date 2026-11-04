@@ -4,11 +4,11 @@ from typing import Any
 
 from conftest import FakeProvider
 
-from bokaclaw_agent.config import AgentConfig
-from bokaclaw_agent.runtime import AgentRuntime
+from bokaclaw_agent.agent.runtime import AgentRuntime
+from bokaclaw_agent.core.config import AgentConfig
+from bokaclaw_agent.core.types import EventType, ModelResponse, ModelStreamChunk, ToolCallDelta
 from bokaclaw_agent.sessions.memory import InMemorySessionStore
 from bokaclaw_agent.tools import tool
-from bokaclaw_agent.types import EventType, ModelResponse, ModelStreamChunk, ToolCallDelta
 
 
 class StreamingProvider:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from bokaclaw_agent.exceptions import PersistenceError
+from bokaclaw_agent.core.exceptions import PersistenceError
 from bokaclaw_agent.sessions.memory import InMemorySessionStore
 
 

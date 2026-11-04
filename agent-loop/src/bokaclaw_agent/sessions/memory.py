@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from threading import RLock
 from typing import Any
 
-from ..exceptions import PersistenceError
+from ..core.exceptions import PersistenceError
 from .base import SessionRecord, derive_title
 
 _VALID_STATUSES = {"active", "completed", "failed", "cancelled"}

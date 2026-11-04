@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 
-from bokaclaw_agent.types import ModelResponse
+from bokaclaw_agent.core.types import ModelResponse
 
 
 class FakeProvider:

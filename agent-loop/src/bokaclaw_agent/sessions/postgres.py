@@ -16,7 +16,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from ..exceptions import ConfigurationError, PersistenceError, SessionStoreError
+from ..core.exceptions import ConfigurationError, PersistenceError, SessionStoreError
 from .base import SessionRecord, derive_title
 
 _VALID_STATUSES = {"active", "completed", "failed", "cancelled"}

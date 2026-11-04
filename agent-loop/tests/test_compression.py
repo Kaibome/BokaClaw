@@ -3,18 +3,18 @@ from __future__ import annotations
 import pytest
 from conftest import FakeProvider
 
-from bokaclaw_agent.compression import ContextCompressor
-from bokaclaw_agent.config import AgentConfig
-from bokaclaw_agent.context import (
+from bokaclaw_agent.agent.compression import ContextCompressor
+from bokaclaw_agent.agent.context import (
     TRUNCATION_MARKER,
     estimate_message_tokens,
     estimate_tokens,
     safe_start_index,
     truncate_text,
 )
-from bokaclaw_agent.runtime import AgentRuntime
+from bokaclaw_agent.agent.runtime import AgentRuntime
+from bokaclaw_agent.core.config import AgentConfig
+from bokaclaw_agent.core.types import EventType, ModelResponse, ToolCall
 from bokaclaw_agent.tools import tool
-from bokaclaw_agent.types import EventType, ModelResponse, ToolCall
 
 # ---- pure helpers -------------------------------------------------------------
 

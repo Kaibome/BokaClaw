@@ -3,10 +3,10 @@ from __future__ import annotations
 import pytest
 from conftest import FakeProvider
 
-from bokaclaw_agent.config import AgentConfig
-from bokaclaw_agent.runtime import AgentRuntime
+from bokaclaw_agent.agent.runtime import AgentRuntime
+from bokaclaw_agent.core.config import AgentConfig
+from bokaclaw_agent.core.types import ModelResponse, ToolCall
 from bokaclaw_agent.tools import tool
-from bokaclaw_agent.types import ModelResponse, ToolCall
 
 
 @tool

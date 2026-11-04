@@ -4,8 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from bokaclaw_agent.config import ModelConfig
-from bokaclaw_agent.exceptions import ConfigurationError, ModelError
+from bokaclaw_agent.core.config import ModelConfig
+from bokaclaw_agent.core.exceptions import ConfigurationError, ModelError
 from bokaclaw_agent.providers.openai_compatible import OpenAICompatibleProvider
 
 

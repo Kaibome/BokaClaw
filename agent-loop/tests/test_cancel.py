@@ -8,12 +8,12 @@ import pytest
 from conftest import FakeProvider
 from test_streaming import StreamingProvider
 
-from bokaclaw_agent.config import AgentConfig
-from bokaclaw_agent.exceptions import RunCancelled
-from bokaclaw_agent.runtime import AgentRuntime
+from bokaclaw_agent.agent.runtime import AgentRuntime
+from bokaclaw_agent.core.config import AgentConfig
+from bokaclaw_agent.core.exceptions import RunCancelled
+from bokaclaw_agent.core.types import EventType, ModelResponse, ModelStreamChunk, ToolCall
 from bokaclaw_agent.sessions.memory import InMemorySessionStore
 from bokaclaw_agent.tools import tool
-from bokaclaw_agent.types import EventType, ModelResponse, ModelStreamChunk, ToolCall
 
 
 def make_recording_tool(calls: list[str]):

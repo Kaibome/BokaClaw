@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from typing import Any, Protocol, runtime_checkable
 
-from ..types import ModelResponse, ModelStreamChunk
+from ..core.types import ModelResponse, ModelStreamChunk
 
 
 @runtime_checkable

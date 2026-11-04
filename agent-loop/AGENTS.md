@@ -29,9 +29,11 @@ hatch build             # wheel + sdist
 
 | Path | Purpose |
 |------|---------|
-| `src/bokaclaw_agent/runtime.py` | ReAct loop, failure handling, persistence orchestration |
-| `src/bokaclaw_agent/tools.py` | `@tool`, JSON Schema derivation, dispatch |
-| `src/bokaclaw_agent/context.py` | In-memory context, wire-format helpers, truncation |
+| `src/bokaclaw_agent/core/` | `config`, `types`, `exceptions`, shared helpers |
+| `src/bokaclaw_agent/agent/runtime.py` | ReAct loop, failure handling, persistence orchestration |
+| `src/bokaclaw_agent/agent/context.py` | In-memory context, wire-format helpers, truncation |
+| `src/bokaclaw_agent/agent/compression.py` | Token-budget compression and rolling summaries |
+| `src/bokaclaw_agent/tools/` | `@tool`, JSON Schema derivation, dispatch |
 | `src/bokaclaw_agent/providers/` | `ModelProvider` protocol + OpenAI-compatible adapter |
 | `src/bokaclaw_agent/sessions/` | Store protocol, in-memory store, Postgres store |
 | `tests/` | Unit tests; no network |

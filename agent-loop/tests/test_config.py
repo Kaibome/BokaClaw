@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from bokaclaw_agent.config import AgentConfig, ModelConfig
+from bokaclaw_agent.core.config import AgentConfig, ModelConfig
 from bokaclaw_agent.sessions.postgres import PostgresConfig
 
 

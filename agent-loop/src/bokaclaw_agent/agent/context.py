@@ -6,7 +6,7 @@ import json
 import math
 from typing import Any
 
-from .types import ModelResponse, ToolResult
+from ..core.types import ModelResponse, ToolResult
 
 TRUNCATION_MARKER = "\n... [truncated] ...\n"
 

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from bokaclaw_agent.context import ContextManager, assistant_message, normalize_input, tool_message
-from bokaclaw_agent.types import ModelResponse, ToolCall, ToolResult
+from bokaclaw_agent.agent.context import ContextManager, assistant_message, normalize_input, tool_message
+from bokaclaw_agent.core.types import ModelResponse, ToolCall, ToolResult
 
 
 def test_normalize_input_string():

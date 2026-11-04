@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import pytest
 
-from bokaclaw_agent.exceptions import PersistenceError
+from bokaclaw_agent.core.exceptions import PersistenceError
 from bokaclaw_agent.sessions.postgres import PostgresConfig, PostgresSessionStore
 
 

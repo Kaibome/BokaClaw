@@ -86,14 +86,20 @@ agent-loop/
 ├── examples/quickstart.py
 ├── src/bokaclaw_agent/
 │   ├── __init__.py                 # 公开导出
-│   ├── config.py                   # AgentConfig / ModelConfig
-│   ├── types.py                    # ToolCall / ModelResponse / RunResult / AgentEvent ...
-│   ├── exceptions.py               # AgentError 及子类
-│   ├── context.py                  # 消息规范化 + 上下文裁剪 + token 估算
-│   ├── compression.py              # ContextCompressor：预算压缩与滚动摘要
-│   ├── tools.py                    # Tool / ToolRegistry / @tool / schema 生成
-│   ├── runtime.py                  # AgentRuntime：ReAct 循环与持久化编排
-│   ├── utils.py                    # resolve_awaitable
+│   ├── core/
+│   │   ├── __init__.py
+│   │   ├── config.py               # AgentConfig / ModelConfig
+│   │   ├── types.py                # ToolCall / ModelResponse / RunResult / AgentEvent ...
+│   │   ├── exceptions.py           # AgentError 及子类
+│   │   └── utils.py                # resolve_awaitable / parse_tool_arguments
+│   ├── agent/
+│   │   ├── __init__.py
+│   │   ├── runtime.py              # AgentRuntime：ReAct 循环与持久化编排
+│   │   ├── context.py              # 消息规范化 + 上下文视图 + token 估算
+│   │   └── compression.py          # ContextCompressor：预算压缩与滚动摘要
+│   ├── tools/
+│   │   ├── __init__.py             # 公开导出 Tool / ToolRegistry / tool
+│   │   └── registry.py             # Tool / ToolRegistry / @tool / schema 生成
 │   ├── providers/
 │   │   ├── base.py                 # ModelProvider Protocol
 │   │   └── openai_compatible.py    # OpenAI Chat Completions 适配器
@@ -107,23 +113,27 @@ agent-loop/
 依赖关系是单向的：
 
 ```text
-config ──▶ types ◀── providers
-   │          ▲
-   ├──▶ runtime ──▶ context
-   │          │        └──▶ compression
-   │          │
-   │          ├──▶ tools ──▶ exceptions
-   │          └──▶ sessions
-   └──▶ exceptions
+                    ┌──────────────┐
+                    │ agent.runtime│
+                    └──────┬───────┘
+        ┌──────────────┬───┴───────────┬──────────────┐
+        ▼              ▼               ▼              ▼
+ agent.context    tools/          providers/      sessions/
+ agent.compression
+        │              │               │              │
+        └──────────────┴───────┬───────┴──────────────┘
+                               ▼
+                    core/ (config, types, exceptions, utils)
 ```
 
+`core/` 是叶子层，不依赖其他子包；`agent/` 只依赖 `core/`、`tools/`、`providers/`、`sessions/`。`__init__.py` 只做公开导出，子包内部的模块路径（如 `agent/runtime.py`）不是稳定 API，宿主应优先使用 `from bokaclaw_agent import ...`。
 `__init__.py` 只做公开导出；导入包时不会连接数据库，`psycopg` 仅在实例化 `PostgresSessionStore` 时懒加载。
 
 ---
 
 ## 4. 核心组件
 
-### 4.1 AgentRuntime（`runtime.py`）
+### 4.1 AgentRuntime（`agent/runtime.py`）
 
 Runtime 持有四个可替换的协作者：`AgentConfig`、`ModelProvider`、`ToolRegistry`、可选的 `SessionStore`。
 
@@ -147,7 +157,7 @@ AgentRuntime(
 | `get_session / list_sessions / delete_session` | 会话管理；未配置 store 时返回空/空操作 |
 | `close / aclose` | 关闭 store 持有的连接池 |
 
-两个入口共享 `_execute()`（`runtime.py:161`）：
+两个入口共享 `_execute()`（`agent/runtime.py:161`）：
 
 ```python
 def run(...):
@@ -216,7 +226,7 @@ def stream_complete(
 
 Provider 可以返回 awaitable，Runtime 的 `_complete()` 会通过 `resolve_awaitable` 解析，并把 dict 形式的结果校验为 `ModelResponse`。流式 Provider 的 chunk 也允许是 dict，由 `_stream_complete()` 校验为 `ModelStreamChunk`。
 
-### 4.3 工具层（`tools.py`）
+### 4.3 工具层（`tools/registry.py`）
 
 ```python
 @tool
@@ -256,7 +266,7 @@ def get_weather(city: str, days: int = 1) -> str:
 
 `ToolRegistry` 按名称索引工具，`specs()` 输出 OpenAI `tools` 数组，`invoke()` 负责把 `ToolCall` 转成 `ToolResult`。
 
-### 4.4 上下文层（`context.py` / `compression.py`）
+### 4.4 上下文层（`agent/context.py` / `agent/compression.py`）
 
 `ContextManager` 把「历史」和「本次 run 新增」分开保存：
 
@@ -272,7 +282,7 @@ build() = [system?] + truncate(history) + current
 
 token 估算不引入 tokenizer：`estimate_tokens()` 使用 `ceil(ascii_chars * 0.4 + non_ascii_chars)`，`estimate_message_tokens()` 再计入 `tool_calls` JSON 与 4 个结构开销。
 
-#### 预算压缩（`compression.py`）
+#### 预算压缩（`agent/compression.py`）
 
 `AgentConfig.context_max_tokens` 开启后，runtime 每次迭代在 `build()` 之后、发出 `model_request` 之前调用 `ContextCompressor.compress()`：
 
@@ -312,7 +322,7 @@ build() ──▶ compress(messages, tools_tokens) ──▶ model_request
 
 ### 4.6 类型、异常与工具函数
 
-`types.py` 中的核心模型：
+`core/types.py` 中的核心模型：
 
 | 类型 | 用途 |
 |---|---|

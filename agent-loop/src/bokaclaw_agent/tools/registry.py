@@ -10,14 +10,14 @@ from typing import Any, Callable, get_type_hints
 
 from pydantic import BaseModel, ValidationError, create_model
 
-from .exceptions import (
+from ..core.exceptions import (
     ToolArgumentError,
     ToolExecutionError,
     ToolNotFoundError,
     ToolSchemaError,
 )
-from .types import ToolCall, ToolResult
-from .utils import resolve_awaitable
+from ..core.types import ToolCall, ToolResult
+from ..core.utils import resolve_awaitable
 
 # Names that Pydantic reserves on model classes. Function parameters with these
 # names cannot be turned into a generated argument model.
