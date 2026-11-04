@@ -371,6 +371,35 @@
 
 ---
 
+## P-10 Agent 运行过程没有可回放轨迹，无法离线评测完整生命周期
+
+- **状态**：已解决（2026-11-04 已实现并完成真实 run 验证）
+- **发现时间**：2026-11-04
+- **解决时间**：2026-11-04
+- **现象**：运行结束后，`agent_runs` / `agent_run_events` 只能还原 run 状态与 SSE 可见事件；模型请求、模型响应、上下文压缩、run 起止都没有持久化，assistant 消息的 `metadata.tool_trace` 也只有工具调用。deepeval 只能评测最终问答，无法回答「这一轮用了哪些步骤、哪一步低效、为什么失败」。
+- **根因（事实）**：
+  1. `agent-loop` SDK 已经发出 `run_started` / `model_request` / `model_response` / `tool_call` / `tool_result` / `context_compressed` / `run_ended` / `error`；
+  2. server 桥接层 `_bridge_tool_event` 只把两个工具事件转成 SSE 事件，其余事件被丢弃；
+  3. `agent_run_events.event_type` 有 CHECK 约束且属于对外回放契约，不能直接拿来存评测轨迹。
+- **解决措施**：
+  - 新增 `agent_run_spans` 表（`agent` / `llm` / `tool`，parent/child、状态、时间、JSONB input/output/attributes），随 `agent_runs` 级联删除，`(run_id, span_id)` 唯一并 `ON CONFLICT DO UPDATE` 幂等写入；
+  - `SpanRecorder` 在 run 被 claim 时创建根 `agent` span，把 SDK 事件转成 span：`llm:{event.seq}`、`tool:{tool_call_id}`；`_finalize` / `_recover_run` / 取消路径结算所有 open span；
+  - 桥接层改为 `_bridge_event`，span 专用事件只在 `AGENT_SPAN_CAPTURE` 打开时进入 runner 队列，**不写事件表、不改 SSE 契约**；
+  - 三类 span 都落输入与输出：agent 存用户消息/最终回答，llm 存完整 messages/回答与 tool_calls，tool 存参数/结果；`AGENT_SPAN_PROMPT_MODE=summary` 可退化为只存计数与 hash；字段按 `AGENT_SPAN_MAX_BYTES` 截断，按 `AGENT_SPAN_SAMPLE_RATE` 做 run 级确定性采样，敏感键与 `sk-*` / `Bearer` 正则脱敏；
+  - `tests/agent_eval/` 增加 deepeval 4.3.3 适配层：落库 span 还原为 `LLMTestCase`，仅在一处赋值私有 `_trace_dict`，并用契约测试对齐 deepeval 的 `create_nested_spans_dict` 结构。
+- **实现中确认的两个事实**：
+  1. `context_compressed` 在**下一次** `model_request` 之前发出，必须缓冲后附到下一个 llm span，不能附到当前 span；
+  2. 无工具重答路径上同一 `iteration` 会出现第二次 `model_request`，span_id 不能用 iteration，改用事件 `seq`。
+- **解决后效果**：
+  - 相关测试 87 passed（含 8 条 span 单测）；deepeval 适配契约测试 4 passed（独立 venv，pydantic 与 server 隔离）；
+  - 真实 run（`deepseek-flash` + Bash 工具）：`agent(completed) → llm:2(turn1) → tool:Bash → llm:6(turn2)`，根 span 合并 usage 与 `stop_reason`，无 running 残留；
+  - 取消场景：root 与 tool span 结算为 `aborted`，已完成的 llm span 保持 `completed`，run 为 `cancelled / agent_cancelled`；
+  - Alembic `008 → 009` 与 `009 → 008` 往返通过；
+  - 用落库 span 跑 `tests/agent_eval/run.py`，`AgentLoopDetection` 得分 1.0；LLM judge 指标未在本次执行（会把用户内容发给外部模型，默认不发送）。
+- **可复用结论**：评测数据必须与展示契约解耦——采集端落中立 span，展示/SSE 照旧；评测适配器隔离在单文件并 pin 版本，用契约测试防私有 API 漂移。span 的幂等键要能区分同一轮次内的多次模型调用，事件 `seq` 比 `iteration` 可靠。
+
+---
+
 ## 变更记录
 
 | 日期 | 变更 |
@@ -386,3 +415,5 @@
 | 2026-11-04 | 追加 P-09：Dashboard Memory Detail 抽屉补 `flex flex-col` + 正文 `flex-1 min-h-0 overflow-y-auto`，长内容可滚动；文案加 `break-words whitespace-pre-wrap`；`tsc` 与 `next build` 通过 |
 | 2026-11-04 | 记录规则新增「发现时间 / 解决时间」；P-01 ~ P-09 的发现时间均记为 2026-11-04，已解决条目解决时间记为 2026-11-04，部分缓解的 P-05 / P-07 解决时间留空 |
 | 2026-11-04 | P-08 跨 run 真实复测：同会话追问 0 次工具调用即可原样复述上一轮搜索标题/URL 与抓取重定向信息，新会话对照只答「上下文里没有原始记录」；同时发现回灌结果 2,000 字符上限会截掉表格，以及 P-07 对无关中文问题误注入 |
+| 2026-11-04 | 追加 P-10：新增 `agent_run_spans` 与中立 span 采集（agent/llm/tool），桥接层扩展为 `_bridge_event` 且不改变 SSE 契约；新增 deepeval 4.3.3 适配层与契约测试；真实 run / 取消 / 迁移往返验证通过，87 + 4 tests passed |
+| 2026-11-05 | P-10 的 Dashboard 可视化补全：Trace 页只列 `agent` 类型 run；Span Detail 内展开子 span，点击任一子 span 即以同一抽屉展示其完整 input/output/attributes，并提供「Back to {父 span}」返回父级；`tsc`、Prettier、`next build` 通过 |
