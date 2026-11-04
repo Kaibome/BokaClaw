@@ -1,8 +1,8 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { format, formatDistanceToNow } from "date-fns";
-import { RefreshCw } from "lucide-react";
+import { ArrowLeft, ChevronDown, ChevronRight, RefreshCw } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -40,7 +40,6 @@ import {
 const TRACE_LIMIT = 500;
 const PAGE_SIZE = 20;
 
-type TypeFilter = SpanType | "all";
 type StatusFilter = SpanStatus | "all";
 
 const getTypeClassName = (spanType: SpanType) => {
@@ -90,12 +89,18 @@ export default function TracePage() {
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [page, setPage] = useState(0);
   const [runId, setRunId] = useState("");
-  const [spanType, setSpanType] = useState<TypeFilter>("all");
   const [status, setStatus] = useState<StatusFilter>("all");
   const [selectedSpan, setSelectedSpan] = useState<AgentRunSpanDetail | null>(
     null,
   );
   const [detailLoading, setDetailLoading] = useState(false);
+  const [childSpans, setChildSpans] = useState<AgentRunSpanSummary[] | null>(
+    null,
+  );
+  const [childrenLoading, setChildrenLoading] = useState(false);
+  const [childrenError, setChildrenError] = useState<string | null>(null);
+  const [spanHistory, setSpanHistory] = useState<AgentRunSpanDetail[]>([]);
+  const detailRequestRef = useRef(0);
 
   const {
     data: spans = [],
@@ -105,7 +110,7 @@ export default function TracePage() {
   } = useApiQuery<AgentRunSpanSummary[]>(
     async () => {
       const res = await api.get<AgentRunSpanSummary[]>(TRACE_ENDPOINTS.BASE, {
-        params: { limit: TRACE_LIMIT },
+        params: { limit: TRACE_LIMIT, span_type: "agent" },
       });
       setLastUpdated(new Date().toISOString());
       return res.data ?? [];
@@ -116,12 +121,11 @@ export default function TracePage() {
   const filteredSpans = useMemo(() => {
     const needle = runId.trim().toLowerCase();
     return spans.filter((span) => {
-      if (spanType !== "all" && span.span_type !== spanType) return false;
       if (status !== "all" && span.status !== status) return false;
       if (needle && !span.run_id.toLowerCase().includes(needle)) return false;
       return true;
     });
-  }, [spans, spanType, status, runId]);
+  }, [spans, status, runId]);
 
   const totalSpans = filteredSpans.length;
   const totalRuns = new Set(filteredSpans.map((span) => span.run_id)).size;
@@ -141,21 +145,76 @@ export default function TracePage() {
         )
       : null;
 
-  const openSpan = async (row: AgentRunSpanSummary) => {
+  const loadSpanDetail = async (row: AgentRunSpanSummary) => {
+    const requestId = ++detailRequestRef.current;
     setDetailLoading(true);
     try {
       const res = await api.get<AgentRunSpanDetail>(
         TRACE_ENDPOINTS.BY_ID(row.id),
       );
-      setSelectedSpan(res.data);
+      if (requestId === detailRequestRef.current) {
+        setSelectedSpan(res.data);
+      }
     } catch (err) {
-      toast({
-        title: "Failed to load span",
-        description: getErrorMessage(err),
-        variant: "destructive",
-      });
+      if (requestId === detailRequestRef.current) {
+        toast({
+          title: "Failed to load span",
+          description: getErrorMessage(err),
+          variant: "destructive",
+        });
+      }
     } finally {
-      setDetailLoading(false);
+      if (requestId === detailRequestRef.current) {
+        setDetailLoading(false);
+      }
+    }
+  };
+
+  const openSpan = async (row: AgentRunSpanSummary) => {
+    setSpanHistory([]);
+    setChildSpans(null);
+    setChildrenError(null);
+    await loadSpanDetail(row);
+  };
+
+  const openChildSpan = async (child: AgentRunSpanSummary) => {
+    if (selectedSpan && selectedSpan.id !== child.id) {
+      setSpanHistory((previous) => [...previous, selectedSpan]);
+    }
+    await loadSpanDetail(child);
+  };
+
+  const goBack = () => {
+    const previous = spanHistory[spanHistory.length - 1];
+    if (!previous) return;
+    detailRequestRef.current += 1;
+    setDetailLoading(false);
+    setSelectedSpan(previous);
+    setSpanHistory(spanHistory.slice(0, -1));
+  };
+
+  const toggleChildSpans = async () => {
+    if (!selectedSpan) return;
+    if (childSpans !== null) {
+      setChildSpans(null);
+      return;
+    }
+    setChildrenLoading(true);
+    setChildrenError(null);
+    try {
+      // The tree is two levels deep: children of a run's agent span are its
+      // llm/tool calls. Filter by parent so a nested agent span would not leak.
+      const res = await api.get<AgentRunSpanSummary[]>(TRACE_ENDPOINTS.BASE, {
+        params: { run_id: selectedSpan.run_id, limit: TRACE_LIMIT },
+      });
+      const rows = (res.data ?? [])
+        .filter((span) => span.parent_span_id === selectedSpan.span_id)
+        .sort((a, b) => a.started_at.localeCompare(b.started_at));
+      setChildSpans(rows);
+    } catch (err) {
+      setChildrenError(getErrorMessage(err));
+    } finally {
+      setChildrenLoading(false);
     }
   };
 
@@ -178,16 +237,6 @@ export default function TracePage() {
         <span className="font-mono text-xs" title={value}>
           {value.slice(0, 8)}
         </span>
-      ),
-    },
-    {
-      key: "span_type" as keyof AgentRunSpanSummary,
-      label: "Type",
-      width: 80,
-      render: (value: SpanType) => (
-        <Badge variant="outline" className={getTypeClassName(value)}>
-          {value}
-        </Badge>
       ),
     },
     {
@@ -230,7 +279,7 @@ export default function TracePage() {
         <div className="space-y-1">
           <h1 className="text-xl font-semibold font-fustat">Trace</h1>
           <p className="text-sm text-onSurface-default-secondary">
-            Execution spans captured for each agent run.
+            One row per agent run. Open a run to inspect its child spans.
           </p>
           {lastUpdated && (
             <p className="text-xs text-onSurface-default-tertiary">
@@ -254,8 +303,11 @@ export default function TracePage() {
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
         {[
-          { label: "Total Spans", value: totalSpans },
           { label: "Runs", value: totalRuns },
+          {
+            label: "Avg Duration",
+            value: averageDuration === null ? "--" : `${averageDuration} ms`,
+          },
           {
             label: "Errors",
             value:
@@ -289,26 +341,6 @@ export default function TracePage() {
               }}
             />
           </div>
-          <div className="w-full space-y-1 md:w-40">
-            <Label>Type</Label>
-            <Select
-              value={spanType}
-              onValueChange={(value) => {
-                setSpanType(value as TypeFilter);
-                setPage(0);
-              }}
-            >
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All types</SelectItem>
-                <SelectItem value="agent">agent</SelectItem>
-                <SelectItem value="llm">llm</SelectItem>
-                <SelectItem value="tool">tool</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
           <div className="w-full space-y-1 md:w-44">
             <Label>Status</Label>
             <Select
@@ -331,11 +363,6 @@ export default function TracePage() {
               </SelectContent>
             </Select>
           </div>
-          {averageDuration !== null && (
-            <p className="text-xs text-onSurface-default-tertiary md:ml-auto">
-              Avg duration {averageDuration} ms
-            </p>
-          )}
         </CardContent>
       </Card>
 
@@ -348,11 +375,11 @@ export default function TracePage() {
       )}
 
       {isLoading ? (
-        <TableSkeleton rows={6} columns={7} />
+        <TableSkeleton rows={6} columns={6} />
       ) : filteredSpans.length === 0 ? (
         <EmptyState
-          title="No spans yet"
-          description="Execution spans will appear here after an agent run starts."
+          title="No runs yet"
+          description="Agent runs will appear here once one starts."
           image="requests"
         />
       ) : (
@@ -401,7 +428,13 @@ export default function TracePage() {
       <Sheet
         open={!!selectedSpan}
         onOpenChange={(open) => {
-          if (!open) setSelectedSpan(null);
+          if (!open) {
+            detailRequestRef.current += 1;
+            setSelectedSpan(null);
+            setSpanHistory([]);
+            setChildSpans(null);
+            setChildrenError(null);
+          }
         }}
       >
         <SheetContent className="flex flex-col sm:max-w-lg">
@@ -411,6 +444,18 @@ export default function TracePage() {
               View span timing, payloads and attributes
             </SheetDescription>
           </SheetHeader>
+          {spanHistory.length > 0 && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="-ml-2 mt-2 w-fit gap-1.5"
+              onClick={goBack}
+            >
+              <ArrowLeft className="size-4" />
+              Back to {spanHistory[spanHistory.length - 1].span_id}
+            </Button>
+          )}
           {detailLoading ? (
             <p className="mt-6 text-sm text-onSurface-default-secondary">
               Loading span…
@@ -498,6 +543,92 @@ export default function TracePage() {
                     </p>
                   </div>
                 </div>
+
+                {selectedSpan.span_type === "agent" && (
+                  <div className="space-y-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="w-full justify-start gap-1.5"
+                      onClick={() => void toggleChildSpans()}
+                      disabled={childrenLoading}
+                    >
+                      {childrenLoading ? (
+                        "Loading child spans…"
+                      ) : childSpans !== null ? (
+                        <>
+                          <ChevronDown className="size-4" />
+                          Hide child spans
+                        </>
+                      ) : (
+                        <>
+                          <ChevronRight className="size-4" />
+                          Show child spans
+                        </>
+                      )}
+                    </Button>
+
+                    {childrenError && (
+                      <p className="text-xs text-onSurface-danger-primary">
+                        {childrenError}
+                      </p>
+                    )}
+
+                    {childSpans !== null && (
+                      <div className="space-y-1">
+                        <Label className="text-xs text-onSurface-default-tertiary">
+                          Child spans ({childSpans.length})
+                        </Label>
+                        {childSpans.length === 0 ? (
+                          <p className="text-xs text-onSurface-default-tertiary">
+                            No child spans were captured for this run.
+                          </p>
+                        ) : (
+                          <div className="divide-y divide-memBorderPrimary overflow-hidden rounded-md border border-memBorderPrimary">
+                            {childSpans.map((child) => (
+                              <button
+                                key={child.id}
+                                type="button"
+                                onClick={() => void openChildSpan(child)}
+                                className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left transition-colors hover:bg-surface-default-secondary"
+                              >
+                                <div className="flex min-w-0 items-center gap-2">
+                                  <ChevronRight className="size-3.5 shrink-0 text-onSurface-default-tertiary" />
+                                  <Badge
+                                    variant="outline"
+                                    className={getTypeClassName(
+                                      child.span_type,
+                                    )}
+                                  >
+                                    {child.span_type}
+                                  </Badge>
+                                  <span
+                                    className="truncate font-mono text-xs"
+                                    title={child.name}
+                                  >
+                                    {child.name}
+                                  </span>
+                                </div>
+                                <div className="flex shrink-0 items-center gap-2">
+                                  <Badge
+                                    variant="outline"
+                                    className={getStatusClassName(child.status)}
+                                  >
+                                    {child.status}
+                                  </Badge>
+                                  <span className="w-16 text-right text-xs text-onSurface-default-tertiary">
+                                    {formatDuration(child.duration_ms)}
+                                  </span>
+                                </div>
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 {selectedSpan.error && (
                   <div className="space-y-1">
