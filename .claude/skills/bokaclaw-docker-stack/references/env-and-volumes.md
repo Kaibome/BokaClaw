@@ -32,6 +32,8 @@ MEM0_DEFAULT_EMBEDDER_MODEL=BAAI/bge-small-zh-v1.5
 MEM0_DEFAULT_EMBEDDING_DIMS=512
 HF_ENDPOINT=https://hf-mirror.com
 HF_HUB_DISABLE_XET=1
+# start-stack.sh passes this to the container; the default /tmp path is lost on recreate.
+FASTEMBED_CACHE_PATH=/app/history/fastembed
 
 MEM0_TELEMETRY=false
 REQUEST_LOG_RETENTION_DAYS=30
@@ -101,6 +103,7 @@ docker run -d --name bokaclaw-server --network bokaclaw-net --restart unless-sto
   --env-file server/.env -e POSTGRES_HOST=bokaclaw-postgres -e POSTGRES_PORT=5432 \
   -e AGENT_EXECUTOR_URL=http://bokaclaw-executor:8099 \
   -e AGENT_EXECUTOR_TOKEN="$AGENT_EXECUTOR_TOKEN" \
+  -e FASTEMBED_CACHE_PATH=/app/history/fastembed \
   --add-host host.docker.internal:host-gateway \
   -p 8000:8000 -v mem0-local-history:/app/history \
   -v /Users/pankaibo/BokaClaw/workspace:/app/workspace \
@@ -135,7 +138,7 @@ from `POSTGRES_DB`.
 | Volume | Container path | Holds |
 |---|---|---|
 | `mem0-local-pg` | `/var/lib/postgresql/data` | The whole PG 17 cluster (both databases, `pgvector` extension, memories) |
-| `mem0-local-history` | `/app/history` | `history.db`, the mem0 message history SQLite file |
+| `mem0-local-history` | `/app/history` | `history.db`, the mem0 message history SQLite file, and `fastembed/`, the ONNX embedder cache |
 | `/Users/pankaibo/BokaClaw/workspace` (host bind, `WORKSPACE_HOST`) | `AGENT_WORKSPACE_ROOT` (`/app/workspace`) | Files written by the agent's `Write` / `Edit` / `NotebookEdit` tools; survives container re-creation |
 
 `docker rm` does not delete volumes. `docker volume rm mem0-local-pg` **does**,

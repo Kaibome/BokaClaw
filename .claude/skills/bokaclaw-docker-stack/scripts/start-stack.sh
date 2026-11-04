@@ -223,6 +223,7 @@ else
     -e POSTGRES_HOST="$PG_CONTAINER" -e POSTGRES_PORT=5432 \
     -e AGENT_EXECUTOR_URL="http://${EXECUTOR_CONTAINER}:${EXECUTOR_PORT}" \
     -e AGENT_EXECUTOR_TOKEN="$AGENT_EXECUTOR_TOKEN" \
+    -e FASTEMBED_CACHE_PATH=/app/history/fastembed \
     --add-host host.docker.internal:host-gateway \
     -p "${API_PORT}:8000" \
     -v "${HISTORY_VOLUME}:/app/history" \

@@ -148,7 +148,11 @@ field meanings: `references/env-and-volumes.md`. Minimum for this stack:
 - fastembed settings (`MEM0_DEFAULT_EMBEDDER_PROVIDER=fastembed`,
   `MEM0_DEFAULT_EMBEDDER_MODEL=BAAI/bge-small-zh-v1.5`,
   `MEM0_DEFAULT_EMBEDDING_DIMS=512`, `HF_ENDPOINT=https://hf-mirror.com`)
-  when reusing the 512-dim volume
+  when reusing the 512-dim volume. The ONNX model itself is cached at
+  `/app/history/fastembed` on the `mem0-local-history` volume
+  (`FASTEMBED_CACHE_PATH`, passed by `start-stack.sh`), so `RECREATE=1` does not
+  download it again; if a first download crawls, see
+  `references/troubleshooting.md` §9.
 - `AGENT_LOOP_MOCK=true` for UI-only tests; real replies need
   `AGENT_LOOP_MOCK=false` plus `AGENT_MODEL` / `AGENT_API_KEY` / `AGENT_BASE_URL`
   (DeepSeek: `deepseek-flash`, `https://api.deepseek.com`)
