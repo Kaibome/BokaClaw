@@ -19,7 +19,9 @@
 3. **上下文管理**：一次 run 内的消息保存在内存；恢复会话时加载历史，并按配置裁剪发送给模型的视图。
 4. **会话持久化**：run 结束后把本次新增消息写入 Postgres（或内存），支持同一 `session_id` 继续对话。
 
-入口有三个：`run()`（阻塞返回完整结果）、`stream()`（同步生成器，边生成边 yield 文本）、`arun()`（`run()` 的异步包装）。
+入口有三个：`run()`（阻塞返回完整结果）、`stream()`（同步生成器，边生成边 yield 文本）、`arun()`（`run()` 的异步包装）。三者都接受可选的 `cancel_event: threading.Event`，在安全检查点协作式停止；命中时抛出 `RunCancelled`，并把本轮持久化为 `cancelled`。
+
+SDK 是**进程内库**，不是后台执行器。`server/` 的 `AgentRunManager` 负责 run 的创建、排队、领取、事件持久化、订阅与重启回收；SDK 只负责一轮 ReAct 执行并向调用方发出事件。执行与连接解耦的完整契约见 [`agent-execution-decoupling.md`](agent-execution-decoupling.md)，HTTP/SSE 契约以 [`../server/agent-execution-decoupling.md`](../server/agent-execution-decoupling.md) 为准。
 
 明确的非目标（v1）：
 
@@ -28,6 +30,9 @@
 - 边收流边执行工具调用（必须等 tool_call 分片重组完成）
 - MCP 工具发现、内置网络搜索
 - 工具级权限与 OS 沙箱（由宿主应用决定）
+- run 生命周期管理、后台队列、租约、跨重启续跑
+- SSE 订阅、事件回放与 `after_seq` 游标
+- 抢占式取消或工具级中断
 
 ---
 
@@ -133,9 +138,9 @@ AgentRuntime(
 
 | 成员 | 作用 |
 |---|---|
-| `run(input, *, session_id=None, user_id=None, metadata=None, **model_kwargs)` | 执行一次完整的 ReAct 回合，返回 `RunResult` |
-| `stream(...)` | 同一回合的流式版本：逐段 `yield` 文本增量，生成器耗尽时返回 `RunResult` |
-| `arun(...)` | `run()` 的异步包装，内部 `asyncio.to_thread`；不提供流式版本 |
+| `run(input, *, session_id=None, user_id=None, metadata=None, cancel_event=None, **model_kwargs)` | 执行一次完整的 ReAct 回合，返回 `RunResult`；`cancel_event` 命中时抛 `RunCancelled` |
+| `stream(...)` | 同一回合的流式版本：逐段 `yield` 文本增量，生成器耗尽时返回 `RunResult`；接受 `cancel_event` |
+| `arun(...)` | `run()` 的异步包装，内部 `asyncio.to_thread`；`cancel_event` 原样转发；不提供流式版本 |
 | `register_tool(tool)` | 运行期追加工具 |
 | `get_session / list_sessions / delete_session` | 会话管理；未配置 store 时返回空/空操作 |
 | `close / aclose` | 关闭 store 持有的连接池 |
@@ -162,6 +167,8 @@ def stream(...):
 ```
 
 因此持久化、工具执行、轮数控制只有一份实现。`stream()` 在耗尽前被关闭（消费者 `break` 或显式 `close()`）时，本轮不会持久化，已执行的工具结果也不会写库；宿主应消费到 `StopIteration`/`return` 才能得到完整会话。
+
+取消检查点有四个：每次 ReAct 迭代前、模型响应后/执行本次工具前、每个工具调用前、每个工具调用后。流式 chunk 循环内部**不检查**，因此取消要等当前模型响应完整结束；正在执行的工具也不能被抢占。命中时 `_cancel_run()` 会 abort 尚未执行的工具（发出 `status="aborted"` 的 `tool_result`）、构造 `stop_reason="cancelled"` 的部分 `RunResult`、尽力持久化会话为 `cancelled`、发出 `run_ended`，再抛出 `RunCancelled`；取消路径不发 `error` 事件。细节见 [`agent-execution-decoupling.md`](agent-execution-decoupling.md) 第 4 节。
 
 未注入 `provider` 时，必须提供 `config.model`，Runtime 会构造默认的 `OpenAICompatibleProvider`；两者都没有则在构造阶段抛 `ConfigurationError`。
 
@@ -294,8 +301,8 @@ build() = [system?] + truncate(history) + current
 | `ModelStreamChunk` | 流式 Provider 的单个增量（content、tool_calls、finish_reason、usage） |
 | `ToolCallDelta` | 流式 tool call 的一个分片（index、id、name、arguments 片段） |
 | `ToolResult` | 回填给模型的工具结果（tool_call_id、name、content、is_error） |
-| `RunResult` | 一次 run 的完整结果（session_id、content、stop_reason、new_messages、tool_results、iterations、usage） |
-| `AgentEvent` / `EventType` | 生命周期事件与枚举 |
+| `RunResult` | 一次 run 的完整结果（session_id、content、stop_reason、new_messages、tool_results、iterations、usage）；`stop_reason` 含 `cancelled` |
+| `AgentEvent` / `EventType` | 生命周期事件与枚举；`AgentEvent.seq` 是 run 内从 1 开始的序号 |
 
 异常层级：
 
@@ -309,6 +316,7 @@ AgentError
 │   ├── ToolArgumentError
 │   └── ToolExecutionError
 ├── MaxIterationsExceeded      # 携带 result
+├── RunCancelled               # 携带 result；不是 error 事件
 └── SessionStoreError
     ├── PersistenceError
     └── SessionNotFoundError
@@ -379,6 +387,7 @@ sequenceDiagram
 5. 有 `tool_calls` 时**串行**执行，每个调用都追加一条匹配 `tool_call_id` 的 tool 消息；工具异常按 `tool_error_mode` 处理。
 6. 循环耗尽仍没有最终答案时，写入 `failed` 状态，并抛 `MaxIterationsExceeded`，异常上带 `result`。
 7. 成功结束只调用一次 `persist_run`，写入本次新增消息和 `completed` 状态。
+8. 若 `cancel_event` 在任一安全检查点已设置，走取消分支而不是正常结束：abort 待执行工具、持久化 `cancelled`、发出 `run_ended(stop_reason="cancelled")`、抛 `RunCancelled`。取消分支不写 `error` 事件，也不返回 `RunResult`；部分结果在异常对象上。
 
 ### 5.1 流式模式（`stream()`）
 
@@ -416,7 +425,8 @@ sequenceDiagram
 - **tool_call 分片必须先重组**。`_stream_response()` 按 `index` 累加 `name` 和 `arguments` 字符串，全部 chunk 结束后再用 `parse_tool_arguments()` 解析，然后交给 `ToolRegistry` 执行。
 - **usage 跨轮累加**。每个 chunk 的 usage 都并入本次 run 的总计。
 - **无流式能力的 Provider 自动降级**。`_stream_complete()` 检测不到 `stream_complete` 时调用一次 `complete()`，把整段答案作为单个 chunk 发出；调用方代码不需要分支。
-- **提前关闭等于放弃本轮**。生成器被 `close()` 时不会执行最后的 `persist_run()`，已完成的工具结果也不会落库；需要持久化就必须消费到 `StopIteration`。
+- **提前关闭等于放弃本轮**。生成器被 `close()` 时不会执行最后的 `persist_run()`，已完成的工具结果也不会落库；需要持久化就必须消费到 `StopIteration`。这与 `cancel_event` 不同：取消会走 `_cancel_run()` 并持久化 `cancelled`。
+- **取消不在 chunk 循环内生效**。`stream()` 要等当前模型响应完整结束后才检查 `cancel_event`；长模型流或长工具调用会延迟取消。
 
 ---
 
@@ -466,7 +476,7 @@ CREATE TABLE IF NOT EXISTS bokaclaw_agent_sessions (
     title       TEXT,
     metadata    JSONB NOT NULL DEFAULT '{}'::jsonb,
     status      TEXT NOT NULL DEFAULT 'active'
-                CHECK (status IN ('active','completed','failed')),
+                CHECK (status IN ('active','completed','failed','cancelled')),
     error       TEXT,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -495,6 +505,7 @@ CREATE TABLE IF NOT EXISTS bokaclaw_agent_messages (
 
 - **不引入迁移框架**：SDK 要能直接嵌进已有数据库，因此只做幂等建表；需要精细 schema 管理的部署可设置 `auto_create_schema=false` 自行建表。
 - **并发建表安全**：`ensure_schema()` 在事务内取 `pg_advisory_xact_lock`，多进程同时启动不会互相抢建。
+- **旧表状态约束升级**：`ensure_schema()` 调用 `_ensure_status_check()`，从 `pg_constraint` 读取实际的 `status` CHECK；若不含 `cancelled`，删除并按固定定义重建。升级幂等，不改动其它列与历史数据。
 - **消息顺序**：`UNIQUE (session_id, seq)` 自带索引，`load_messages` 按 `seq` 排序恢复。
 - **级联删除**：删除 session 自动删除消息。
 - **JSONB 字段**：`tool_calls` 直接存 wire format 数组，恢复时无需转换。
@@ -511,7 +522,7 @@ CREATE TABLE IF NOT EXISTS bokaclaw_agent_messages (
 2. 取 `MAX(seq)`，本次消息从 `next_seq + 1` 开始连续编号。
 3. 批量插入消息；任何非法角色直接抛 `PersistenceError`。
 
-因此**一次 run 只写一次库**，历史消息不会重复写入。
+因此**一次 run 只写一次库**，历史消息不会重复写入。成功路径的持久化失败会转入失败处理；取消、超轮数和异常路径的持久化是 best-effort（失败只记日志，不掩盖原始原因）。
 
 ### 7.3 会话状态
 
@@ -519,9 +530,10 @@ CREATE TABLE IF NOT EXISTS bokaclaw_agent_messages (
 |---|---|
 | `completed` | ReAct 正常结束（包括 `length` / `content_filter`） |
 | `failed` | 超过 `max_iterations`，或 run 过程中抛异常 |
+| `cancelled` | `cancel_event` 在安全检查点命中，抛出 `RunCancelled` |
 | `active` | 表默认值；SDK 自身不写入该状态，供宿主标记「进行中」 |
 
-失败路径会先补齐未完成的 `tool_calls`：为每个 pending call 追加一条内容为 `{"error": "run aborted: ..."}` 的 tool 消息，保证恢复后的会话在 OpenAI 协议下仍然合法。
+失败与取消路径都会先补齐未完成的 `tool_calls`：为每个 pending call 追加一条内容为 `{"error": "run aborted: ..."}` 的 tool 消息，并发出 `status="aborted"` 的 `tool_result` 事件，保证恢复后的会话在 OpenAI 协议下仍然合法。
 
 ---
 
@@ -535,6 +547,7 @@ CREATE TABLE IF NOT EXISTS bokaclaw_agent_messages (
 | 工具参数不合法 | 同上，对应 `ToolArgumentError` |
 | 工具执行抛异常 | 同上，对应 `ToolExecutionError` |
 | 超过最大轮数 | 持久化 `failed`，抛 `MaxIterationsExceeded`，异常带 `result` |
+| `cancel_event` 命中 | abort 待执行工具，持久化 `cancelled`，发 `run_ended`，抛 `RunCancelled`；不发 `error` 事件 |
 | 成功路径持久化失败 | 触发失败处理（尽力再写一次 failed），最终抛 `PersistenceError` |
 | 失败路径持久化失败 | 只记日志，不覆盖原始异常 |
 | 事件回调抛异常 | 只记日志，不影响 run |
@@ -553,10 +566,12 @@ CREATE TABLE IF NOT EXISTS bokaclaw_agent_messages (
 | `run_started` | run 开始 | `input` |
 | `model_request` | 每次模型调用前 | `messages`、`tools` |
 | `model_response` | 每次模型返回后 | `content`、`tool_calls`、`finish_reason` |
-| `tool_call` | 执行工具前 | `tool_call_id`、`name`、`arguments` |
-| `tool_result` | 工具返回后 | `tool_call_id`、`name`、`content`、`is_error` |
-| `run_ended` | 正常结束或超轮数 | `stop_reason` |
-| `error` | 异常失败 | `error`、`type` |
+| `tool_call` | 执行工具前 | `tool_call_id`、`name`、`arguments`、`raw_arguments`、`arguments_error`、`status="running"` |
+| `tool_result` | 工具返回/abort 后 | `tool_call_id`、`name`、`content`、`is_error`、`status`（`completed/failed/aborted`） |
+| `run_ended` | 正常结束、超轮数或取消 | `stop_reason`（含 `cancelled`） |
+| `error` | 非取消异常 | `error`、`type` |
+
+`AgentEvent` 还携带 `seq`：从 1 开始、每个 run 重置、严格按发出顺序递增。即使没有注册 `on_event`，序号也会递增；`seq` 是 runtime 实例状态，共享同一实例并发执行会交错。服务端不复用 SDK `seq`，而是由 `RunEventWriter` 重新编号。
 
 回调可以是同步函数，也可以返回 awaitable；回调异常只记录日志。
 
@@ -576,6 +591,8 @@ CREATE TABLE IF NOT EXISTS bokaclaw_agent_messages (
   - `PostgresSessionStore` 使用连接池；每个事务独立连接。
   - 同一 `session_id` 的并发 run 由 session 行锁串行化写入，但**语义顺序不保证**，应避免并发写同一会话。
 - **不同会话**：可以并行 run；每次 run 独立上下文。
+- **取消模型**：`cancel_event` 是 `threading.Event`，由调用方设置；SDK 在四个安全检查点读取，不抢占正在进行的模型请求或工具。取消的延迟等于当前阻塞单元；流式 chunk 循环内部不检查。`stream()` 被提前 `close()` 是“放弃”，不是取消，不会持久化。
+- **事件序号**：`_event_seq` 是 runtime 实例字段，每个 `_execute` 重置为 0。并发复用同一实例会导致事件交错；并发场景应每个 run 新建 runtime（服务端如此）。
 
 ---
 
@@ -596,27 +613,34 @@ CREATE TABLE IF NOT EXISTS bokaclaw_agent_messages (
 
 ## 12. 与 `server/` 的集成关系
 
-`server/app/agent/runtime.py` 在**同一进程内**创建 SDK Runtime，但采用与独立使用不同的持久化策略：
+`server/app/agent/runtime.py` 在**同一进程内**创建 SDK Runtime，但 SDK 不拥有 run 生命周期：
 
 ```text
-dashboard ── POST /agent ──▶ server（鉴权 / SSE / 会话存储）
+dashboard ── POST /agent ──▶ server（鉴权 / 创建 agent_runs / 订阅 SSE）
                                 │
-                                ├─ agent_runtime.build_runtime()
-                                │     ├─ memory tools: search_memories / save_memory
-                                │     └─ dev tools: Read / Write / Edit / ...
-                                └─ runtime.stream(messages, session_id=conversation_id)
+                                ├─ AgentRunManager.submit(run_id)
+                                │     └─ worker: stream_local_agent(payload, cancel_event, max_seconds)
+                                │           ├─ build_runtime()
+                                │           │     ├─ memory tools: search_memories / save_memory
+                                │           │     └─ dev tools: Read / Write / Edit / ...
+                                │           └─ runtime.stream(messages, session_id=conversation_id,
+                                │                              cancel_event=...)
+                                ├─ RunEventWriter: 分配 seq → agent_run_events → fanout
+                                └─ 断连只移除订阅，worker 继续执行
 ```
 
 关键差异：
 
-- **服务端是会话的唯一事实来源**：Runtime 构造时**不传 `store`**，服务端从自己的 `conversations` / `conversation_messages` 表组装 `history`，再通过 `stream(messages, ...)` 传入。SDK 的 Postgres 表不会与业务表重复。
+- **服务端是会话与 run 的唯一事实来源**：Runtime 构造时**不传 `store`**，服务端从自己的 `conversations` / `conversation_messages` 表组装 `history`，再通过 `stream(messages, ...)` 传入。SDK 的 Postgres 表不会与业务表重复；助手消息由服务端在 run 终态时按预生成 id 落库。
 - **`session_id` 仅用于事件标识**：传入 `conversation_id` 便于日志关联；没有 store 时不产生 SDK 侧持久化。
 - **工具由服务端注入**：记忆工具按登录用户 UUID 限定作用域；开发者工具是否注册由 `AGENT_DEV_TOOLS`、`AGENT_TOOLS_ALLOW_SHELL` 控制。
-- **同步生成器 → 异步 SSE 的桥接**：`stream_local_agent()` 在工作线程中消费 `runtime.stream()`，通过 `loop.call_soon_threadsafe` 把文本增量推入 `asyncio.Queue`，主协程再把每个增量转成 `message.delta` 事件。工具调用轮没有文本，因此不会产生 SSE 输出。
-- **超时与错误映射在服务端完成**：主协程按剩余时间 `asyncio.wait_for(queue.get())` 控制整轮时限；超时或客户端断开时设置停止标志并关闭 Runtime。`MaxIterationsExceeded` / `ConfigurationError` 等映射为 SSE 错误码（`agent_timeout`、`agent_not_configured`、`agent_upstream_error` 等）。
-- **可选远程执行器**：设置 `AGENT_LOOP_URL` 时，server 改走 HTTP/SSE 外部执行器，不再进程内调用 SDK；SDK 自身的部署方式不受影响。
+- **同步生成器 → 异步 SSE 的桥接**：`stream_local_agent()` 在工作线程中消费 `runtime.stream()`，通过 `loop.call_soon_threadsafe` 把文本增量推入 `asyncio.Queue`，主协程再把每个增量转成服务端事件。工具调用轮没有文本，因此不会产生 `message.delta`；工具信息由 `on_event` 桥接为 `tool.call` / `tool.result`。
+- **取消由服务端信号驱动**：manager 为每个 run 创建 `threading.Event`，通过 `stream_local_agent(cancel_event=...)` 传给 SDK；桥接层同时每 0.5 秒检查一次，命中即抛 `AgentLoopError("agent_cancelled")`。SDK 的 `RunCancelled` 也映射为同一错误码。取消是协作式的，不能中断正在进行的模型请求或工具。
+- **超时与错误映射在服务端完成**：主协程按 `max_seconds` 控制整轮时限；`MaxIterationsExceeded` / `ConfigurationError` 等映射为服务端错误码（`agent_timeout`、`agent_not_configured`、`agent_upstream_error` 等）。
+- **断连不等于取消**：后台模式下 SSE 断开只移除订阅，run 继续；只有显式 `POST /agent/runs/{id}/cancel` 才取消。`AGENT_RUN_BACKGROUND=false` 时才回到请求绑定路径，此时断连会停止本轮并写 `cancelled` 消息。
+- **可选远程执行器**：设置 `AGENT_LOOP_URL` 时，server 改走 HTTP/SSE 外部执行器，不再进程内调用 SDK；SDK 自身的部署方式不受影响。远程取消也只在上游事件之间观察，不会传递给上游。
 
-因此，SDK 的 `SessionStore` 面向「把 SDK 当独立 Agent 服务使用」的场景；把 SDK 嵌进已有业务系统时，宿主可以像 `server/` 一样自行管理会话并传入历史。
+因此，SDK 的 `SessionStore` 面向「把 SDK 当独立 Agent 服务使用」的场景；把 SDK 嵌进已有业务系统时，宿主可以像 `server/` 一样自行管理会话并传入历史。完整的 run/订阅/取消契约见 [`agent-execution-decoupling.md`](agent-execution-decoupling.md) 与 [`../server/agent-execution-decoupling.md`](../server/agent-execution-decoupling.md)。
 
 ---
 
@@ -632,7 +656,7 @@ dashboard ── POST /agent ──▶ server（鉴权 / SSE / 会话存储）
 | SDK 自带幂等 DDL | 无需迁移框架、可与 mem0 共库；代价是 schema 演进能力有限 |
 | 失败时补齐 tool 消息 | 会话始终符合协议、可继续恢复；代价是数据库中出现合成的错误结果 |
 | Postgres 依赖放在 `postgres` extra | 纯内存场景无需安装数据库驱动；代价是用户需显式安装 |
-| 同步生成器流式 + 工作线程桥接 | 核心与 Provider 保持同步、实现简单；代价是异步宿主需要队列/线程桥接，取消依赖关闭生成器 |
+| 同步生成器流式 + 工作线程桥接 | 核心与 Provider 保持同步、实现简单；代价是异步宿主需要队列/线程桥接，取消只能协作式检查（不能抢占模型/工具） |
 | tool_call 分片全部到齐后才执行 | 解析和校验逻辑与非流式完全一致；代价是不能边收参数边启动工具 |
 
 ---
@@ -648,6 +672,10 @@ dashboard ── POST /agent ──▶ server（鉴权 / SSE / 会话存储）
 - **MCP / WebSearch / LSP**：属于工具生态，可按需注册为普通 Tool。
 - **重试与退避策略**：目前依赖模型客户端自身的 `max_retries`。
 - **可观测性指标**：事件流已具备，可桥接到 OpenTelemetry / 日志系统。
+- **`RunHandle` / `CheckpointStore` / `resume`**：SDK 没有步级 checkpoint，也不支持中断后续跑；中断由服务端收尾，不恢复执行。
+- **事件回放**：`on_event` 是推送式，没有按 `seq` 查询/重放的事件日志；持久化事件日志由服务端 `agent_run_events` 提供。
+- **增量持久化**：SDK 只在 run 终态写一次会话；流式过程中的文本由服务端 `partial_content` 与事件表负责。
+- **分布式协调**：SDK 是进程内库，不感知租约、多副本或跨进程取消。
 
 ---
 
@@ -657,7 +685,8 @@ dashboard ── POST /agent ──▶ server（鉴权 / SSE / 会话存储）
 - 覆盖范围：
   - `test_tools.py`：schema 生成、docstring 解析、参数校验、同步/异步调用、错误模式
   - `test_provider_openai.py`：`tool_call.id` 保留、坏 JSON、旧式 `function_call`、usage 映射、流式 chunk 解析
-  - `test_runtime.py` / `test_arun.py`：完整 ReAct 往返、多轮工具、最大轮数、异常持久化、事件顺序
+  - `test_runtime.py` / `test_arun.py`：完整 ReAct 往返、多轮工具、最大轮数、异常持久化、事件顺序、`seq` 连续性
+  - `test_cancel.py`：四个取消检查点、abort pending 工具、部分 `RunResult`、`cancelled` 持久化、最后事件为 `run_ended(stop_reason="cancelled")`、不发 `error`、`arun` 转发
   - `test_streaming.py`：文本增量顺序、tool_call 分片重组、无流式 Provider 的降级、无文本回合
   - `test_context.py`：system prompt、历史恢复、裁剪边界、持久化完整性
   - `test_session_memory.py` / `test_session_postgres.py`：会话 CRUD、seq、metadata 合并、DDL 幂等；真实 Postgres 集成测试由 `BOKACLAW_AGENT_TEST_DSN` 开启

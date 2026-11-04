@@ -1,116 +1,75 @@
-# AgentLoop：执行与连接解耦设计
+# Agent 执行与连接解耦：SDK 层设计
 
-> 状态：Phase 1 已实现（2026-11-04）；Phase 2（RunHandle / CheckpointStore / 续跑）未实现
+> 状态：已实现（2026-11-04）
 >
-> 适用范围：`agent-loop/` 包（发行名 `bokaclaw-agent`，import 名 `bokaclaw_agent`）
+> 适用范围：`agent-loop/`（`bokaclaw-agent`）Python SDK
 >
-> 目标读者：SDK 维护者、`server/` 集成开发者、需要嵌入 Agent 能力的业务方
+> 目标读者：SDK 维护者、服务端集成者
 >
-> 契约来源：与 `server/` 共享的 run 状态、事件、seq、错误码以 [`../server/agent-execution-decoupling.md`](../server/agent-execution-decoupling.md) 第 3 节为准。
+> 契约来源：HTTP、SSE、run 状态、事件 payload、错误码以 [`../server/agent-execution-decoupling.md`](../server/agent-execution-decoupling.md) 第 3、9 节为准。本文只描述 SDK 自己的能力与边界。
 
-## 1. 背景与 SDK 定位
+## 1. 定位与边界
 
-`bokaclaw-agent` 是一个可独立发布、可嵌入任意 Python 服务的 ReAct 运行时。v1 负责：
+`bokaclaw-agent` 是一个**进程内 ReAct 库**，不是后台执行器，也不拥有 run 生命周期。
 
-1. ReAct 循环（模型请求 → 工具调用 → 工具结果回填 → 最终答案）。
-2. `stream()` 逐段转发最终答案的文本增量。
-3. 一次 run 内的上下文管理与历史截断。
-4. run 结束后把消息写入 `SessionStore`（内存或 Postgres）。
+它负责：
 
-`server/` 当前**不使用** SDK 的 `SessionStore`：它把 `conversations` / `conversation_messages` 作为唯一事实来源，每次请求把历史显式传给 runtime。因此本轮"执行与连接解耦"的 Phase 1 可以在**不改 SDK 公共 API**的前提下完成，SDK 文档需要说明这一边界，避免夸大现有能力。
+- 组装上下文、调用模型、执行工具、推进 ReAct 循环。
+- 通过 `on_event` 向调用方发出七种生命周期事件。
+- 在传入了 `SessionStore` 时，把**一轮结束后的**消息与会话状态一次性写入存储。
+- 接受 `threading.Event` 作为协作式取消信号，在安全检查点停止并抛出 `RunCancelled`。
 
-### 1.1 本轮的位置
+它不负责：
 
-| 层 | 本期改动 |
-| --- | --- |
-| `server/` | 新增 run 表、后台 worker、事件日志、取消接口（见 server 文档） |
-| `dashboard/` | 重连、Stop 走 cancel、刷新恢复（见 dashboard 文档） |
-| `agent-loop/` | **Phase 1 不强制改动**；本文定义约束与后续增量 |
+- `agent_runs` / `agent_run_events` 表、run 的排队、领取、终态与重启恢复。
+- SSE 订阅、事件回放、`after_seq` / `Last-Event-ID`。
+- HTTP 请求生命周期、断连检测、连接级取消。
+- 增量助手消息持久化；这是服务端 `AgentRunManager` 的职责。
+- 后台进程、租约、多副本协调。
 
-Phase 1 的取消依赖服务端已经存在的 `threading.Event` + task cancellation 组合；SDK 只提供"迭代边界可检查"的增强，使取消能产生一条合法的 `cancelled` 会话记录。
+服务端集成方式：每个 run 创建一个 `AgentRuntime`，在 worker 线程中消费 `runtime.stream(...)`。服务端使用自己的 `RunEventWriter` 分配持久化 `seq`，**不复用、也不转发** SDK 的 `AgentEvent.seq`。服务端也不使用 SDK 的 `SessionStore`：它有自己的 `conversation_messages` 与 `agent_runs`。
 
-## 2. 现状能力与缺口
+## 2. 已实现能力总览
 
-### 2.1 已有能力
-
-| 能力 | 现状 |
-| --- | --- |
-| run 标识 | `_execute()` 内部生成 `session_id = session_id or uuid4().hex`，通过 `RunResult.session_id` 返回 |
-| 事件回调 | `on_event(AgentEvent)`，类型 `run_started`、`model_request`、`model_response`、`tool_call`、`tool_result`、`run_ended`、`error` |
-| 流式文本 | `stream()` 逐段 yield；工具调用分片在内部重组 |
-| 失败持久化 | `_handle_failure()` 补齐 pending tool 消息，`persist_run(status="failed")` |
-| 最大步数 | `AgentConfig.max_iterations`，默认 10；超出抛 `MaxIterationsExceeded` |
-| 历史管理 | `ContextManager` 只做截断（`max_history_messages`），无摘要/压缩 |
-| 工具错误 | `tool_error_mode="return"`（默认）或 `"raise"` |
-
-### 2.2 缺口
-
-| 缺口 | 影响 | 归属 |
+| 能力 | 入口 / 符号 | 代码位置 |
 | --- | --- | --- |
-| 没有取消令牌 | 调用方只能关闭生成器；关闭发生在 `stream()` 消费端，`_execute` 的 `finally` 之前不会主动检查 | Phase 1 |
-| 事件没有单调 `seq` | 回调消费者无法去重/续接；只有 `iteration` 和事件类型 | Phase 1 |
-| run id 在流结束前不可见 | 调用方无法在 run 开始时就持久化/订阅 | Phase 1（可选） |
-| 只在 run 结束持久化 | 进程崩溃丢失整轮进度；`stream()` 提前关闭明确不持久化 | Phase 2 |
-| 没有 checkpoint | 重启后无法知道已完成哪些工具、pending 哪些调用 | Phase 2 |
-| 工具没有幂等声明 | 恢复时无法安全决定是否重放 | Phase 2 |
-| 没有事件回放 | 事件只经回调发出，回调失败被吞掉，无法补读 | Phase 2 |
+| 同步执行 | `AgentRuntime.run(..., cancel_event=None)` | `src/bokaclaw_agent/runtime.py` |
+| 流式执行 | `AgentRuntime.stream(..., cancel_event=None)` | 同上 |
+| 异步执行 | `AgentRuntime.arun(..., cancel_event=None)` | 同上 |
+| 生命周期事件 | `on_event: Callable[[AgentEvent], Any]` | `AgentRuntime.__init__` |
+| 事件序号 | `AgentEvent.seq` | `src/bokaclaw_agent/types.py` |
+| 取消异常 | `RunCancelled` | `src/bokaclaw_agent/exceptions.py` |
+| 取消终止原因 | `RunResult.stop_reason="cancelled"` | `types.py` |
+| 会话状态 | `active / completed / failed / cancelled` | `sessions/postgres.py` |
+| 状态约束升级 | `_ensure_status_check()` | 同上 |
 
-这些缺口解释了为什么 **Phase 1 的解耦只是"连接级"的**：服务端可以断开 HTTP 连接而继续执行，但 SDK 仍然是一次连续的函数调用；进程重启后不能从中间步骤续跑。
+公开导出（`bokaclaw_agent/__init__.py`）包含 `AgentRuntime`、`AgentConfig`、`ModelConfig`、`AgentEvent`、`RunResult`、`RunCancelled`、`MaxIterationsExceeded` 等。SDK 版本不拥有服务端 run id；`RunResult.session_id` 由调用方传入（服务端传 `conversation_id`）。
 
-## 3. 与 server 的契约关系
+## 3. 公共 API
 
-SDK 的 `session_id` 与 server 的 `run_id` 是不同层次的概念：
-
-| 概念 | 所属 | 生命周期 | 用途 |
-| --- | --- | --- | --- |
-| `session_id` | SDK | 同一会话可跨多次 `run()` 复用 | 加载/持久化历史 |
-| `run_id` | server | 一次执行 | 订阅、取消、事件重放 |
-| SDK `iteration` | SDK | 一次 run 内的 ReAct 轮次 | 工具事件归属 |
-| server `seq` | server | 一次 run 内的事件序号 | SSE 去重/续传 |
-
-映射关系（Phase 1，服务端当前用法）：
-
-```text
-server agent_runs.id        → 仅存在于 server，不传给 SDK
-server payload.conversation_id → SDK session_id
-server payload.message_id   → 用户消息 id（server 自己的表）
-server agent_run_events.seq → server 分配，不复用 SDK 事件序号
-```
-
-因此：
-
-- SDK **不需要**知道 server 的 `run_id`，也不需要把 `seq` 写进模型请求。
-- server 的 `agent_run_events` 是权威事件日志；SDK 的 `on_event` 是进程内观察点。
-- SDK 后续若增加 `seq`，它是 SDK 自己的序号，**不能**直接当作 server 的 `seq` 使用；两者独立分配，避免耦合。
-
-### 3.1 server 契约摘要（只列与 SDK 相关的部分）
-
-完整定义见 [`../server/agent-execution-decoupling.md`](../server/agent-execution-decoupling.md) 第 3 节。SDK 侧需要对齐的只有以下几点：
-
-| 项 | 值 |
-| --- | --- |
-| run 状态 | `queued / running / completed / failed / cancelled / interrupted` |
-| SDK 会触发的终态 | `completed`、`failed`、`cancelled`；`interrupted` 由 server 重启回收产生 |
-| 取消错误码 | `agent_cancelled` |
-| 中断错误码 | `agent_interrupted` |
-| 事件订阅游标 | `after_seq`，排他（只返回 `seq > N`） |
-| 消息状态映射 | `interrupted` 落库为消息 `failed`，metadata 写 `run_status=interrupted` |
-| server 持久化事件 | `message.delta`、`tool.call`、`tool.result`、`message.completed`、`error` |
-| server 合成事件 | `meta`（每次订阅开始）、`done`（最后一条，`status` 为终态） |
-
-其余错误码（`agent_run_active`、`agent_run_not_found`、`agent_events_expired`）属于 server 的 run 管理，SDK 不产生也不解析。
-
-## 4. Phase 1：取消令牌、事件序号、持久化时机
-
-Phase 1 的目标是在不改变 `run()` / `stream()` 基本形态的前提下，让取消可预期、事件可去重、取消后的会话记录合法。
-
-### 4.1 取消令牌
-
-新增可选参数：
+### 3.1 `run`
 
 ```python
-import threading
+def run(
+    self,
+    input: str | list[dict[str, Any]],
+    *,
+    session_id: str | None = None,
+    user_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    cancel_event: threading.Event | None = None,
+    **model_kwargs: Any,
+) -> RunResult
+```
 
+- `input` 是用户字符串或 OpenAI wire-format 消息列表。
+- `session_id` 为空时生成新的 `uuid4().hex`。
+- `cancel_event` 在安全检查点被检查；命中时抛出 `RunCancelled`。
+- 返回 `RunResult`，包含 `content`、`stop_reason`、`new_messages`、`tool_results`、`iterations`、`usage`。
+
+### 3.2 `stream`
+
+```python
 def stream(
     self,
     input: str | list[dict[str, Any]],
@@ -120,426 +79,381 @@ def stream(
     metadata: dict[str, Any] | None = None,
     cancel_event: threading.Event | None = None,
     **model_kwargs: Any,
-) -> Generator[str, None, RunResult]: ...
+) -> Generator[str, None, RunResult]
 ```
 
-`run()` 和 `arun()` 同样接受 `cancel_event`。它是**协作式**的：runtime 在安全边界检查，不强制中断阻塞中的网络请求或工具。
+- 只 `yield` 助手文本增量（`str`），不 `yield` 工具事件；工具信息通过 `on_event` 获取。
+- 生成器耗尽时以 `return RunResult` 返回最终结果。
+- 提前 `close()` 生成器等于**放弃本轮**：不写会话、不产生终态事件，也**不是**取消。
+- `cancel_event` 在整个模型响应完成后才检查，不在流式 chunk 循环内部检查。
 
-检查点：
+### 3.3 `arun`
 
-1. 进入每次 `for iteration in range(...)` 之前。
-2. 模型响应返回后、执行该轮的 `tool_calls` 之前。
-3. 每个工具调用开始之前。
-4. 工具调用结束、回到下一轮之前。
-
-不要在流式 chunk 循环内部抛取消异常：此时 assistant 消息尚未组装完成，直接中断会产生不完整的 tool_calls，破坏会话合法性。取消生效时，当前模型请求会自然结束，然后在下一次检查点退出。
-
-取消时的行为：
-
-```text
-cancel_event.set()
-  → 在下一个检查点抛 RunCancelled
-  → 复用 _handle_failure 的补齐逻辑：为 pending tool calls 写 aborted 的 tool 消息
-  → persist_run(status="cancelled", error="RunCancelled")
-  → emit run_ended {stop_reason: "cancelled"}（或 error 事件）
-  → 抛出 RunCancelled（携带 session_id / 部分 RunResult）
+```python
+async def arun(
+    self,
+    input: str | list[dict[str, Any]],
+    *,
+    session_id: str | None = None,
+    user_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    cancel_event: threading.Event | None = None,
+    **model_kwargs: Any,
+) -> RunResult
 ```
 
-实现上应把 `_handle_failure` 中"补齐 pending tool 消息"的部分抽成共享函数；取消路径复用它，但以 `cancelled` 持久化，不能直接调用会写 `failed` 的整个函数。
+- 通过 `asyncio.to_thread(self.run, ...)` 包装同步实现。
+- `cancel_event` 原样转发。
+- 适合 async 框架调用；不提供异步流式版本。
 
-服务端已有的 `stop` 机制：
+### 3.4 `RunResult`
 
-- `server/app/agent/runtime.py` 的 `stream_local_agent()` 已经维护一个 `threading.Event`，在生成器 `finally` 中 `stop.set()`，worker 线程在下一个 `next(turn)` 后检查并 `turn.close()`。
-- 这条路径能停止"继续消费"，但 `turn.close()` 会让 `_execute` 的生成器提前结束，**不会走到 `persist_run`**，因为没有 store 时无影响；有 store 时不会留下 cancelled 记录。
-- Phase 1 接入 `cancel_event` 后，服务端把 manager 的取消信号传给它，SDK 就能在安全边界收尾，而不是只关闭生成器。
+```python
+class RunResult(BaseModel):
+    session_id: str
+    content: str | None = None
+    stop_reason: Literal["final", "length", "content_filter", "max_iterations", "cancelled"]
+    new_messages: list[dict[str, Any]]
+    tool_results: list[ToolResult]
+    iterations: int
+    usage: dict[str, int]
+```
 
-### 4.2 `RunCancelled`
+`stop_reason` 映射：
 
-新增异常：
+| 模型 `finish_reason` | `RunResult.stop_reason` |
+| --- | --- |
+| `length` | `length` |
+| `content_filter` | `content_filter` |
+| 其他/空 | `final` |
+| 达到最大迭代 | `max_iterations`（同时抛 `MaxIterationsExceeded`） |
+| `cancel_event` 命中 | `cancelled`（同时抛 `RunCancelled`） |
+
+取消时的部分结果通过 `RunCancelled.result` 暴露，结构与 `RunResult` 相同。
+
+### 3.5 `RunCancelled`
 
 ```python
 class RunCancelled(AgentError):
-    """Raised when cancel_event was set at a safe boundary."""
-
-    def __init__(
-        self,
-        session_id: str,
-        result: RunResult | None = None,
-        iteration: int = 0,
-    ) -> None: ...
-```
-
-- 继承 `AgentError`，与 `MaxIterationsExceeded` 同级。
-- `result` 包含已产生的消息与工具结果，便于调用方检查。
-- 不要把它映射成 `ModelError` 或普通 `Exception`；服务端据此映射 `agent_cancelled`。
-
-### 4.3 事件序号
-
-给 `AgentEvent` 增加：
-
-```python
-seq: int = 0          # run 内单调递增，从 1 开始
-```
-
-分配规则：
-
-- 每次 `_emit` 前 `self._event_seq += 1`，写入事件。
-- `run_started` = 1；`run_ended` / `error` 是最后一个。
-- 序号在 run 内单调；不同 run 独立从 1 开始。
-- 回调异常仍然被吞掉，不影响 run；`seq` 让消费者至少能检测缺口。
-
-不要复用 `iteration` 作为 `seq`：一轮内可能有多条事件（model_request、model_response、多个 tool_call/tool_result）。
-
-### 4.4 尽早暴露 run 标识
-
-现状 `RunResult.session_id` 只在 `stream()` 耗尽后可读。但 `AgentEvent` 已经带 `session_id` 字段，`run_started` 又是每条 run 的第一条事件，因此调用方可以在 `on_event` 里立即拿到标识，**无需新增 API 或修改 payload**。只需要在文档中明确这一用法。
-
-可选增强：若调用方希望在 runtime 生成 id 之前就掌控标识，显式传入 `session_id`；这也是 server 当前的做法（传 `conversation_id`）。
-
-### 4.5 持久化时机
-
-Phase 1 **不改变**"run 结束才 `persist_run`"的整体策略，只补充取消路径：
-
-| 路径 | 现状 | Phase 1 |
-| --- | --- | --- |
-| 正常完成 | `persist_run(completed)` | 不变 |
-| 异常 | `_handle_failure` + `persist_run(failed)` | 不变 |
-| 超出步数 | `persist_run(failed)` + 抛异常 | 不变 |
-| 调用方提前关闭 `stream()` | **不持久化**（文档明确） | 不变；这不是取消，是放弃 |
-| `cancel_event` | 不存在 | 补齐 tool 消息后 `persist_run(cancelled)` |
-
-为什么不在 Phase 1 做步级持久化：`persist_run` 是整轮追加，重复调用会产生重复消息；要做增量写必须同时引入 checkpoint 与幂等键，属于 Phase 2。Phase 1 的定位是"取消语义正确"，不是"崩溃可恢复"。
-
-## 5. Phase 2：RunHandle、CheckpointStore、事件回放
-
-### 5.1 `RunHandle`
-
-新增 `start()`，与 `run()` / `stream()` 并存：
-
-```python
-handle = runtime.start(
-    input,
-    session_id=session_id,
-    user_id=user_id,
-    metadata=metadata,
-)
-
-handle.run_id          # SDK run id（可与 session_id 不同）
-handle.events()        # Iterator[AgentEvent]，支持从 seq 回放
-handle.cancel()        # 等价于设置 cancel_event
-handle.result()        # 阻塞等待 RunResult；取消/失败抛对应异常
-handle.checkpoint()    # 最近一次 Checkpoint
-```
-
-语义：
-
-- 后台执行（线程或 asyncio task），调用方通过 `events()` 读取。
-- `events()` 可多次调用；从 `seq > after` 回放，实时事件继续追加。
-- `cancel()` 是幂等的；取消后 `result()` 抛 `RunCancelled`。
-- 不改变 `run()` / `stream()` 的行为；`start()` 是加法。
-
-### 5.2 `CheckpointStore`
-
-```python
-class Checkpoint(BaseModel):
-    run_id: str
     session_id: str
-    seq: int                 # 对应的最后一个 SDK 事件序号
+    result: RunResult | None
     iteration: int
-    messages: list[dict[str, Any]]
-    pending_tool_calls: list[ToolCall]
-    tool_results: list[ToolResult]
-    usage: dict[str, int]
-    status: Literal["running", "completed", "failed", "cancelled", "interrupted"]
-    created_at: datetime
-
-
-class CheckpointStore(Protocol):
-    def save(self, checkpoint: Checkpoint) -> None: ...
-    def load(self, run_id: str) -> Checkpoint | None: ...
-    def latest_for_session(self, session_id: str) -> Checkpoint | None: ...
 ```
 
-建议实现：
+- 继承 `AgentError`，不是普通错误事件。
+- 在 `_cancel_run()` 中构造，先填好部分结果与持久化，再抛出。
+- 调用方必须捕获；未捕获时会向上传播。
 
-- `InMemoryCheckpointStore`：测试与单进程使用。
-- `PostgresCheckpointStore`：新表 `bokaclaw_agent_checkpoints`，`run_id` 主键，`(session_id, created_at DESC)` 索引；与现有 `bokaclaw_agent_sessions/messages` 同库，但独立表，避免改变已有 schema。
-- checkpoint 写入时机：每次模型响应后、每个工具结果后、终态。写入必须与事件追加保持同一顺序；至少保证"checkpoint 的 seq ≤ 已发出事件的最大 seq"。
-- checkpoint 不替代 `persist_run`：前者是执行进度，后者是会话消息的最终事实。恢复成功后仍由 `persist_run` 把新增消息补进会话。
+## 4. 取消模型
 
-### 5.3 恢复
+### 4.1 信号
 
-```python
-result = runtime.resume(run_id, checkpoint_store=store)
+`cancel_event` 是标准库 `threading.Event`。SDK 只读取 `is_set()`，不负责设置或清除。设置方通常是服务端的 `AgentRunManager`：
+
+- `running` run 收到 cancel 请求时 `set()`。
+- 正常完成后不需要清除；每个 run 使用独立 Event。
+
+### 4.2 四个检查点
+
+```text
+for iteration in 1..max_iterations:
+    check_cancelled()            # 1. 每次 ReAct 迭代前
+    response = model(...)
+    check_cancelled()            # 2. 模型响应后、执行本次工具前
+    for call in response.tool_calls:
+        check_cancelled()        # 3. 每个工具调用前
+        result = invoke(call)
+        check_cancelled()        # 4. 每个工具调用后
 ```
 
-恢复流程：
+明确的行为：
 
-1. 加载 checkpoint；没有则报 `CheckpointNotFoundError`。
-2. 重建 `ContextManager`：历史 = store 中该 session 的已持久化消息 + checkpoint 的增量消息（去重）。
-3. 已完成工具调用：直接复用 checkpoint 中的 `ToolResult`，不重新执行。
-4. 未完成工具调用（模型已请求、没有结果）：
-   - 标记为 `pending`。
-   - 默认**不自动重试**，把 run 置为 `interrupted`，要求调用方决定。
-   - 只有工具声明 `idempotent=True` 时才允许自动重放。
-5. 从下一个 ReAct 轮次继续；`seq` 继续递增。
-6. 成功或失败后按正常路径 `persist_run`。
+- **流式 chunk 循环内部不检查**。`_stream_response` 持续消费 provider 的 chunk，直到模型响应完整结束；取消要等这次模型响应结束才生效。
+- 模型请求本身是阻塞的；取消不能中断一个正在进行的模型请求。
+- 工具调用是同步阻塞的；取消不能中断一个正在执行的工具。
+- 检查点 2 会 abort 本次响应中**所有**尚未执行的工具调用。
+- 检查点 3 会 abort 当前调用及其后所有调用。
+- 检查点 4 会 abort 后续尚未执行的调用；当前调用已经产生 `tool_result`。
+- 检查点 1 通常没有待执行的调用（上一轮工具循环已清空 `pending_calls`）。
 
-### 5.4 事件回放
+### 4.3 取消路径
 
-- `RunHandle.events(after=seq)` 先回放内存/存储中的事件，再挂接实时。
-- 事件存储可复用 checkpoint 表的一个 JSONB 列，或新增 `bokaclaw_agent_events` 表（`run_id, seq, type, data, created_at`，`UNIQUE(run_id, seq)`）。
-- 事件保留策略由宿主决定；SDK 只提供读写接口，不自动清理。
-- 与 server 的 `agent_run_events` **不共享表**：两者的 seq 空间、事件类型、保留策略不同，强行复用会把两套生命周期绑死。
+`_cancel_run()` 的顺序：
 
-## 6. 恢复语义与工具幂等
+1. 构造 `RunCancelled(session_id, None, iteration)`。
+2. `_abort_pending_tool_calls()`：
+   - 对每个待执行调用生成 `ToolResult(is_error=True, content='{"error": "run aborted: ..."}')`。
+   - 发出 `tool_result` 事件，`status="aborted"`。
+   - 把对应的 `tool` 消息追加到上下文与 `new_messages`，保证持久化的对话里每个 assistant tool call 都有对应 tool message。
+3. 构造 `RunResult(stop_reason="cancelled", content=<最后一次模型响应内容>, ...)`。
+4. 把结果挂到 `cancelled.result`。
+5. `_persist_best_effort(status="cancelled", error="RunCancelled: ...")`。持久化失败只记日志，不影响取消。
+6. 发出最后一个事件 `run_ended`，`data={"stop_reason": "cancelled"}`。
+7. `raise cancelled`。
 
-### 6.1 三种工具状态
+取消**不发出** `error` 事件。SDK 侧的事件序列以 `run_ended(stop_reason="cancelled")` 结束；服务端会据此或根据自身取消信号写自己的 `error(agent_cancelled)`。
 
-| 状态 | 含义 | 恢复动作 |
+### 4.4 取消延迟
+
+取消的延迟等于当前阻塞单元：
+
+- 如果正在等待模型响应：要等完整响应（包括所有流式 chunk）结束。
+- 如果正在执行工具：要等该工具返回。
+- 如果正在两个检查点之间：立即生效。
+
+因此“Stop 后立刻停止”并不成立；服务端文档把它描述为协作式取消。
+
+### 4.5 与服务端桥接的关系
+
+服务端 `stream_local_agent()` 会：
+
+- 把 `cancel_event` 传给 `runtime.stream(...)`。
+- 同时在消费协程里每 0.5 秒检查一次 `cancel_event`；命中就抛 `AgentLoopError("agent_cancelled")`。
+- 在 `finally` 中 `stop.set()`、`cancel_event.set()`、关闭 runtime。
+
+这意味着服务端可能先于 SDK 检查点观察到取消：
+
+- 若 SDK 先命中检查点：抛 `RunCancelled`，桥接层按类型名映射为 `"cancelled"`。
+- 若桥接层先观察到：直接结束订阅，`turn.close()` 放弃生成器，SDK 的 `_cancel_run()` 可能不会执行。
+- 两条路径在服务端都归一为 `AgentLoopError("agent_cancelled")`，最终 run 状态为 `cancelled`。
+
+SDK 的 `RunCancelled` 语义只在“调用方让生成器继续运行到检查点”时成立；桥接层的提前关闭属于“放弃生成器”，不是 SDK 取消。
+
+## 5. 事件与可观测性
+
+### 5.1 七种事件
+
+`EventType`：
+
+| 值 | 时机 | `data` |
 | --- | --- | --- |
-| 已完成且有结果 | checkpoint 中有 `ToolResult` | 复用结果，不执行 |
-| 已请求、无结果 | 模型已发出 tool_call，执行前崩溃/取消 | 默认不重试；`idempotent=True` 才重放 |
-| 未请求 | 尚未进入模型输出 | 正常执行 |
+| `run_started` | `_execute` 开始 | `input`：字符串原文，或 `"[messages]"` |
+| `model_request` | 每次模型请求前 | `messages`、`tools`（完整 wire-format 与工具 schema） |
+| `model_response` | 每次模型响应后 | `content`、`tool_calls`（`model_dump()` 列表）、`finish_reason` |
+| `tool_call` | 工具调用前 | 见 5.2 |
+| `tool_result` | 工具返回/abort 后 | 见 5.3 |
+| `run_ended` | 正常结束、最大迭代、取消 | `stop_reason` |
+| `error` | 非取消异常 | `error`（字符串）、`type`（异常类名） |
 
-### 6.2 幂等声明
+`model_request` / `model_response` 携带完整消息与工具 schema，长对话下体积可能很大；服务端桥接层只消费工具事件，不转发这两类事件。
 
-建议给 `@tool` 增加元数据：
+### 5.2 `tool_call` 的 `data`
 
-```python
-@tool(idempotent=True)
-def search_memories(query: str) -> dict: ...
-
-@tool(idempotent=False)   # 默认
-def save_memory(content: str) -> dict: ...
+```json
+{
+  "tool_call_id": "call_abc",
+  "name": "search_files",
+  "arguments": { "query": "agent run" },
+  "raw_arguments": "{\"query\":\"agent run\"}",
+  "arguments_error": null,
+  "status": "running"
+}
 ```
 
-默认 `False` 是安全选择：恢复时不确定就不重放。
+- `arguments` 是 provider 解析后的对象；解析失败时可能为空对象，`arguments_error` 给出原因。
+- `raw_arguments` 是原始 JSON 字符串（若 provider 提供）。
+- `status` 恒为 `running`。
 
-分类建议：
+### 5.3 `tool_result` 的 `data`
 
-| 工具 | 幂等 |
+```json
+{
+  "tool_call_id": "call_abc",
+  "name": "search_files",
+  "content": "{\"matches\": [\"server/app/agent/runner.py\"]}",
+  "is_error": false,
+  "status": "completed"
+}
+```
+
+- 正常完成：`status="completed"`，`is_error=false`。
+- 工具抛错且 `tool_error_mode` 为 `observe`：`status="failed"`，`is_error=true`，`content` 是错误文本。
+- 取消/失败中断：`status="aborted"`，`is_error=true`，`content` 是 `{"error": "run aborted: ..."}` 的 JSON 字符串。
+
+### 5.4 序号
+
+- `AgentEvent.seq` 从 1 开始，每个 `_execute` 重置为 0。
+- 无论是否注册 `on_event`，`_event_seq` 都会递增；未注册时只是不构造事件对象。
+- 顺序严格等于事件发出顺序，包含 `run_started` 与 `run_ended`。
+- `seq` 是 **runtime 实例状态**，不是全局或会话级状态。共享同一个 `AgentRuntime` 并发执行多个 run 会导致序号交错；服务端每个 run 新建 runtime，因此不受影响。
+- SDK `seq` 与服务端 `agent_run_events.seq` **没有任何对应关系**；服务端按自己的事件写入顺序重新编号。
+
+### 5.5 回调异常
+
+`_emit()` 用 `try/except Exception` 包住 `on_event(event)`：
+
+- 回调抛错只记录 `logger.exception`，不终止 run。
+- 回调返回 awaitable 时会 `resolve_awaitable` 等待（用于异步回调）；其异常同样被吞掉。
+
+## 6. 终止路径
+
+### 6.1 正常结束
+
+```text
+构建 RunResult(stop_reason=final/length/content_filter)
+_persist(status="completed")        # 非 best-effort
+_emit(run_ended, {stop_reason})
+return RunResult
+```
+
+- 没有工具调用、模型返回最终文本时进入此路径。
+- 成功路径的会话持久化失败会抛异常，进入 6.4 的通用失败处理。
+
+### 6.2 达到最大迭代
+
+```text
+构建 RunResult(stop_reason="max_iterations")
+_persist_best_effort(status="failed", error="max_iterations exceeded")
+_emit(run_ended, {stop_reason="max_iterations"})
+raise MaxIterationsExceeded(session_id, result)
+```
+
+- `MaxIterationsExceeded.result` 携带部分结果。
+- 这是 `failed`，不是 `cancelled`。
+
+### 6.3 取消
+
+见 4.3。最后一个事件是 `run_ended(stop_reason="cancelled")`，没有 `error` 事件，抛出 `RunCancelled`。
+
+### 6.4 其他异常
+
+```text
+_handle_failure():
+  abort 仍在 pending 的 tool calls（发出 aborted tool_result）
+  _persist_best_effort(status="failed", error="<Type>: <message>")
+_emit(error, {error, type})
+raise
+```
+
+- 包括模型错误、工具错误、配置错误、成功路径持久化失败等。
+- 失败持久化是 best-effort；失败本身不会被持久化错误掩盖。
+
+### 6.5 提前关闭生成器
+
+`stream()` 的生成器在耗尽前被 `close()`：
+
+- `GeneratorExit` 不会被 `except Exception` 捕获。
+- 不执行 `_persist`，不发 `run_ended`，不抛 `RunCancelled`。
+- 会话不会被写入；调用方视为“本轮被放弃”。
+- 这与 `cancel_event` 是两种不同语义。
+
+## 7. 会话持久化
+
+### 7.1 SessionStore
+
+`AgentRuntime(config, store=...)` 可注入 `SessionStore`：
+
+```python
+class SessionStore(Protocol):
+    def load_messages(self, session_id: str) -> list[dict[str, Any]]: ...
+    def persist_run(self, session_id, new_messages, *, agent_name, user_id=None,
+                    metadata=None, status="completed", error=None) -> None: ...
+```
+
+- `InMemorySessionStore` 用于测试/单进程。
+- `PostgresSessionStore` 用于持久化；需要 `postgres` extra（`psycopg` 延迟导入）。
+- 服务端 `build_runtime()` **没有传 store**，因此服务端路径上 SDK 不会写会话表；消息由服务端 `conversation_messages` 与 run 事件单独管理。
+
+### 7.2 写入时机
+
+- 每轮开始时 `store.load_messages(session_id)` 读取历史。
+- 一轮结束时一次性 `persist_run`：会话行 upsert + 本轮 `new_messages` 批量插入。
+- 没有增量写入；流式过程中的文本只通过 `AgentDelta` 交给调用方。
+- `title` 由 `derive_title(new_messages)` 生成；已有标题不会被覆盖。
+- 消息 `seq` 从当前最大值继续递增。
+
+### 7.3 状态
+
+`SessionRecord.status` 与 Postgres CHECK：
+
+```text
+active | completed | failed | cancelled
+```
+
+映射：
+
+| 路径 | 写入状态 |
 | --- | --- |
-| `search_memories`、只读文件、`list_dir`、`read_file` | 是 |
-| `save_memory`、写文件、删除文件、`execute_command`、网络写操作 | 否 |
+| 正常结束 | `completed` |
+| 最大迭代 | `failed` |
+| 取消 | `cancelled` |
+| 其他异常 | `failed` |
+| 提前关闭生成器 | 不写 |
 
-### 6.3 at-least-once 风险
+### 7.4 Postgres CHECK 升级
 
-即使声明幂等，恢复仍然可能重复执行"执行到一半"的工具：
+旧版本的 `sessions.status` CHECK 只允许 `active/completed/failed`。为了让旧库能写入 `cancelled`：
 
-- 工具已经产生副作用，但在写 checkpoint 前崩溃。
-- 工具执行成功，但结果没有落盘。
-- 多个 worker 同时恢复同一 run（Phase 2 仍建议单写者）。
-
-因此恢复语义应表述为 **at-least-once**，不是 exactly-once：
-
-- 幂等工具可以自动重放。
-- 非幂等工具：恢复时停止并把 run 置为 `interrupted`，由用户确认后重试或人工处理。
-- 文档必须明确这一点，不能承诺"恢复不会重复执行工具"。
-
-### 6.4 与 server Phase 1 的关系
-
-server 本期不自动续跑，重启后把 run 标为 `interrupted`。因此上述 at-least-once 风险在 Phase 1 不会发生；它是 Phase 2 启用 `resume()` 后的前置约束。
-
-## 7. SessionStore 扩展与兼容性
-
-### 7.1 新增 `cancelled` 状态
-
-现状：
-
-- `SessionStore.persist_run(status=...)` 接受 `completed` / `failed`。
-- `PostgresSessionStore._VALID_STATUSES = {"active", "completed", "failed"}`。
-- 建表 CHECK：`status IN ('active','completed','failed')`。
-- `SessionRecord.status` 是普通字符串。
-
-Phase 1 取消要写 `cancelled`，需要：
-
-1. `_VALID_STATUSES` 增加 `"cancelled"`。
-2. `SessionRecord.status` 的类型注释/文档增加 `cancelled`（保持 `str`，不引入枚举，避免破坏）。
-3. Postgres 建表 DDL 的 CHECK 增加 `cancelled`。
-4. 对已存在的表做幂等迁移：检测约束定义，若不含 `cancelled`，执行：
+- `PostgresSessionStore.ensure_schema()` 在建表后调用 `_ensure_status_check(cursor)`。
+- 它从 `pg_constraint` 读取 `sessions` 表上 `status` 列的实际 CHECK 约束名与定义。
+- 如果定义中缺少 `cancelled`，删除旧约束并按固定名重新添加：
 
 ```sql
-ALTER TABLE {sessions_table}
-    DROP CONSTRAINT IF EXISTS {sessions_table}_status_check;
-ALTER TABLE {sessions_table}
-    ADD CONSTRAINT {sessions_table}_status_check
-    CHECK (status IN ('active','completed','failed','cancelled'));
+CHECK (status IN ('active','completed','failed','cancelled'))
 ```
 
-注意：
+- 如果约束已包含 `cancelled`，不执行任何操作。
+- 升级是幂等的；旧数据无需回填，状态列之外的列不变。
+- `ensure_schema()` 使用 advisory lock 串行化多进程初始化。
 
-- 现有 DDL 的 CHECK 是匿名内联约束，Postgres 自动命名为 `{table}_status_check`；迁移前先用 `pg_get_constraintdef` 确认名称，不要盲删。
-- 迁移放在 `ensure_schema()` 内、建表之后，使用 advisory lock 保护，保持"自动建表"的现有体验。
-- 如果宿主不希望改表，可提供兼容模式：取消写 `failed`，metadata 写 `{"run_status": "cancelled"}`。但默认推荐 `cancelled`，语义更清晰。
+## 8. 与服务端契约的关系
 
-### 7.2 与现有数据的兼容
-
-- 旧行状态只有 `active/completed/failed`，新 CHECK 是超集，不需要数据迁移。
-- 旧客户端读取 `SessionRecord.status` 时可能只认识三个值；这是 additive 的行为变化，需要 release note。
-- `list_sessions` 不按状态过滤，无需改查询。
-
-### 7.3 Phase 2 的 checkpoint 表
-
-独立表，不改 `sessions/messages`：
-
-```sql
-CREATE TABLE IF NOT EXISTS {prefix}_checkpoints (
-    run_id TEXT PRIMARY KEY,
-    session_id TEXT NOT NULL REFERENCES {prefix}_sessions(id) ON DELETE CASCADE,
-    seq BIGINT NOT NULL,
-    iteration INT NOT NULL,
-    payload JSONB NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('running','completed','failed','cancelled','interrupted')),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS {prefix}_checkpoints_session_idx
-    ON {prefix}_checkpoints (session_id, created_at DESC);
-```
-
-`payload` 存 `messages` / `pending_tool_calls` / `tool_results` / `usage`，避免列爆炸。
-
-## 8. 与 `server/app/agent/runtime.py` 的集成方式
-
-### 8.1 当前调用链
-
-```text
-server/routers/agent.py
-  → stream_agent(payload)
-    → stream_local_agent(payload)
-      → build_runtime(...)             # 不传 store
-      → runtime.stream(messages, session_id=conversation_id, user_id=...)
-      → on_event → _bridge_tool_event → asyncio queue
-```
-
-server 不传 `store`，所以：
-
-- 不会写 SDK 的 `sessions/messages` 表。
-- `persist_run` 不会执行；`AgentRuntime` 的持久化逻辑对 server 无效。
-- 取消只能通过关闭生成器和 `stop` Event。
-
-### 8.2 Phase 1 接入建议
-
-`stream_local_agent` 增加可选参数：
-
-```python
-async def stream_local_agent(
-    payload: dict[str, Any],
-    *,
-    cancel_event: threading.Event | None = None,
-) -> AsyncIterator[AgentEvent]: ...
-```
-
-manager 的取消路径（推荐）：
-
-```text
-POST /cancel
-  → 设置 cancel_event（不 task.cancel）
-  → runtime.stream 在下一个检查点抛 RunCancelled
-  → stream_local_agent 转成 AgentLoopError("agent_cancelled")
-  → manager 按服务端 6.4 收尾
-```
-
-回退路径（SDK 尚未支持 `cancel_event`）：
-
-```text
-POST /cancel
-  → task.cancel()
-  → stream_local_agent 的 finally: stop.set()
-  → manager 捕获 CancelledError 后自行写 cancelled 终态
-```
-
-两条路径都必须走到同一个收尾函数，保证 run 状态、事件和消息一致。不要只依赖 `turn.close()`：它会让 `_execute` 提前结束，但不产生合法的 cancelled 会话记录。
-
-注意两点：
-
-- 即使 SDK 不支持 `cancel_event`，现有 `stop` + `turn.close()` 仍能停止消费；Phase 1 的增强是"产生合法的取消记录"，不是"才能取消"。
-- `cancel_event` 与 manager task 的 `CancelledError` 是两条路径，必须都走到同一个收尾函数；不要让异常直接穿透而不写 run 终态。
-
-### 8.3 事件映射
-
-SDK 事件到 server 事件的现有映射在 `server/app/agent/runtime.py::_bridge_tool_event`：只转发 `tool_call` / `tool_result`。Phase 1 不需要新增映射：
-
-- 文本增量由 `stream()` 的 yield 产生，server 映射为 `message.delta`。
-- 工具事件已映射为 `tool.call` / `tool.result`。
-- 终态由 `AgentCompleted` / `AgentLoopError` 映射为 `message.completed` / `error`。
-- `RunCancelled` 需要新增映射：`AgentLoopError("agent_cancelled", ...)` 或独立分支。
-
-### 8.4 不在 server 中使用 SessionStore
-
-明确保持：server 的 `conversations` 是权威存储，SDK 的 `SessionStore` 只服务独立使用 SDK 的场景。Phase 2 的 checkpoint 如果要在 server 生效，应该由 server 的 run manager 实现自己的 `CheckpointStore`（写 `agent_run_checkpoints`），而不是让 SDK 直接写 server 的表。这样：
-
-- 两套 run 生命周期不会互相污染。
-- server 的 checkpoint 可以包含 dashboard 需要的工具轨迹格式。
-- SDK 仍然是可独立发布的通用组件。
-
-## 9. 测试方案
-
-### 9.1 Phase 1
-
-| 用例 | 断言 |
-| --- | --- |
-| 正常 run | `run_started` seq=1，`run_ended` 最大；`RunResult` 不变 |
-| 事件序号 | 一轮内多条事件 seq 连续、单调 |
-| 取消于迭代边界 | 抛 `RunCancelled`；pending tool 补齐 aborted；store 状态 `cancelled` |
-| 取消于工具调用前 | 该工具不执行；之前的工具结果保留 |
-| 取消后会话合法 | 每个 assistant tool_calls 都有对应 tool 消息 |
-| 未设置 cancel_event | 行为与现状完全一致 |
-| `stream()` 提前关闭 | 仍不持久化（现有语义不变，加回归测试） |
-| Postgres 迁移 | 旧表 CHECK 自动升级；重复执行幂等；旧数据可读 |
-| 取消与完成竞争 | 先到终态者生效；不重复写消息 |
-
-### 9.2 Phase 2
-
-| 用例 | 断言 |
-| --- | --- |
-| checkpoint 保存/加载 | 字段完整，seq 单调 |
-| 恢复已完成工具 | 不重新调用工具 |
-| 恢复 pending 工具（非幂等） | 不自动执行，run 置 interrupted |
-| 恢复 pending 工具（幂等） | 重放一次，结果写回 |
-| 事件回放 | `after=seq` 只返回更大序号；实时继续 |
-| 多订阅者 | 每个订阅者看到相同顺序 |
-| 崩溃窗口 | 模拟保存前失败，恢复后至少一次执行，不丢消息 |
-
-测试约束沿用 `agent-loop/AGENTS.md`：
-
-- 无网络，使用 `FakeProvider` 与 `InMemorySessionStore`。
-- Postgres 单测注入 fake pool；真实库测试由 `BOKACLAW_AGENT_TEST_DSN` 门控并标 `integration`。
-- `pytest-asyncio` 严格模式，显式 `@pytest.mark.asyncio`。
-
-## 10. 迁移与版本策略
-
-### 10.1 Phase 1
-
-| 改动 | 兼容性 | 版本建议 |
+| 服务端概念 | SDK 对应 | 说明 |
 | --- | --- | --- |
-| `cancel_event` 可选参数 | additive | minor |
-| `RunCancelled` 异常 | additive | minor |
-| `AgentEvent.seq` | additive 字段，默认 0 | minor |
-| `RunResult.stop_reason` 增加 `"cancelled"` | Literal 扩宽；穷举 match 的调用方需要更新 | minor + release note |
-| `SessionRecord.status` 允许 `cancelled` | 行为扩展；读取方需容忍新值 | minor + release note |
-| Postgres CHECK 迁移 | 自动、幂等 | patch/minor |
+| `conversation_id` | `session_id` | 服务端桥接层把会话 id 作为 SDK 会话 id 传入；SDK 不生成它 |
+| `run_id` | 无 | SDK 不感知执行 run；服务端的 `run_id` 不传给 SDK |
+| `message_id` | 无 | SDK 不生成助手消息 id；服务端预生成 |
+| `agent_run_events.seq` | 无 | 服务端 `RunEventWriter` 独立编号 |
+| `AgentEvent.seq` | SDK 事件序号 | 只用于 SDK 回调顺序，服务端不持久化、不转发 |
+| `AgentToolCall` / `AgentToolResult` | 服务端事件模型 | 桥接层把 SDK `tool_call` / `tool_result` 转为服务端事件 |
+| `tool_trace` | 无 | 服务端 `ToolTrace` 聚合；SDK 只发原始工具事件 |
+| run 终态 | `RunResult.stop_reason` | 只表达本轮停止原因，不表达服务端 run 状态 |
+| 取消 | `cancel_event` / `RunCancelled` | 服务端设置信号；桥接层归一到 `agent_cancelled` |
 
-不建议在 Phase 1 改 `stream()` 的返回类型或移除 `on_event`；`RunHandle` 留在 Phase 2。
+事件映射（桥接层）：
 
-### 10.2 Phase 2
+| SDK 事件 | 服务端事件 | 备注 |
+| --- | --- | --- |
+| `tool_call` | `AgentToolCall` → 持久化 `tool.call` | `status="running"` |
+| `tool_result(status=completed/failed)` | `AgentToolResult` → 持久化 `tool.result` | 保留 `is_error` |
+| `tool_result(status=aborted)` | `AgentToolResult` → 持久化 `tool.result(status=aborted)` | 取消/失败时补齐 |
+| 文本 delta | `AgentDelta` → 合并后的 `message.delta` | 服务端按 150ms/4096B 合并 |
+| 正常结束 | `AgentCompleted` | 携带 `usage` / `finish_reason` metadata |
+| `RunCancelled` / 取消 | `AgentLoopError("agent_cancelled")` | 服务端写 `error(agent_cancelled)` |
+| `MaxIterationsExceeded` | `AgentLoopError("agent_upstream_error")` | 服务端写 `error(agent_upstream_error)` |
 
-| 改动 | 兼容性 |
+服务端不转发 `model_request` / `model_response` / `run_started` / `run_ended` / `error` 这几类 SDK 事件；它们要么体积过大，要么由服务端自己的事件模型表达。
+
+## 9. 已知限制与后续阶段
+
+| 限制 | 现状 | 后续方向 |
+| --- | --- | --- |
+| 无 `RunHandle` | 调用方只能通过 `cancel_event` 与 `on_event` 观察 run | 引入显式 `RunHandle` 持有的取消与事件接口 |
+| 无 `CheckpointStore` / `resume` | 中断后只能重新开始；SDK 不保存步级状态 | 步级 checkpoint 与恢复 |
+| 无事件回放 | `on_event` 是推送式，错过即错过 | 可选的 run 事件缓冲/查询接口 |
+| 仅终态持久化 | 流式过程中不写会话；崩溃会丢失整轮 | 增量持久化或与调用方协作 |
+| 取消非抢占 | 模型/工具阻塞期间无法中断；流式 chunk 内不检查 | 工具级取消令牌、provider 级中断 |
+| `seq` 是实例状态 | 共享 runtime 并发执行会交错 | 每个 run 独立 runtime（服务端已这样做） |
+| 取消不发 `error` | SDK 侧以 `run_ended(stop_reason="cancelled")` 结束 | 保持；错误语义由调用方决定 |
+| 提前关闭 ≠ 取消 | 关闭生成器不持久化、不发终态事件 | 明确文档化（本文） |
+| 持久化失败 best-effort | 取消/失败路径只记日志 | 可选的重试或错误上报 |
+| 无分布式协调 | SDK 进程内库，不感知其他副本 | 由服务端负责 |
+
+后续阶段的服务端 side 设计见 [`../server/agent-execution-decoupling.md`](../server/agent-execution-decoupling.md) 第 13 节。SDK 内部结构见 [`architecture.md`](architecture.md)。
+
+## 10. 测试覆盖
+
+| 文件 | 覆盖 |
 | --- | --- |
-| `runtime.start()` / `RunHandle` | additive |
-| `CheckpointStore` / `InMemoryCheckpointStore` / `PostgresCheckpointStore` | additive |
-| `@tool(idempotent=...)` | additive，默认 `False` |
-| checkpoint 表 | 新建表，不改旧表 |
+| `tests/test_cancel.py` | 迭代前取消、模型响应后取消 abort 全部工具、工具执行中取消保留已完成结果、流式取消等待模型响应、未设置 `cancel_event` 时行为不变、`arun` 转发取消信号 |
+| `tests/test_runtime.py` | 事件顺序、`seq` 从 1 开始且每次 run 重置、跨工具调用单调递增、工具生命周期 metadata、`failed` / `aborted`、回调异常被吞、终态持久化 |
+| `tests/test_streaming.py` | delta 转发、工具调用片段重组、工具事件、不支持流式的 provider 回退、提前关闭不持久化、空文本 |
+| `tests/test_session_postgres.py` | 建表、`cancelled` 状态、旧 CHECK 升级、实际约束名、幂等升级、取消状态持久化、状态往返 |
 
-### 10.3 发布检查
+验收命令：
 
-- 更新 `agent-loop/README.md` 的公共 API 说明（项目规则要求公共 API 变更同 PR 更新 README）。
-- 更新 `docs/agent-loop/architecture.md` 的运行时链路与持久化章节（如果实现落地）。
-- 运行 `hatch run lint`、`hatch run format-check`、`hatch run test`。
-- 不在本期修改 `.github/workflows/`。
-
-## 11. 结论
-
-- **Phase 1**：服务端的执行与连接解耦不依赖 SDK 改动；SDK 只需提供协作式取消、事件 `seq` 与 `cancelled` 持久化，就能让取消语义完整、事件可去重。它**不会**让 SDK 具备长程恢复能力。
-- **Phase 2**：`RunHandle` + `CheckpointStore` 才提供步级恢复与事件回放；恢复是 **at-least-once**，非幂等工具必须显式阻止自动重放。
-- **长期**：多副本领取、上下文压缩、预算控制仍不在本文范围；它们决定的是"能跑多久"，而本文解决的是"连接断了还继续跑"。
+```bash
+cd agent-loop
+hatch run test
+hatch run lint
+```

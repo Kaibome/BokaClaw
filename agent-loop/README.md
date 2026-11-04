@@ -267,7 +267,9 @@ The dashboard's Agent page never talks to this package directly. It calls
 `POST /agent` on the BokaClaw server, and the server runs one turn in-process
 through `server/app/agent/runtime.py` (the Docker images install this package from
 `agent-loop/`). The server owns conversation persistence and passes history
-explicitly, so the runtime is used without a `SessionStore`.
+explicitly, so the runtime is used without a `SessionStore`. By default the
+server executes each turn as a background `agent_run` and the HTTP response is
+only an event subscription; disconnecting it does not cancel the turn.
 
 To run the runtime as a separate service instead, wrap it in an HTTP service
 exposing `POST /invoke` and set `AGENT_LOOP_URL` on the server to that
@@ -342,10 +344,17 @@ has to return sane status codes.
 
 ### Cancellation
 
-When the browser stops generating, the server cancels the upstream request
-and stores whatever text already streamed with `status: "cancelled"`. A
-wrapper that runs to completion regardless is still safe; the reply is simply
-discarded.
+With the default `AGENT_RUN_BACKGROUND=true`, the server executes each turn in a
+background `AgentRunManager` task. Disconnecting the SSE stream only removes a
+subscription; it does not cancel the run. Stop calls
+`POST /agent/runs/{id}/cancel`, the server sets the run's `cancel_event`, and the
+runtime stops at its next checkpoint. Whatever text already streamed is stored
+with `status: "cancelled"` and the terminal run event reports
+`agent_cancelled`. A wrapper that ignores cancellation is still safe; the reply
+is simply discarded.
+
+Set `AGENT_RUN_BACKGROUND=false` to restore the legacy request-bound path, where
+closing the request cancels the upstream turn.
 
 ### Server configuration
 

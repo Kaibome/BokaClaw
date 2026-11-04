@@ -1,106 +1,111 @@
-# Dashboard：Agent 执行与连接解耦设计
+# Agent 执行与连接解耦：前端设计
 
-> 状态：已实现（Phase 1，2026-11-04）
+> 状态：已实现（2026-11-04）
 >
-> 适用范围：`dashboard/` 前端（`/dashboard/agent`）
+> 适用范围：`dashboard/`（Next.js 15 + React）Agent 聊天页
 >
 > 目标读者：前端开发者
 >
-> 契约来源：状态值、事件名、端点、错误码以 [`../server/agent-execution-decoupling.md`](../server/agent-execution-decoupling.md) 第 3、9 节为准。本文只描述前端如何消费这份契约，不重新定义它。
+> 契约来源：run 状态、消息状态、事件 payload、端点、错误码以 [`../server/agent-execution-decoupling.md`](../server/agent-execution-decoupling.md) 第 3、9 节为准。本文只描述前端如何消费契约，不重新定义契约。
+>
+> UI 基础结构见 [`agent-chat-design.md`](agent-chat-design.md)。
 
-## 1. 背景与现状差异
+## 1. 背景与目标
 
-当前 `dashboard/src/hooks/use-agent-chat.ts` 把一次 Agent 执行完全绑定在一次 `POST /agent` 的 SSE 读取上：
+旧前端把一次 Agent 执行绑在 `POST /agent` 的 reader 上：
 
-- `send()` 用 `postStream()` 发起请求，`reader.read()` 循环消费事件。
-- `stop()` 只调用 `abortRef.current?.abort()`；`AbortController` 同时表达"用户停止"和"组件卸载/切会话"。
-- `handleEvent()` 处理 `meta`、`message.delta`、`tool.call`、`tool.result`、`message.completed`、`error`、`done`，但不读取 `event.id`。
-- 流异常结束时，本地把气泡标为 `failed` 或 `cancelled`；没有断线重连，也没有"后台继续执行"的概念。
-- 刷新页面后，未完成的助手消息不在 `conversation_messages` 里，前端无法恢复。
+- 关闭标签页、切换会话、网络中断都会终止 reader；服务端在 legacy 模式下会把本轮标记为取消。
+- 没有 run id、没有事件游标；刷新后只能看到最终落库的消息，看不到进行中的文本与工具轨迹。
+- Stop 只能 `AbortController.abort()`，无法区分“停止执行”和“停止接收”。
 
-新设计下：
+新前端把执行与订阅分开：
 
-| 场景 | 现状 | 目标 |
-| --- | --- | --- |
-| 关页面/切网络 | 服务端取消执行 | 服务端继续，前端可回来续接 |
-| Stop | `abort()`，服务端标记 cancelled | 调用 cancel 接口，继续消费到 `done` |
-| 刷新 | 丢失进行中的输出 | 从 `active_run` 恢复订阅 |
-| 多标签 | 第二个发送会并发 | 409 后保留草稿并订阅现有 run |
-| 事件去重 | 无 cursor | 用 SSE `id`/`seq` 去重与续传 |
+| 场景 | 行为 |
+| --- | --- |
+| 网络抖动 | reader 失败后按退避重连，带 `after_seq` 续传 |
+| 刷新页面 | 读取会话详情的 `active_run`，从 seq 0 重放 |
+| 切换会话 | 只关闭本地订阅，服务端 run 继续 |
+| 关闭标签页 | 只关闭本地订阅，服务端 run 继续 |
+| 第二个标签发送 | 服务端 409；前端订阅已有 run，不重复发送 |
+| Stop | 调用 cancel 接口，继续消费到 `error + done` |
+| 服务端重启 | 重连看到 `interrupted` 终态；展示 `INTERRUPTED` |
+| 工具调用 | 实时渲染在助手气泡下方，刷新后从消息 metadata 恢复 |
 
-## 2. 共享契约（摘要）
+目标不是“永不掉线”，而是**任何一次断线都能从事件日志续上，且断线本身不终止执行**。
 
-完整定义见 [`../server/agent-execution-decoupling.md`](../server/agent-execution-decoupling.md) 第 3 节。前端需要固定记住以下内容：
+## 2. 共享契约摘要（非权威）
+
+以下只列前端实际消费的部分。完整定义见 [`../server/agent-execution-decoupling.md`](../server/agent-execution-decoupling.md) 第 3、9 节。
 
 ### 2.1 状态
 
 ```text
-run:     queued | running | completed | failed | cancelled | interrupted
-message: completed | cancelled | failed
+RunStatus:        queued | running | completed | failed | cancelled | interrupted
+MessageStatus:    completed | cancelled | failed
+ToolTraceStatus:  running | completed | failed | aborted
+ConnectionState:  idle | connecting | open | reconnecting | closed   # 前端本地状态
 ```
 
-`interrupted` 只存在于 run 状态；落库消息是 `failed`，metadata 带 `run_status=interrupted`。
+终态：`completed | failed | cancelled | interrupted`。活跃：`queued | running`。
 
 ### 2.2 事件
 
-持久化事件（带 `id: <seq>`）：`message.delta`、`tool.call`、`tool.result`、`message.completed`、`error`。
+| 事件 | 前端用途 |
+| --- | --- |
+| `meta` | 取 `conversation`、`run_id`、`status`、`user_message`、`assistant_message_id`；终态时可能带 `message` |
+| `message.delta` | 追加正文 |
+| `tool.call` | 新增/更新工具条目（`status=running`） |
+| `tool.result` | 结算工具条目（`completed/failed/aborted`） |
+| `message.completed` | 用服务端消息替换本地气泡，优先使用 `metadata.tool_trace` |
+| `error` | 终态错误；按 `code` 映射为 cancelled/interrupted/failed |
+| `done` | 最终状态；读取 `status`，不是“成功”的同义词 |
 
-合成事件（无 `id`）：`meta`（每次订阅开始）、`done`（最后一条）。
-
-所有事件 payload 带 `run_id`、`conversation_id`、`seq`。终态顺序：
-
-- 成功：`message.completed` → `done`
-- 失败/取消/中断：`error` → `done`
+`meta` / `done` 没有 `seq`；持久化事件带 `id: <seq>`。
 
 ### 2.3 端点
 
-```text
-POST /agent
-GET /agent/runs/{run_id}
-GET /agent/runs/{run_id}/events?after_seq=N
-POST /agent/runs/{run_id}/cancel
-GET /conversations/{id}          # 增加 active_run
-```
-
-`after_seq` 排他；SSE `id` 是十进制 `seq`；也接受 `Last-Event-ID` 头，但前端统一用查询参数。
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| `POST` | `/agent` | 创建 run 并订阅首条流 |
+| `GET` | `/agent/runs/{id}/events?after_seq=N` | 重连/恢复订阅 |
+| `GET` | `/agent/runs/{id}` | 轮询兜底，只读 `status` |
+| `POST` | `/agent/runs/{id}/cancel` | Stop |
+| `GET` | `/conversations/{id}` | 刷新恢复，读 `active_run` 与已落库消息 |
+| `DELETE` | `/conversations/{id}` | 删除会话；活跃 run 时 409 |
 
 ### 2.4 错误码
 
-`agent_run_active`（409）、`agent_run_not_found`（404）、`agent_events_expired`（410）、`agent_cancelled`、`agent_interrupted`（SSE `error`）。
+前端显式分支处理：
 
-## 3. 前端状态模型
+| code / HTTP | 处理 |
+| --- | --- |
+| `409 agent_run_active` | `POST`：删除乐观气泡、保留草稿、订阅 body 中的 `run_id`；`DELETE`：提示先停止/等待 |
+| `404 agent_run_not_found` | 标记 run 过期，清游标，重新加载会话 |
+| `410 agent_events_expired` | 标记 run 过期，清游标，重新加载最终消息 |
+| `403` | 停止本地订阅，显示无权限 |
+| `401` | 停止本地订阅（由全局鉴权处理） |
+| `agent_not_configured` | 显示固定配置提示 |
+| `agent_cancelled` | 消息标记为 `cancelled`，不显示错误横幅 |
+| `agent_interrupted` | 消息标记为 `interrupted`，显示 `INTERRUPTED` |
+| 其他 `error` | 显示服务端 `detail` 或通用文案 |
+
+## 3. 类型与状态模型
 
 ### 3.1 类型
 
+`src/types/api.ts`：
+
 ```ts
 export type RunStatus =
-  | "queued"
-  | "running"
-  | "completed"
-  | "failed"
-  | "cancelled"
-  | "interrupted";
+  | "queued" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
 
-export type ConnectionState =
-  | "idle"        // 没有活跃 run
-  | "connecting"  // 首次订阅中
-  | "open"        // 正在接收事件
-  | "reconnecting"// 断线，等待重试
-  | "closed";     // 已终态或放弃
-
-export type BubbleStatus =
-  | "streaming"
-  | "reconnecting"
-  | "completed"
-  | "failed"
-  | "cancelled"
-  | "interrupted";
+export type ConnectionState = "idle" | "connecting" | "open" | "reconnecting" | "closed";
 
 export interface ActiveRun {
   id: string;
   status: RunStatus;
   last_seq: number;
-  assistant_message_id: string;
+  assistant_message_id: string | null;   // 可空
   cancel_requested_at: string | null;
   created_at: string;
 }
@@ -119,494 +124,481 @@ export interface AgentRun {
   started_at: string | null;
   finished_at: string | null;
 }
+
+export type ToolTraceStatus = "running" | "completed" | "failed" | "aborted";
+
+export interface ToolTraceEntry {
+  tool_call_id: string;
+  name: string;
+  iteration?: number;
+  status: ToolTraceStatus;
+  arguments?: Record<string, unknown> | null;
+  raw_arguments?: string | null;
+  arguments_error?: string | null;
+  content?: string;
+  is_error?: boolean;
+  duration_ms?: number | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  truncated?: boolean;
+}
 ```
 
-`MessageStatus` 保持 `"completed" | "cancelled" | "failed"` 不变。`ConversationDetail` 增加 `active_run?: ActiveRun | null`；`AgentInvokeResponse` 增加可选 `run_id`。
+`ConversationDetail` 增加 `active_run?: ActiveRun | null`。
 
-### 3.2 `ChatMessageView` 扩展
+`ChatMessageView` 是 `ChatMessage` 的本地视图，额外字段：
 
 ```ts
-export interface ChatMessageView extends ChatMessage {
+interface ChatMessageView extends ChatMessage {
   streaming?: boolean;
+  reconnecting?: boolean;
   failed?: boolean;
+  cancelRequested?: boolean;
+  runStatus?: RunStatus | null;
   toolTrace?: ToolTraceEntry[];
-  runStatus?: RunStatus;       // 仅助手气泡使用
-  reconnecting?: boolean;      // 连接层状态，不影响消息终态
-  cancelRequested?: boolean;   // Stop 已点击，等待服务端收尾
 }
 ```
 
-原则：
+### 3.2 state
 
-- `streaming` 表示"这段输出还在增长"，由 run 状态驱动。
-- `reconnecting` 只表示"订阅暂时断开"，**不**把消息标成失败或取消。
-- `runStatus` 只有服务端给出的终态才写入；本地推断只用于临时展示。
+`useAgentChat()` 暴露/维护：
 
-### 3.3 Hook 内部引用
+| state | 类型 | 用途 |
+| --- | --- | --- |
+| `conversations` | `Conversation[]` | 侧栏列表 |
+| `activeId` | `string \| null` | 当前会话 |
+| `activeConversation` | `Conversation \| null` | 派生 |
+| `messages` | `ChatMessageView[]` | 当前线程 |
+| `isLoadingConversations` / `isLoadingMessages` | `boolean` | 加载态 |
+| `isStreaming` | `boolean` | 派生：`messages.some(m => m.streaming)` |
+| `connection` | `ConnectionState` | 订阅状态；页面当前未展示 |
+| `runStatus` | `RunStatus \| null` | 当前 run 状态；页面当前未展示 |
+| `cancelRequested` | `boolean` | Stop 已发出、等待终态 |
+| `activeRunId` | `string \| null` | 当前订阅的 run；页面当前未展示 |
+| `isSending` | `boolean` | 防重复发送 |
+| `error` | `string \| null` | 错误横幅 |
+
+页面（`page.tsx`）只解构 `isStreaming`、`cancelRequested`、`error`、`send`、`stop` 等；`connection` / `runStatus` / `activeRunId` 已返回但未渲染。
+
+### 3.3 refs
+
+| ref | 作用 |
+| --- | --- |
+| `activeIdRef` | 最新会话 id，避免闭包旧值 |
+| `runIdRef` | 当前 run id；恢复/重连的唯一依据 |
+| `lastSeqRef` | 已消费的最大 `seq`；重连游标 |
+| `assistantIdRef` | 当前助手气泡 id（服务端 `assistant_message_id`） |
+| `connectionRef` | 最新连接状态 |
+| `abortRef` | 当前 reader 的 `AbortController` |
+| `cursorKeyRef` | 当前会话的 sessionStorage key |
+| `retryTimerRef` | 退避定时器 |
+| `watchdogRef` | 45s 无事件看门狗 |
+| `pollTimerRef` | 5s 轮询定时器 |
+| `pollingRef` | 是否处于轮询模式 |
+| `consecutiveFailuresRef` | 连续重连失败次数 |
+| `terminalRef` | 是否已进入终态 |
+| `sendingRef` | 是否已有一条发送中的流 |
+| `cancelRequestedRef` | 最新 Stop 状态 |
+| `runStatusRef` | 最新 run 状态 |
+| `lastEventAtRef` | 最后一次收到 chunk 的时间 |
+| `epochRef` | reader 代号；旧 reader 的事件按代号丢弃 |
+| `staleRunIdsRef` | 已确认过期/不存在的 run id，避免重复恢复 |
+
+## 4. 发送与订阅
+
+### 4.1 `send(text)`
+
+1. `trim` 后为空直接返回；`sendingRef` 为 true 时返回草稿，不重复发送。
+2. 如果 `runIdRef` 已有值：说明本标签已有一条流，直接 `connect(runId, lastSeq)` 观察，返回 `{ok:false, draft}`。
+3. 清空错误；生成临时 `temp-user-<stamp>` / `temp-assistant-<stamp>`，插入乐观气泡。
+4. 重置 `terminalRef=false`、`runIdRef=null`、`lastSeq=0`、`runStatus=null`、连接状态等。
+5. `postStream(AGENT_ENDPOINTS.INVOKE, {conversation_id, message, stream:true})`。
+6. 成功后异步 `consumeRun(response, controller, epoch)`；`send` 立即返回 `{ok:true}`（不等待整轮结束）。
+
+### 4.2 从 `meta` 建立 run
+
+`handleEvent("meta")`：
+
+- `consecutiveFailures=0`，停止轮询，清退避定时器，连接状态 `open`。
+- 若带 `conversation`：更新 `activeId` 与侧栏列表。
+- 若带 `run_id`：写入 `runIdRef` / `activeRunId`，并设置 `cursorKey = bokaclaw.agent.run.v1:<conversationId>`。
+- 若带 `status`：写入 `runStatus`。
+- 若带 `user_message`：用服务端消息替换 `temp-user-*`；若找不到临时用户消息，则插入到助手气泡之前。
+- 若带 `assistant_message_id`：确保对应助手气泡存在。
+- 若带 `cancel_requested_at`：恢复 `cancelRequested`。当前服务端 `meta` 不提供该字段，这段是防御性读取；刷新恢复时改从 `active_run.cancel_requested_at` 获取。
+- 若 `status` 是终态且带 `message`：用服务端消息替换气泡、`finishRun(status)`，本次订阅结束。
+- 若 `status` 是终态但没有 `message`：把 streaming 气泡标记为非流式，等待后续 `done` 收尾。
+
+### 4.3 重连
+
+`connect(runId, afterSeq)`：
+
+1. `terminalRef` 为 true 直接返回。
+2. abort 上一个 reader；创建新 `AbortController`；`epoch = ++epochRef`。
+3. 连接状态从 `idle/closed` 进入 `connecting`。
+4. 记录 `lastEventAt=now`，启动 45s 看门狗。
+5. `getStream(AGENT_ENDPOINTS.RUN_EVENTS(runId, afterSeq))`。
+6. 正常读到流结束但没收到 `done`：`consecutiveFailures++`，安排重连。
+7. 异常：404 / 410 / 403 / 401 分支处理；其他情况同样累计失败并安排重连。
+
+`RUN_EVENTS(runId, afterSeq=0)` 生成 `/agent/runs/{id}/events?after_seq=N`。重连始终带 `lastSeqRef.current`，即最后成功消费的 `seq`。
+
+### 4.4 409：已有活跃 run
+
+`POST /agent` 返回 409 时：
+
+- 删除两个临时气泡；`sending=false`；重置 run 状态；保留草稿。
+- Toast：`A reply is still in progress` / `Your message was not sent...`。
+- 从 `err.data.run_id` 读取已有 run；若存在，重置 `lastSeq=0`，`runIdRef=run`，`connect(run, 0)`。
+- 返回 `{ok:false, draft:text}`，输入框保留原文。
+
+这条路径让第二个标签能直接看到进行中的输出，而不是只看到错误。
+
+## 5. 事件归并
+
+### 5.1 去重
 
 ```ts
-const runIdRef = useRef<string | null>(null);
-const lastSeqRef = useRef(0);
-const connectionRef = useRef<ConnectionState>("idle");
-const abortRef = useRef<AbortController | null>(null); // 只用于关闭订阅
-const assistantIdRef = useRef<string | null>(null);
-const cursorKeyRef = useRef<string | null>(null);
-const retryTimerRef = useRef<number | null>(null);
-const watchdogRef = useRef<number | null>(null);
+const seq = Number(event.id ?? payload?.seq ?? 0);
+if (!Number.isFinite(seq) || seq <= 0) return true; // meta/done 没有 id
+if (seq <= lastSeqRef.current) return false;
+lastSeqRef.current = seq;
+persistCursor();
+return true;
 ```
 
-与现状的区别：
+- 以 SSE `id` 为准，回退到 payload `seq`。
+- 小于等于已消费游标的事件直接丢弃；重连回放与实时事件重叠时不会重复追加。
+- `meta` / `done` 没有 `id`，不参与去重。
+- `done` 不按 seq 去重，依赖 `terminalRef` 防止重复收尾。
 
-- `abortRef` 不再表示"取消执行"，只表示"停止读取本地流"。
-- `streamingRef` 拆成 `runIdRef + connectionRef`；`isStreaming` 由二者派生。
-- `lastSeqRef` 是去重和续传的唯一游标。
-
-### 3.4 sessionStorage
-
-按标签页隔离，记录进行中的 run：
-
-```ts
-const CURSOR_VERSION = 1;
-const cursorKey = (conversationId: string) =>
-  `bokaclaw.agent.run.v${CURSOR_VERSION}:${conversationId}`;
-
-interface RunCursor {
-  v: 1;
-  conversationId: string;
-  runId: string;
-  assistantMessageId: string;
-  lastSeq: number;
-  updatedAt: string;
-}
-```
-
-规则：
-
-- 收到 `meta.run_id` 后写入；每个带 `id` 的事件更新 `lastSeq`；终态、404、410、手动清除时删除。
-- 只存游标，不存消息正文、不存 token。JWT 仍然只在内存（见 `dashboard/CLAUDE.md`）。
-- `sessionStorage` 可能不可用（隐私模式、配额满）：所有读写包 `try/catch`，失败时退化为纯内存。
-- 这份记录是"提示 + 诊断"，不是权威数据。**页面刷新后助手消息尚未落库，正文只能通过从 `after_seq=0` 回放重建**；不能只从保存的 `lastSeq` 续接，否则会缺前半段。只有当前 hook 实例仍有气泡内容时，才用内存里的 `lastSeqRef` 续接。
-
-### 3.5 派生 UI 状态
-
-```ts
-const bubbleStatus: BubbleStatus =
-  runStatus === "completed" ? "completed"
-  : runStatus === "cancelled" ? "cancelled"
-  : runStatus === "interrupted" ? "interrupted"
-  : runStatus === "failed" ? "failed"
-  : connection === "reconnecting" ? "reconnecting"
-  : "streaming";
-```
-
-`queued` 与 `running` 都显示为"执行中"；`cancelRequested` 时显示"正在停止"。
-
-## 4. 发送、订阅与事件归并
-
-### 4.1 发送流程
-
-```text
-send(text)
-  ├─ 若当前会话已有 runIdRef：不发送，转为 ensureSubscribed()
-  ├─ 插入乐观 user/assistant 气泡
-  ├─ POST /agent { stream: true }
-  │    ├─ 409 agent_run_active → 本次消息未写入：
-  │    │     复位 streamingRef/abortRef/isStreaming，移除乐观气泡、恢复草稿
-  │    │     采用 body.run_id，ensureSubscribed(from=0) 观察现有 run
-  │    └─ 200 → 读取 SSE
-  ├─ meta：采纳 conversation/user_message/run_id/assistant_message_id/status/last_seq
-  ├─ 持久化事件：按 seq 去重后归并
-  └─ done：终态，清 cursor
-```
-
-`send` 仍然使用 `postStream`；它负责创建 run 并作为第一个订阅者。**不要**再为发送单独发一次 GET 订阅，否则会重复。
-
-### 4.2 订阅流程
-
-统一封装：
-
-```ts
-async function subscribe(runId: string, afterSeq: number, signal: AbortSignal) {
-  const response = await getStream(
-    AGENT_ENDPOINTS.RUN_EVENTS(runId, afterSeq),
-    { signal },
-  );
-  const reader = response.body!.getReader();
-  const decoder = new TextDecoder();
-  const parser = new SseParser();
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    for (const event of parser.push(decoder.decode(value, { stream: true }))) {
-      handleEvent(event);
-    }
-  }
-  for (const event of parser.flush()) handleEvent(event);
-}
-```
-
-`getStream` 是新增的 GET 版流式请求，复用 `postStream` 的 Bearer 注入与 401 刷新逻辑（见 8.2）。不能使用 `EventSource`，它无法携带 `Authorization`。
-
-### 4.3 事件归并
-
-`handleEvent` 只做纯状态更新，不做网络请求：
+### 5.2 逐事件
 
 | 事件 | 处理 |
 | --- | --- |
-| `meta` | 采纳 `conversation`、`user_message`、`run_id`、`assistant_message_id`、`status`、`last_seq`；先 `adoptAssistantId` 重命名乐观气泡，若仍没有对应气泡则插入一个空的助手气泡；若 `status` 已终态且 `message` 非空，直接用最终消息替换气泡并结束 |
-| `message.delta` | `seq <= lastSeqRef` 丢弃；否则追加文本，`lastSeqRef = seq` |
-| `tool.call` | 去重后 `upsertToolTrace`，保留 arguments；`lastSeqRef = seq` |
-| `tool.result` | 去重后更新条目；`lastSeqRef = seq` |
-| `message.completed` | 用服务端完整消息替换气泡，`streaming=false`，`runStatus=completed`；`lastSeqRef = seq` |
-| `error` | 记录 `errorCode`；按 code 映射 `cancelled` / `interrupted` / `failed`；保留已收到的正文与工具轨迹；**不立即清 cursor** |
-| `done` | `runStatus = payload.status`；`streaming=false`；把仍为 running 的工具标为 `aborted`；清 cursor；关闭连接；刷新会话列表 |
-| 心跳 `: ping` | 只重置 watchdog，不改变状态 |
+| `meta` | 见 4.2 |
+| `message.delta` | 确保助手气泡存在；`content += delta`；`streaming=true`；`runStatus="running"` |
+| `tool.call` | 构造 `ToolTraceEntry(status="running", arguments, raw_arguments, arguments_error, started_at)`；按 `tool_call_id` upsert |
+| `tool.result` | 构造结果条目（`status`、`content`、`is_error`、`duration_ms`、`finished_at`）；upsert 时保留 `tool.call` 的参数字段 |
+| `message.completed` | `toView(finalMessage)` 替换气泡；优先 `metadata.tool_trace`，否则保留本地轨迹；`runStatus="completed"`、`streaming=false` |
+| `error` | 按 `code` 映射状态；`agent_cancelled` 不显示错误横幅；`partial=false` 时删除空占位气泡；不直接 `finishRun`，等 `done` |
+| `done` | `finalStatus = payload.status ?? runStatusRef`；非终态则回退 `"completed"`；调用 `finishRun(finalStatus)` |
 
-去重函数：
+### 5.3 工具条目 upsert
 
-```ts
-function acceptSeq(event: SseMessage, payload: { seq?: number }): boolean {
-  const seq = Number(event.id ?? payload.seq ?? 0);
-  if (!Number.isFinite(seq) || seq <= 0) return true; // meta/done 无 seq
-  if (seq <= lastSeqRef.current) return false;
-  lastSeqRef.current = seq;
-  persistCursor();
-  return true;
-}
-```
+`upsertToolTrace` 以 `tool_call_id` 为键：
 
-注意：`meta` 和 `done` 没有 `id`，不要用它们推进 `lastSeq`。`meta.last_seq` 只用于校准显示，不直接写入 `lastSeqRef`，否则会跳过 replay 事件。
+- 不存在则追加。
+- 已存在则合并：`tool.result` 不带 `arguments/raw_arguments/arguments_error/started_at`，合并时保留 `tool.call` 的值。
+- 已终态条目不会被后来的 `running` 覆盖。
+- `tool.result` 先于 `tool.call` 到达时也能创建条目；后续 `tool.call` 不会把状态退回 `running`。
 
-### 4.4 工具轨迹
+`finalizeRunningToolTrace` 在 `error` / `done` / `finishRun` / 本地停止时把仍为 `running` 的条目改为 `aborted`，避免 UI 永远转圈。
 
-复用现有 `normalizeToolTrace` / `upsertToolTrace` / `finalizeRunningToolTrace`。新增两点：
+### 5.4 `done` 不是成功信号
 
-- 终态是 `interrupted`/`cancelled` 时，把所有仍为 `running` 的条目标为 `aborted`，`is_error=true`。
-- 断线重连后，`tool.call`/`tool.result` 会按 seq 重放；去重逻辑保证不会重复插入。
+- `done.status` 才是最终状态；前端读取 `payload.status`，缺失时用 `runStatusRef`。
+- 如果两者都不是终态（异常服务端/旧版本），回退为 `"completed"`。
+- `finishRun` 会清理 `runId`、游标、定时器、订阅，并刷新侧栏。
 
-### 4.5 完成后以谁为准
+### 5.5 `message.completed` 与 `done` 的顺序
 
-- 收到 `message.completed`：以该消息为准，替换本地气泡；metadata 里的 `tool_trace` 覆盖本地轨迹。
-- 失败/取消/中断：服务端已把部分内容落库为 `failed`/`cancelled` 消息，但事件里没有完整消息。前端先保留本地拼接内容；`done` 后可以惰性调用 `loadMessages()` 校准（下一次打开会话也会以服务端为准）。
-- 不要在 `done` 后立刻清空消息列表再重拉，否则会闪屏并丢失错误提示。
+服务端保证 `message.completed` 先于 `done`。前端：
 
-## 5. 断连与重连算法
+- `message.completed` 只更新气泡，不结束订阅。
+- `done` 才执行 `finishRun`。
+- 如果只收到 `done` 而没有 `message.completed`，气泡保留已流式拼接的文本；服务端最终消息仍可通过刷新恢复。
 
-### 5.1 什么算断连
+## 6. 重连、看门狗与轮询
 
-- `reader.read()` 抛错（网络中断、服务端重启）。
-- 流结束但没收到 `done`（代理超时、连接被截断）。
-- 45 秒内没有收到任何事件或心跳（watchdog）。
-- `visibilitychange` 从隐藏变可见，且距上次事件超过 45 秒。
-- `online` 事件触发，且当前处于 `reconnecting`。
+### 6.1 触发条件
 
-### 5.2 什么不算断连
+- reader 抛错。
+- reader 正常结束但 `terminalRef` 仍为 false（没有收到 `done`）。
+- 看门狗 45 秒没有收到任何 chunk。
 
-- 用户切会话（主动关闭本地流，run 继续）。
-- 组件卸载（关闭本地流，run 继续）。
-- Stop 点击（继续消费，不重连）。
+### 6.2 退避
 
-### 5.3 退避
+`BACKOFF_MS = [1000, 2000, 4000, 8000, 15000]`：
 
-```text
-第 1 次：1s
-第 2 次：2s
-第 3 次：4s
-第 4 次：8s
-第 5 次及以后：15s
-每档 ±20% 抖动
-```
+- 第 1 次失败用 1s，第 2 次 2s，第 3 次 4s，第 4 次 8s，第 5 次及以后 15s。
+- 每档乘以 `0.8 + random * 0.4`，即 ±20% 抖动。
+- 退避期间助手气泡显示 `RECONNECTING…`。
+- `connect` 成功收到 `meta` 后失败计数清零。
 
-- 成功收到 `meta` 后重置退避。
-- 连续 8 次失败后，切换到轮询兜底：每 5 秒 `GET /agent/runs/{run_id}`，直到终态；页面重新可见或 `online` 时回到 SSE。
-- 所有定时器在组件卸载、会话切换、终态时清理。
+### 6.3 轮询兜底
 
-### 5.4 重连伪代码
+连续失败达到 `MAX_RECONNECT_FAILURES = 8` 后：
 
-```ts
-function scheduleReconnect() {
-  if (!runIdRef.current || terminalRef.current) return;
-  connectionRef.current = "reconnecting";
-  setConnection("reconnecting");
+- 停止 SSE 重连，进入轮询模式。
+- 每 5 秒 `GET /agent/runs/{runId}`。
+- 只读取 `status`：
+  - 终态 → `finishRun(status)`。
+  - 活跃 → 更新 `runStatus`，继续轮询。
+  - 404 → `handleRunGone()`。
+- 轮询**不读取** `partial_content`，不重新拉消息；它只负责在 SSE 长期不可用时发现终态。
+- 因此轮询恢复的会话可能只有本地已收到的内容；完整内容需要刷新页面（走 `active_run` 重放或已落库消息）。
 
-  const delay = nextBackoff(); // 1s..15s + jitter
-  retryTimerRef.current = window.setTimeout(async () => {
-    if (!runIdRef.current || terminalRef.current) return;
-    abortRef.current?.abort(); // 关闭上一次残留读取
-    const controller = new AbortController();
-    abortRef.current = controller;
-    try {
-      await subscribe(runIdRef.current, lastSeqRef.current, controller.signal);
-    } catch (err) {
-      if (controller.signal.aborted) return;
-      if (err instanceof ApiStreamError) {
-        if (err.status === 404) return handleRunGone();
-        if (err.status === 410) return handleEventsExpired();
-        if (err.status === 401) return handleAuthFailure();
-      }
-      scheduleReconnect();
-    }
-  }, delay);
-}
-```
+### 6.4 看门狗
 
-`subscribe` 正常返回（没有 `done`）也要当作断连处理，调用 `scheduleReconnect()`。
+- `armWatchdog(epoch)` 设置 45s 定时器；每收到一个 chunk 重置。
+- 超时后：`consecutiveFailures++`，`scheduleReconnect()`。
+- 旧 reader 由下一次 `connect` 的 `abortRef.current?.abort()` 关闭。
+- 定时器在 `meta`、重连、终态、停止时清理。
 
-### 5.5 恢复时从哪个 seq 开始
+### 6.5 页面可见性与网络恢复
 
-| 场景 | 起点 |
+只监听两个事件：
+
+- `window.online`：如果当前是 `reconnecting` 或轮询中，立即 `retryNow()`（清零失败计数、重新 connect）。
+- `document.visibilitychange`：页面变为可见且当前 run 未终态时，如果处于 `reconnecting` / 轮询，或连接状态是 `open` 但超过 45s 没有事件，立即 `retryNow()`。
+
+没有 `offline` 监听。断网时不会立刻切换为 `reconnecting`；要等 reader 报错或看门狗超时。
+
+### 6.6 404 / 410 / 403 / 401
+
+| 状态 | 处理 |
 | --- | --- |
-| 同一页面内网络抖动 | `lastSeqRef.current`（内存气泡已完整） |
-| 切会话后返回，详情返回 `active_run` | `0`（本地气泡已卸载，必须重建） |
-| 刷新页面/新标签，详情返回 `active_run` | `0`（助手消息尚未落库） |
-| 收到 409 后订阅现有 run | `0` |
-| 当前实例只重连、气泡还在 | `lastSeqRef.current` |
+| 404 | `handleRunGone()`：标记 run 过期、清游标、`stopLocalRun("closed")`、Toast、重新加载会话 |
+| 410 | `handleEventsExpired()`：同上，Toast 说明历史已过期，展示最终保存消息 |
+| 403 | `handleForbidden()`：停止本地订阅，显示无权限 |
+| 401 | `stopLocalRun("closed")`；不额外提示，交给全局鉴权 |
 
-判定标准：**本地是否有这段 run 的完整文本**。有就续接，没有就从头回放。不要用 sessionStorage 的 `lastSeq` 在没有正文时续接。
+`staleRunIdsRef` 记录已确认过期的 run；刷新会话时遇到同一个 run 不会再次自动重放。
 
-## 6. Stop、断连与取消的区别
+## 7. Stop、断连与取消
 
-| 动作 | 触发 | 前端行为 | 服务端行为 |
-| --- | --- | --- | --- |
-| 断连 | 切会话、关页面、网络中断、组件卸载 | 关闭流；气泡显示 `reconnecting` 或保持原状；**不**标 cancelled | run 继续 |
-| Stop | 用户点击停止 | `POST /agent/runs/{run_id}/cancel`；`cancelRequested=true`；继续消费到 `done` | run → `cancelled` |
-| 重试 | 终态后点击重试 | 重新 `send` 同文本，创建新 run | 新 run |
-
-实现规则：
+### 7.1 Stop（已有 run id）
 
 ```ts
-const stop = useCallback(async () => {
-  const runId = runIdRef.current;
-  if (!runId) {
-    abortRef.current?.abort(); // 兼容旧服务端：没有 run_id 时只能 abort
-    return;
-  }
-  setCancelRequested(true);
-  try {
-    await api.post(AGENT_ENDPOINTS.RUN_CANCEL(runId));
-  } catch (err) {
-    if (err instanceof ApiStreamError && err.status === 404) {
-      // run 已终态或被清理，保持订阅/恢复即可
-    } else {
-      toast({ title: "Failed to stop the agent", variant: "destructive" });
-      setCancelRequested(false);
-    }
-  }
-}, []);
+if (cancelRequestedRef.current) return;
+cancelRequestedRef.current = true;
+setCancelRequested(true);
+mark streaming bubbles cancelRequested=true;
+await api.post(AGENT_ENDPOINTS.RUN_CANCEL(runId));
 ```
 
-关键点：
+- 不 abort reader，继续消费到 `error(agent_cancelled)` + `done`。
+- cancel 接口返回时 run 通常仍是 `running`，只是 `cancel_requested_at` 已写；UI 显示 `STOPPING…`。
+- 重复点击直接忽略。
+- 404 视为“已经终态”，保留订阅等 `done`。
+- 其他失败：清 `cancelRequested`、Toast，可重试。
 
-- **不要**在 `stop()` 里调用 `abortRef.current?.abort()`。那只会断开订阅，让用户以为停止了，实际后台还在跑。
-- Stop 之后仍要接收 `error(agent_cancelled)` 和 `done`；此时 `done.status === "cancelled"`。
-- 取消是协作式的，长工具调用不会立刻停；Stop 按钮显示"正在停止"，不要立即禁用整个输入框。
-- 取消请求失败（网络）时提示用户重试，不要静默。
-- 若服务端是旧版本（`meta` 没有 `run_id`）：退回 `abort()`，并保持现有 `cancelled` 展示。
+### 7.2 Stop（还没有 run id）
 
-## 7. 刷新、多标签与会话切换
+只有 `POST /agent` 尚未返回 `meta`（或 legacy 服务端不返回 `run_id`）时：
 
-### 7.1 刷新/重新打开
+- `closeSubscription()` abort reader。
+- 本地把助手气泡标记为 `cancelled`，`runStatus="cancelled"`。
+- 服务端 run 可能仍在执行；前端不再接收。
+- 这是回退路径，不是后台模式的正常 Stop。
 
-`loadMessages(conversationId)` 拿到 `ConversationDetail` 后：
+### 7.3 断连
 
-```ts
-if (detail.active_run) {
-  ensureAssistantBubble(detail.active_run.assistant_message_id);
-  runIdRef.current = detail.active_run.id;
-  lastSeqRef.current = 0;
-  connectionRef.current = "connecting";
-  subscribe(detail.active_run.id, 0, controller.signal);
-} else {
-  clearCursor(conversationId);
+| 动作 | 前端行为 | 服务端 run |
+| --- | --- | --- |
+| 切换会话 | `selectConversation` 关闭订阅、清空线程、重置状态 | 继续 |
+| 新建会话 | `startNewChat` 关闭订阅、重置状态 | 继续 |
+| 组件卸载 | `useEffect` cleanup `closeSubscription()` | 继续 |
+| 浏览器断网 | reader 报错/看门狗触发 `scheduleReconnect` | 继续 |
+| 关闭标签页 | 连接断开，无前端逻辑 | 继续 |
+
+断连不调用 cancel 接口。
+
+### 7.4 重试按钮
+
+`MessageBubble` 在非流式、非重连、且终态为 `interrupted` / `failed` / `cancelled` 时显示 Retry：
+
+- 页面找到该助手消息之前最近的一条用户消息，调用 `send(previousUser.content)`。
+- 这会创建**新的 run**；旧 run 不会被复用或续跑。
+- 这依赖服务端“一个会话一个活跃 run”：若旧 run 仍活跃，会收到 409 并转为订阅已有 run。
+
+## 8. 刷新、多标签与恢复
+
+### 8.1 刷新恢复
+
+`loadMessages(conversationId)`：
+
+1. `GET /conversations/{id}`。
+2. 读 `active_run`。若存在、状态是 `queued/running`、且不在 `staleRunIdsRef`：
+   - 如果当前已经连着同一个 run（`runIdRef === active_run.id`、未终态、有 abort controller），只确保助手气泡存在，不重复连接。
+   - 否则用已落库消息构造视图；若 `assistant_message_id` 已有消息，标记 `streaming=true`；没有则插入空占位气泡。
+   - `assistantIdRef = active_run.assistant_message_id`。
+   - `runIdRef = active_run.id`，`lastSeq = 0`。
+   - `runStatus = active_run.status`。
+   - `cancelRequested = active_run.cancel_requested_at !== null`。
+   - `connect(active_run.id, 0)`：**从 seq 0 完整重放**。
+3. 没有活跃 run：清游标，直接用 `detail.messages` 渲染，重置所有 run 状态。
+
+为什么从 0 而不是从游标：
+
+- 助手正文在流式过程中没有写入 `conversation_messages`，只有事件日志。
+- 本地 `sessionStorage` 游标不可靠（见 8.3），且新标签页没有内存游标。
+- 从 0 重放能保证正文与工具轨迹完整；事件表通常很小。
+- 事件已过期时服务端返回 410，前端转为展示最终保存消息。
+
+### 8.2 多标签
+
+- 每个标签有独立的 `useAgentChat` 实例、独立 reader、独立 `epoch`、独立本地状态。
+- 没有 BroadcastChannel / localStorage 协调。
+- 两个标签都可以订阅同一个 run；服务端允许一个 run 多个订阅者。
+- 第二个标签发送消息会收到 409，然后订阅第一个标签创建的 run。
+- 两个标签同时点 Stop 是幂等的：第二个 cancel 请求返回当前终态或已取消状态。
+
+### 8.3 sessionStorage 游标
+
+`persistCursor()` 写入：
+
+```json
+{
+  "v": 1,
+  "conversationId": "0b2a...",
+  "runId": "6f1c...",
+  "assistantMessageId": "c9d3...",
+  "lastSeq": 12,
+  "updatedAt": "2026-11-04T10:00:00.000Z"
 }
 ```
 
-- `active_run` 不存在：不要订阅；已终态的消息已经在 `messages` 里。
-- `active_run` 存在但 `messages` 里没有对应助手消息（正常，因为终态才落库）：插入一个空助手气泡，`streaming=true`，id 用 `assistant_message_id`。
-- 订阅从 0 开始，回放全部历史事件重建正文。
-- 若回放返回 410：放弃重建，重新 `loadMessages`，提示"历史事件已过期，已显示最终保存内容"。
+key 为 `bokaclaw.agent.run.v1:<conversationId>`。
 
-### 7.2 多标签
+现状：
 
-- 每个标签独立订阅、独立渲染；服务端支持一个 run 多个订阅者。
-- 标签 B 在已有活跃 run 的会话里发送：服务端返回 409 `agent_run_active`，body 带 `run_id`。**这条消息没有写入**：标签 B 应移除乐观气泡、把文本恢复到输入框，并提示"当前回复尚未结束"；同时可以采用该 run，从 0 订阅，观察另一个标签正在产生的输出。不要把 409 静默当成发送成功。
-- 两个标签都可能写 sessionStorage（各自独立），互不影响。
-- 同一标签重复发送由 `runIdRef` 挡住；服务端 409 是最后兜底。
+- 每次 `acceptSeq` 成功后写入。
+- `finishRun`、`handleRunGone`、`handleEventsExpired`、切换/新建/删除会话时删除。
+- **从不读取**。刷新恢复完全依赖 `active_run` + 从 0 重放。
+- 写入包在 `try/catch` 中，隐私模式/禁用存储不会影响功能。
 
-### 7.3 会话切换
+### 8.4 会话切换与删除
 
-```ts
-function selectConversation(nextId: string) {
-  abortRef.current?.abort();   // 只关闭本地订阅
-  clearRetryTimer();
-  // 不调用 cancel，不修改 run 状态
-  activeIdRef.current = nextId;
-  setMessages([]);
-  void loadMessages(nextId);
-}
-```
+- `selectConversation` 不取消服务端 run；它只关闭订阅。切回时会通过 `active_run` 重新订阅。
+- `startNewChat` 同样不取消。
+- `deleteConversation` 在活跃 run 时收到 409，Toast 提示先 Stop 或等待；不会强制删除。
+- 删除成功后清游标；如果删除的是当前会话，进入新会话状态。
 
-- 切走再切回：详情里的 `active_run` 会让前端重新订阅并从 0 重建。
-- 切走期间 run 完成：回来时 `active_run` 为 null，消息已落库，直接显示。
-- 新建会话同理，旧 run 留在后台。
+## 9. UI 结构
 
-### 7.4 删除会话
+### 9.1 工具轨迹
 
-- 当前会话有活跃 run 时，服务端对 `DELETE /conversations/{id}` 返回 409 `agent_run_active`。
-- 前端提示"请先停止或等待当前回复完成"，不要静默失败。
-- 若删除成功，清理该会话的 cursor 与本地气泡。
+`MessageBubble` 在助手内容气泡下方渲染 `ToolTrace`（仅非用户消息且 `toolTrace` 非空）：
 
-## 8. 组件、Hook、类型与端点改动清单
+- 每个 `tool_call_id` 一行，使用 `Collapsible`。
+- 收起时显示：状态图标、工具名、状态文案、耗时（`duration_ms`，如有）、展开箭头。
+- 状态文案：`Running` / `Completed` / `Failed` / `Aborted`。
+- 图标：running 旋转；completed 对勾；failed/aborted 警告圆。
+- 展开显示：
+  - `arguments_error`（如有）。
+  - `ARGUMENTS`：`arguments` 格式化 JSON；为空时回退 `raw_arguments`；都没有时 `No arguments`。
+  - `OUTPUT`：`content`；空且 running 时 `Waiting for result...`，否则 `No output`。
+  - `truncated` 为 true 时显示 `Output truncated for display.`
+- 不做按 iteration 分组，不做运行中自动展开，不提供复制按钮。
+- 条目顺序是事件到达顺序，即 `tool.call` 的首次出现顺序。
 
-### 8.1 `src/hooks/use-agent-chat.ts`（主要改动）
+### 9.2 状态标记
 
-- 新增 `runIdRef`、`lastSeqRef`、`connection`、`cancelRequested`、`runStatus`。
-- `send()`：改用 `meta.run_id`；处理 409；不再把 abort 当取消。
-- `stop()`：改为调用 cancel 接口（见第 6 节）。
-- 新增 `ensureSubscribed(runId, fromSeq)`、`scheduleReconnect()`、`handleRunGone()`、`handleEventsExpired()`。
-- `handleEvent()`：读取 `event.id` 去重；新增 `meta.status` / `meta.message` 处理；`done.status` 决定终态。
-- `selectConversation()` / `startNewChat()` / 卸载：只 abort 订阅，不取消 run。
-- `loadMessages()`：处理 `active_run`，自动恢复。
-- 返回值新增 `connectionState`、`runStatus`、`cancelRequested`、`activeRunId`；`isStreaming` 保留为派生值，避免页面大改。
+`MessageBubble` 的非用户消息标记：
 
-建议把订阅/重连逻辑抽成内部函数或单独的 `use-agent-run.ts`，但不要引入新的状态库；现有 hook 足够。
-
-### 8.2 `src/utils/api.ts`
-
-新增 GET 流式请求：
-
-```ts
-export const getStream = async (
-  url: string,
-  options: { signal?: AbortSignal; headers?: Record<string, string> } = {},
-): Promise<Response> => {
-  // 与 postStream 相同的 Bearer 注入、401 刷新、错误解析
-};
-```
-
-实现方式：把 `requestStream` 泛化为接受 `method` 与可选 `body`，`postStream` 与 `getStream` 共用。错误仍抛 `ApiStreamError`，保留 `status` 与 `code`。
-
-### 8.3 `src/utils/api-endpoints.ts`
-
-```ts
-export const AGENT_ENDPOINTS = {
-  INVOKE: "/agent",
-  CONVERSATIONS: "/conversations",
-  CONVERSATION: (id: string) => `/conversations/${id}`,
-  MESSAGES: (id: string) => `/conversations/${id}/messages`,
-  RUN: (runId: string) => `/agent/runs/${runId}`,
-  RUN_EVENTS: (runId: string, afterSeq = 0) =>
-    `/agent/runs/${runId}/events?after_seq=${afterSeq}`,
-  RUN_CANCEL: (runId: string) => `/agent/runs/${runId}/cancel`,
-} as const;
-```
-
-### 8.4 `src/utils/sse.ts`
-
-`SseMessage` 已经暴露 `id`，`SseParser` 已经解析 `id:`，无需改动。不要新增第二套解析器。
-
-### 8.5 `src/types/api.ts`
-
-- 新增 `RunStatus`、`ConnectionState`、`ActiveRun`、`AgentRun`、`RunEvent` 类型。
-- `ConversationDetail` 增加 `active_run?: ActiveRun | null`。
-- `AgentInvokeResponse` 增加 `run_id?: string`。
-- `ChatMessageView`（在 hook 内）增加 `runStatus`、`reconnecting`、`cancelRequested`。
-- `MessageStatus` 不变。
-
-### 8.6 组件
-
-| 文件 | 改动 |
+| 条件 | 文案 |
 | --- | --- |
-| `components/agent/message-bubble.tsx` | 支持 `reconnecting`、`interrupted`、`cancelRequested` 文案；终态显示重试按钮；工具轨迹在中断时标记 aborted |
-| `components/agent/message-thread.tsx` | 传递新状态；不要在重连时隐藏气泡 |
-| `components/agent/tool-trace.tsx` | 复用现有状态色；新增 `aborted` 在中断场景的展示（如果尚未覆盖） |
-| `components/agent/chat-composer.tsx` | Stop 按钮在 `runId` 存在时调用 `stop`；`cancelRequested` 时显示"正在停止"并禁用重复点击；输入框在 `queued/running` 时保持现状 |
-| `components/agent/conversation-list.tsx` | 可选：对本地已知的活跃 run 显示一个小圆点；数据来自 hook 的内存映射，不新增列表接口 |
-| `app/(root)/dashboard/agent/page.tsx` | 接入新增返回值；无需改路由 |
+| `reconnecting === true` | `RECONNECTING…` |
+| `cancelRequested === true && streaming === true` | `STOPPING…` |
+| `runStatus === "interrupted"` | `INTERRUPTED` + 警告图标 |
+| `runStatus === "cancelled"` 或 `status === "cancelled"` | `STOPPED` |
+| `runStatus === "failed"` 或 `failed === true` | `FAILED` + 警告图标 |
+| 终态且非流式 | Retry 按钮（interrupted/failed/cancelled） |
 
-### 8.7 明确不改
+### 9.3 Composer 与线程
 
-- 不引入 `EventSource`、不把 token 存 `localStorage`。
-- 不新增 UI/图标/状态管理库。
-- 不改 `docs/dashboard/agent-chat-design.md` 的 v1 内容；本文件描述增量设计。
+- `chat-composer.tsx`：流式中显示 Stop；`cancelRequested` 时按钮禁用并显示加载，`aria-label="Stopping"`。
+- `message-thread.tsx`：自动滚动采用“贴底才跟随”，用户上滚时不强制拉回；顶部显示错误横幅。
+- `page.tsx`：只传 `isStreaming`、`cancelRequested`、`error`、`send`、`stop`；不展示 `connection` / `runStatus` / `activeRunId`。
 
-## 9. 边界情况与错误码处理
+## 10. 错误与边界
 
-| 场景 | 前端处理 |
+### 10.1 发送阶段
+
+| 情况 | 行为 |
 | --- | --- |
-| `POST /agent` 返回 409 `agent_run_active` | 本次消息未写入：移除乐观气泡、恢复草稿；读 `body.run_id`，从 0 订阅现有 run；提示等待或 Stop |
-| 订阅 404 `agent_run_not_found` | 清 cursor，`loadMessages()`，提示"该回复已结束或不存在" |
-| 订阅 410 `agent_events_expired` | 清 cursor，`loadMessages()`，提示"历史事件已过期" |
-| `meta.status` 已是终态且 `message` 非空 | 直接渲染最终消息，不发请求 |
-| run `interrupted` | 气泡显示"已中断"；保留部分内容；提供"重试"（重新发送，不续跑） |
-| `error(agent_cancelled)` 后连接中断 | 保持本地 `cancelled` 状态，不必重连；若 run 未终态则重连确认 |
-| 取消请求 404 | 视为已终态，继续等待/恢复订阅 |
-| 取消请求网络失败 | 提示重试；不要把气泡标成 cancelled |
-| 401 | 走现有刷新逻辑；刷新失败跳登录 |
-| 403 | 视为无权限，停止订阅并提示 |
-| 5xx/网络错误 | 进入重连退避；8 次后轮询 `GET /agent/runs/{id}` |
-| 心跳缺失 45s | 主动断开并重连 |
-| 浏览器离线 | 显示 `reconnecting`，监听 `online` 立即重试 |
-| 页面隐藏 | 保持订阅；浏览器可能冻结计时器，恢复可见时用 watchdog 检查 |
-| 事件重复（重放与实时重叠） | 按 `seq` 丢弃 |
-| `meta` 无 `run_id`（旧服务端） | 退回现有行为：`AbortController` 即取消，不显示"后台继续" |
-| 会话被其他标签删除 | 订阅返回 404；关闭当前会话，刷新列表 |
-| 事件表已清理但 run 行还在 | 按 410 处理，以落库消息为准 |
-| sessionStorage 不可用 | 纯内存运行，刷新后依赖 `active_run` 从 0 重建 |
+| 空输入 | 忽略 |
+| 已有流 | 订阅已有 run，返回草稿 |
+| 409 | 删除临时气泡，保留草稿，订阅已有 run |
+| `agent_not_configured` | 固定文案，标记失败，删除空占位 |
+| 其他 4xx/5xx | 错误横幅，标记失败，删除空占位，保留草稿 |
+| 新会话创建失败 | 删除两个临时气泡（因为会话不存在） |
 
-## 10. 测试与验收场景
+### 10.2 订阅阶段
 
-项目没有前端测试框架，验收以 `pnpm typecheck`、`pnpm build` 和手工场景为准。
+| 情况 | 行为 |
+| --- | --- |
+| 无 `run_id` 的流结束 | 视为 legacy，`handleLegacyFailure` |
+| 有 `run_id` 的流结束但无 `done` | 重连 |
+| `error(partial=false)` | 删除空助手气泡 |
+| `error(partial=true)` | 保留已流式正文/工具轨迹，标记终态 |
+| `done` 缺少 `status` | 用 `runStatusRef`；仍非终态则回退 `completed` |
+| 410 | 提示历史过期，展示最终消息 |
 
-### 10.1 手工场景
+### 10.3 工具轨迹边界
 
-1. **正常发送**：文字逐段出现，工具轨迹实时更新，完成后消息落库。
-2. **断网 10 秒**：气泡显示"重连中"；恢复网络后文本不重复、不缺段，最终 `completed`。
-3. **关闭标签页再打开**：会话详情返回 `active_run`，自动从 0 重建并继续增长；完成后消息落库。
-4. **切会话再切回**：run 在后台继续；切回后恢复；其他会话不受影响。
-5. **Stop**：点击后显示"正在停止"，最终 `cancelled`；服务端 run 状态为 `cancelled`；工具轨迹标 aborted。
-6. **Stop 后立刻刷新**：消息以 `cancelled` 落库，不再恢复订阅。
-7. **两个标签同时发送**：第二个标签收到 409，确认这条消息未写入、草稿恢复，随后订阅现有 run；两个标签看到同一段输出。
-8. **多标签其中一个 Stop**：另一个标签收到 `error(agent_cancelled)` + `done`，同步结束。
-9. **服务端重启**：连接断开并重连；`meta.status` 为 `interrupted` 或收到 `error(agent_interrupted)`；显示"已中断"，保留部分内容。
-10. **事件过期**：把保留期调成 0 后刷新进行中的 run，收到 410，回退到会话详情。
-11. **401 过期**：流中断后刷新 token 重连成功；刷新失败跳登录。
-12. **旧服务端**：`meta` 无 `run_id` 时 Stop 仍走 abort，UI 行为与现状一致。
+- `tool.call` 参数被服务端截断时 `truncated=true`、`arguments=null`，UI 显示 `raw_arguments` 预览并提示截断。
+- `tool.result` 的 `content` 被截断时同样提示。
+- 服务端补齐的 `aborted` 条目会显示 `Aborted`。
+- 若 `tool.result` 先到，条目仍会创建；后续 `tool.call` 不会把状态改回 running。
 
-### 10.2 类型与构建
+## 11. 已知限制与后续阶段
+
+| 限制 | 现状 | 后续方向 |
+| --- | --- | --- |
+| sessionStorage 游标只写不读 | 刷新从 0 重放 | 若要减少重放量，可读游标并从 `lastSeq` 续接 |
+| `meta.last_seq` 未使用 | 客户端只信 SSE `id`/payload `seq` | 可用于校准，但需处理缺口 |
+| 轮询不恢复正文 | `pollRun` 只读 `status` | 轮询时拉取 `partial_content` 或消息 |
+| meta 之前 Stop 只本地 abort | 服务端 run 继续 | 不返回 meta 时无法拿到 run id；需要服务端更早下发 |
+| 无 `offline` 监听 | 依赖 reader 报错/看门狗 | 可加离线提示 |
+| 页面未展示连接/运行状态 | `connection`/`runStatus`/`activeRunId` 未渲染 | 增加状态条 |
+| 无多标签协调 | 各标签独立订阅 | BroadcastChannel 同步本地状态 |
+| 工具轨迹无分组/自动展开/复制 | 逐条折叠 | 另开 UI 任务 |
+| `ActiveRun.assistant_message_id` 可空 | 无 id 时不插占位气泡，等 `message.delta` 创建 | 由服务端保证非空，或前端用 run id 生成临时 id |
+| `MessageStatus` 与 run 状态不完全对齐 | 消息只有 `completed/cancelled/failed`；`interrupted` 只存在于 run | 展示层用 `runStatus` |
+| 无测试运行器 | 验证靠 `pnpm typecheck` + `pnpm build` + 手工场景 | 引入组件/ hook 测试 |
+
+后续阶段的服务端设计见 [`../server/agent-execution-decoupling.md`](../server/agent-execution-decoupling.md) 第 13 节。
+
+## 12. 文件清单与手工验收
+
+### 12.1 文件
+
+| 文件 | 职责 |
+| --- | --- |
+| `src/hooks/use-agent-chat.ts` | 发送、订阅、事件归并、重连、轮询、Stop、恢复 |
+| `src/utils/sse.ts` | `SseParser` / `SseMessage`；解析 `id`、`event`、`data` |
+| `src/utils/api.ts` | `api`、`postStream`、`getStream`、`ApiStreamError` |
+| `src/utils/api-endpoints.ts` | `INVOKE`、`RUN`、`RUN_EVENTS`、`RUN_CANCEL`、`CONVERSATION` |
+| `src/types/api.ts` | `RunStatus`、`ConnectionState`、`ActiveRun`、`AgentRun`、`ToolTraceEntry` |
+| `src/components/agent/message-bubble.tsx` | 内容气泡、工具轨迹、状态标记、Retry |
+| `src/components/agent/tool-trace.tsx` | 工具条目折叠行 |
+| `src/components/agent/message-thread.tsx` | 线程、自动滚动、错误横幅 |
+| `src/components/agent/chat-composer.tsx` | 输入、Stop/Stopping |
+| `src/app/(root)/dashboard/agent/page.tsx` | 页面装配、Retry 取上一条用户消息 |
+
+### 12.2 手工验收
+
+| 场景 | 期望 |
+| --- | --- |
+| 发送一条会调用工具的消息 | 气泡下方依次出现 Running → Completed 的工具行；耗时可展开；最终正文出现 |
+| 流式中断网 10 秒再恢复 | 气泡显示 `RECONNECTING…`；恢复后正文与工具轨迹不重复、不缺段 |
+| 流式中刷新页面 | 从 `active_run` 恢复，从 seq 0 重放，正文与工具轨迹完整 |
+| 第二个标签发送 | 409 Toast；临时气泡被移除；草稿保留；自动订阅已有 run |
+| 流式中 Stop | 按钮禁用并显示加载；最终 `STOPPED`；消息状态 `cancelled`；无错误横幅 |
+| Stop 后立即刷新 | 显示已落库的 `cancelled` 消息；`active_run` 为 null 或非活跃 |
+| 服务重启 | 刷新/重连后显示 `INTERRUPTED`；Retry 可重新发送 |
+| 删除有活跃 run 的会话 | 409 Toast；取消或等待后可删除 |
+| 事件过期（410） | 提示历史过期；展示最终保存消息 |
+| 切会话再切回 | 执行继续进行；切回后恢复订阅 |
+| 关闭标签页再打开 | 会话详情返回 `active_run`；从 0 重放；执行未中断 |
+
+### 12.3 静态验证
 
 ```bash
 cd dashboard
 pnpm typecheck
 pnpm build
-pnpm lint
 ```
-
-注意 `pnpm lint` 是 Prettier 检查，不是 ESLint。
-
-## 11. 分阶段落地与回滚
-
-### 11.1 落地顺序
-
-1. 服务端迁移 008 + run manager（`AGENT_RUN_BACKGROUND=false` 先验证旧路径）。
-2. 服务端切 `true`，用 API 工具验证订阅/取消/重启回收。
-3. 前端先加类型与 `getStream`，保持旧 `send` 行为。
-4. 改 `handleEvent` 读取 `id`、接入 `meta.run_id`；此阶段不启用重连。
-5. 接入 `active_run` 恢复与 Stop 接口。
-6. 启用重连、watchdog、多标签 409 处理。
-7. 全量发布。
-
-每一步都可以独立回滚：前端检测 `meta.run_id`，没有就退回旧路径，因此服务端回滚不影响已发布前端。
-
-### 11.2 回滚
-
-- 前端回滚：恢复旧 hook 版本；服务端新接口保留但无人调用。
-- 服务端回滚：`AGENT_RUN_BACKGROUND=false`；前端收到无 `run_id` 的 `meta` 后自动退回旧语义。
-- 不要在前端回滚时删除进行中的 run；它们会继续执行到终态，只是没有订阅者。
-
-### 11.3 监控与验收指标
-
-- 前端：重连次数、410/404 次数、409 次数、Stop 到终态的时间。
-- 后端（见 server 文档）：活跃 run、排队、事件写入失败、interrupted 数量。
-- 灰度期间重点看：刷新恢复成功率、重连后消息重复率、取消后残留 `running` 数。
