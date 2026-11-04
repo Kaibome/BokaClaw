@@ -25,6 +25,12 @@ def boom() -> str:
     raise ValueError("kaboom")
 
 
+@tool
+def big() -> str:
+    """Return a large result."""
+    return "z" * 5000
+
+
 def test_run_without_tools_returns_final_answer():
     provider = FakeProvider([ModelResponse(content="hello", finish_reason="stop")])
     runtime = AgentRuntime(AgentConfig(), provider=provider, store=InMemorySessionStore())
@@ -221,6 +227,62 @@ def test_system_prompt_is_sent_but_not_persisted():
         {"role": "user", "content": "hi"},
         {"role": "assistant", "content": "ok"},
     ]
+
+
+def test_tool_result_truncation_is_view_only():
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                tool_calls=[ToolCall(id="call_1", name="big", arguments={}, raw_arguments="{}")],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(content="done", finish_reason="stop"),
+        ]
+    )
+    store = InMemorySessionStore()
+    events = []
+    runtime = AgentRuntime(
+        AgentConfig(tool_result_max_chars=1000),
+        provider=provider,
+        tools=[big],
+        store=store,
+        on_event=events.append,
+    )
+
+    result = runtime.run("go", session_id="s1")
+
+    tool_event = next(event for event in events if event.type == EventType.TOOL_RESULT)
+    assert tool_event.data["truncated"] is True
+    assert tool_event.data["original_chars"] == 5000
+    assert len(tool_event.data["content"]) == 1000
+
+    sent_tool = next(message for message in provider.calls[1]["messages"] if message["role"] == "tool")
+    assert len(sent_tool["content"]) == 1000
+
+    assert result.new_messages[-2]["content"] == "z" * 5000
+    assert result.tool_results[0].content == "z" * 5000
+    stored_tool = next(message for message in store.load_messages("s1") if message["role"] == "tool")
+    assert stored_tool["content"] == "z" * 5000
+
+
+def test_tool_result_truncation_is_off_by_default():
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                tool_calls=[ToolCall(id="call_1", name="big", arguments={}, raw_arguments="{}")],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(content="done", finish_reason="stop"),
+        ]
+    )
+    events = []
+    runtime = AgentRuntime(AgentConfig(), provider=provider, tools=[big], on_event=events.append)
+
+    runtime.run("go", session_id="s1")
+
+    tool_event = next(event for event in events if event.type == EventType.TOOL_RESULT)
+    assert tool_event.data["truncated"] is False
+    assert tool_event.data["content"] == "z" * 5000
 
 
 def test_events_are_emitted_in_order():

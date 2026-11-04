@@ -78,6 +78,26 @@ def _env_optional_int(name: str) -> Optional[int]:
         return None
 
 
+def _env_budget(name: str, default: Optional[int]) -> Optional[int]:
+    """Read a positive integer budget; ``0`` / ``off`` disables it."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    text = raw.strip().lower()
+    if text in {"0", "off", "none", "disabled", "false"}:
+        return None
+    try:
+        value = int(text)
+    except ValueError:
+        return default
+    return value if value > 0 else None
+
+
+def _env_compression_mode(name: str, default: str = "summary") -> str:
+    value = (os.environ.get(name) or default).strip().lower()
+    return value if value in {"summary", "truncate"} else default
+
+
 @dataclass(frozen=True)
 class LocalAgentConfig:
     """Model and loop settings for the in-process runtime."""
@@ -92,6 +112,10 @@ class LocalAgentConfig:
     system_prompt: str
     max_iterations: int
     max_seconds: float
+    context_max_tokens: Optional[int] = None
+    context_keep_recent_tokens: Optional[int] = None
+    context_compression: str = "summary"
+    tool_result_max_chars: Optional[int] = None
 
 
 def _current_llm_config() -> Dict[str, Any]:
@@ -146,6 +170,15 @@ def load_local_config() -> Optional[LocalAgentConfig]:
         # Local OpenAI-compatible servers (Ollama, vLLM) often take any key.
         api_key = "local"
 
+    context_max_tokens = _env_budget("AGENT_CONTEXT_MAX_TOKENS", 32_000)
+    context_keep_recent_tokens = _env_optional_int("AGENT_CONTEXT_KEEP_RECENT_TOKENS")
+    if context_keep_recent_tokens is not None:
+        # Keep the SDK config valid even when the environment is misconfigured:
+        # the keep window must leave room for the part that gets compressed.
+        context_keep_recent_tokens = max(0, context_keep_recent_tokens)
+        if context_max_tokens is not None:
+            context_keep_recent_tokens = min(context_keep_recent_tokens, max(0, context_max_tokens - 256))
+
     return LocalAgentConfig(
         model=str(model),
         api_key=str(api_key),
@@ -157,6 +190,10 @@ def load_local_config() -> Optional[LocalAgentConfig]:
         system_prompt=(os.getenv("AGENT_SYSTEM_PROMPT") or "").strip() or DEFAULT_SYSTEM_PROMPT,
         max_iterations=max(1, _env_int("AGENT_MAX_ITERATIONS", 10)),
         max_seconds=max(1.0, _env_float("AGENT_LOOP_MAX_SECONDS", 300.0)),
+        context_max_tokens=context_max_tokens,
+        context_keep_recent_tokens=context_keep_recent_tokens,
+        context_compression=_env_compression_mode("AGENT_CONTEXT_COMPRESSION"),
+        tool_result_max_chars=_env_budget("AGENT_TOOL_RESULT_MAX_CHARS", 16_000),
     )
 
 
@@ -344,6 +381,10 @@ def build_runtime(
         system_prompt=config.system_prompt,
         max_iterations=config.max_iterations,
         model=model_config,
+        context_max_tokens=config.context_max_tokens,
+        context_keep_recent_tokens=config.context_keep_recent_tokens,
+        context_compression=config.context_compression,
+        tool_result_max_chars=config.tool_result_max_chars,
     )
     tools = [*_memory_tools(sdk, payload.get("user_id")), *build_dev_tools(sdk)]
     return sdk.AgentRuntime(agent_config, tools=tools, on_event=on_event)

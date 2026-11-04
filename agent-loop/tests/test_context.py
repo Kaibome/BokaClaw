@@ -117,3 +117,32 @@ def test_assistant_message_preserves_tool_call_ids_and_raw_arguments():
 def test_tool_message_omits_name_for_wire_compatibility():
     message = tool_message(ToolResult(tool_call_id="call_1", name="add", content="3"))
     assert message == {"role": "tool", "tool_call_id": "call_1", "content": "3"}
+
+
+def test_tool_result_cap_only_changes_the_model_view():
+    context = ContextManager(tool_result_max_chars=300)
+    context.load_history(
+        [
+            {"role": "user", "content": "u1"},
+            {"role": "tool", "tool_call_id": "c1", "content": "h" * 500},
+            {"role": "assistant", "content": "a" * 500},
+        ]
+    )
+    context.append({"role": "tool", "tool_call_id": "c2", "content": "t" * 500})
+
+    built = context.build()
+
+    assert len(built[1]["content"]) == 300
+    assert built[1]["content"].startswith("h")
+    assert built[2]["content"] == "a" * 500
+    assert len(built[3]["content"]) == 300
+    # Stored messages stay complete for persistence and the next run.
+    assert context.messages[1]["content"] == "h" * 500
+    assert context.messages[3]["content"] == "t" * 500
+
+
+def test_tool_result_cap_is_off_by_default():
+    context = ContextManager()
+    context.append({"role": "tool", "tool_call_id": "c1", "content": "t" * 500})
+
+    assert context.build()[0]["content"] == "t" * 500

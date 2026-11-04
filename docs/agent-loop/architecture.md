@@ -25,7 +25,7 @@ SDK 是**进程内库**，不是后台执行器。`server/` 的 `AgentRunManager
 
 明确的非目标（v1）：
 
-- token 计数、自动摘要、上下文压缩
+- 跨轮持久化摘要（滚动摘要只存在于一次 run 内）
 - 并行工具执行
 - 边收流边执行工具调用（必须等 tool_call 分片重组完成）
 - MCP 工具发现、内置网络搜索
@@ -44,7 +44,7 @@ flowchart TB
 
     subgraph SDK["bokaclaw_agent"]
         Runtime["AgentRuntime<br/>ReAct 编排 + 持久化编排<br/>run / stream / arun"]
-        Context["ContextManager<br/>system prompt / 历史 / 截断"]
+        Context["ContextManager + ContextCompressor<br/>system prompt / 历史 / 截断 / 预算压缩"]
         Registry["ToolRegistry<br/>注册 + JSON Schema + 分发"]
         Provider["ModelProvider<br/>+ 可选 stream_complete"]
         Store["SessionStore<br/>InMemory / Postgres"]
@@ -89,7 +89,8 @@ agent-loop/
 │   ├── config.py                   # AgentConfig / ModelConfig
 │   ├── types.py                    # ToolCall / ModelResponse / RunResult / AgentEvent ...
 │   ├── exceptions.py               # AgentError 及子类
-│   ├── context.py                  # 消息规范化 + 上下文裁剪
+│   ├── context.py                  # 消息规范化 + 上下文裁剪 + token 估算
+│   ├── compression.py              # ContextCompressor：预算压缩与滚动摘要
 │   ├── tools.py                    # Tool / ToolRegistry / @tool / schema 生成
 │   ├── runtime.py                  # AgentRuntime：ReAct 循环与持久化编排
 │   ├── utils.py                    # resolve_awaitable
@@ -109,6 +110,7 @@ agent-loop/
 config ──▶ types ◀── providers
    │          ▲
    ├──▶ runtime ──▶ context
+   │          │        └──▶ compression
    │          │
    │          ├──▶ tools ──▶ exceptions
    │          └──▶ sessions
@@ -254,7 +256,7 @@ def get_weather(city: str, days: int = 1) -> str:
 
 `ToolRegistry` 按名称索引工具，`specs()` 输出 OpenAI `tools` 数组，`invoke()` 负责把 `ToolCall` 转成 `ToolResult`。
 
-### 4.4 上下文层（`context.py`）
+### 4.4 上下文层（`context.py` / `compression.py`）
 
 `ContextManager` 把「历史」和「本次 run 新增」分开保存：
 
@@ -265,7 +267,25 @@ build() = [system?] + truncate(history) + current
 - **system prompt 不持久化**：每次 `build()` 重新插入。恢复会话不会重复，修改提示词立即生效。
 - **`max_history_messages` 只裁剪历史视图**：本次 run 的消息和最终持久化的消息始终完整。
 - **裁剪对齐边界**：优先从最近的第 `N` 条里找 `role="user"` 作为起点；找不到则找没有 `tool_calls` 的 assistant；仍找不到就只发 system。这样不会产生孤立的 `role="tool"` 消息。
+- **工具结果裁剪只改视图**：`tool_result_max_chars` 在 `build()` 内对 `role="tool"` 消息做头尾截断（返回拷贝，不改 `_history` / `_current`），所以恢复会话时加载的历史工具结果同样受控；`new_messages`、`RunResult.tool_results` 与 SessionStore 写入始终是完整原文。
 - `normalize_input()` 接受字符串或 OpenAI wire-format 消息列表；未知结构直接报错。
+
+token 估算不引入 tokenizer：`estimate_tokens()` 使用 `ceil(ascii_chars * 0.4 + non_ascii_chars)`，`estimate_message_tokens()` 再计入 `tool_calls` JSON 与 4 个结构开销。
+
+#### 预算压缩（`compression.py`）
+
+`AgentConfig.context_max_tokens` 开启后，runtime 每次迭代在 `build()` 之后、发出 `model_request` 之前调用 `ContextCompressor.compress()`：
+
+```text
+build() ──▶ compress(messages, tools_tokens) ──▶ model_request
+```
+
+- 预算先扣除 tools schema 的估算；未超预算直接返回原文，不产生额外模型调用。
+- 切点从尾部向前累积 `context_keep_recent_tokens`（默认预算一半），再前移到合法边界（`user`，或带 `tool_calls` 的 `assistant`，因为它的结果紧随其后）。最近一条 `user` 消息会被钉住保留，长工具循环不会丢失任务指令。
+- `summary` 模式把切点之前的消息连同上一次摘要折叠成滚动摘要，合并进唯一的 system 消息。摘要调用使用 `provider.complete(..., tools=None, tool_choice=None, temperature=0, max_tokens=1024)`，**不复用**会强制携带 tools 的 `_complete()`；usage 合并进本次 run。摘要失败（异常、空内容、内容过少）只记录 warning 并回退裁剪，不中断 run。
+- `truncate` 模式直接丢弃切点之前的消息，并在 system 末尾追加省略说明。
+- 压缩后仍超预算时，`_fit_budget()` 对最大的非 system 消息做头尾截断（只改视图），不会拆散 tool_call 与其结果。
+- 每次真正改写视图都会发出 `context_compressed` 事件，位置在该轮 `model_request` 之前。`ContextCompressor` 的滚动摘要只存在于一次 run 内，不写入 SessionStore。
 
 消息构造规则：
 
@@ -567,7 +587,8 @@ CREATE TABLE IF NOT EXISTS bokaclaw_agent_messages (
 | `model_request` | 每次模型调用前 | `messages`、`tools` |
 | `model_response` | 每次模型返回后 | `content`、`tool_calls`、`finish_reason` |
 | `tool_call` | 执行工具前 | `tool_call_id`、`name`、`arguments`、`raw_arguments`、`arguments_error`、`status="running"` |
-| `tool_result` | 工具返回/abort 后 | `tool_call_id`、`name`、`content`、`is_error`、`status`（`completed/failed/aborted`） |
+| `tool_result` | 工具返回/abort 后 | `tool_call_id`、`name`、`content`（已按 `tool_result_max_chars` 裁剪）、`truncated`、`original_chars`、`is_error`、`status`（`completed/failed/aborted`） |
+| `context_compressed` | 模型视图被压缩/裁剪后、对应 `model_request` 之前 | `before_tokens`、`after_tokens`、`dropped_messages`、`summarized`、`fallback` |
 | `run_ended` | 正常结束、超轮数或取消 | `stop_reason`（含 `cancelled`） |
 | `error` | 非取消异常 | `error`、`type` |
 
@@ -652,7 +673,8 @@ dashboard ── POST /agent ──▶ server（鉴权 / 创建 agent_runs / 订
 | `tool_call.id` 与原始 `arguments` 原样保留 | 保证 ReAct 回填正确、兼容严格服务；代价是消息体积略大 |
 | 工具串行执行 | 每个调用都有确定的结果消息，失败路径易恢复；代价是并行工具场景变慢 |
 | system prompt 不持久化 | 支持跨 run 调整提示词、避免重复；代价是持久化历史不含 system |
-| `max_history_messages` 只裁剪模型视图 | 数据库保留完整对话；代价是长会话请求仍可能超模型窗口 |
+| 裁剪/压缩只改模型视图 | 数据库保留完整对话、恢复后仍可用全文；代价是原会话越长，压缩时的摘要调用越多 |
+| token 预算用字符近似估算 | 不引入 tokenizer 依赖、实现简单；代价是预算不是精确 token 数，需要留余量 |
 | SDK 自带幂等 DDL | 无需迁移框架、可与 mem0 共库；代价是 schema 演进能力有限 |
 | 失败时补齐 tool 消息 | 会话始终符合协议、可继续恢复；代价是数据库中出现合成的错误结果 |
 | Postgres 依赖放在 `postgres` extra | 纯内存场景无需安装数据库驱动；代价是用户需显式安装 |
@@ -666,7 +688,7 @@ dashboard ── POST /agent ──▶ server（鉴权 / 创建 agent_runs / 订
 当前明确不做、但架构上已留出位置的能力：
 
 - **边收流边执行工具调用**：当前必须等 tool_call 的 `arguments` 分片全部到齐、解析成功后才执行；要做增量执行，需要按 `index` 维护可解析状态。
-- **上下文压缩 / 自动摘要**：`ContextManager.build()` 是唯一模型视图入口，可替换为摘要策略。
+- **跨轮持久化摘要**：当前滚动摘要（`ContextCompressor._summary`）只存在于一次 run 内；跨 run 复用需要把摘要写入 session metadata 并在恢复时读回。
 - **并行工具执行**：`ToolRegistry.invoke()` 无状态，可并行化；需要保证结果顺序与 `tool_call_id` 对应。
 - **工具权限与沙箱**：由宿主在注册工具时封装（`server/app/agent/dev_tools.py` 即是这一层）。
 - **MCP / WebSearch / LSP**：属于工具生态，可按需注册为普通 Tool。
@@ -688,6 +710,7 @@ dashboard ── POST /agent ──▶ server（鉴权 / 创建 agent_runs / 订
   - `test_runtime.py` / `test_arun.py`：完整 ReAct 往返、多轮工具、最大轮数、异常持久化、事件顺序、`seq` 连续性
   - `test_cancel.py`：四个取消检查点、abort pending 工具、部分 `RunResult`、`cancelled` 持久化、最后事件为 `run_ended(stop_reason="cancelled")`、不发 `error`、`arun` 转发
   - `test_streaming.py`：文本增量顺序、tool_call 分片重组、无流式 Provider 的降级、无文本回合
-  - `test_context.py`：system prompt、历史恢复、裁剪边界、持久化完整性
+  - `test_context.py`：system prompt、历史恢复、裁剪边界、持久化完整性、工具结果视图裁剪
+  - `test_compression.py`：token 估算、头尾截断、摘要/裁剪模式、滚动摘要、摘要失败回退、预算硬约束、`context_compressed` 事件顺序与 usage 合并
   - `test_session_memory.py` / `test_session_postgres.py`：会话 CRUD、seq、metadata 合并、DDL 幂等；真实 Postgres 集成测试由 `BOKACLAW_AGENT_TEST_DSN` 开启
 - 本地命令见 [`agent-loop/AGENTS.md`](../../agent-loop/AGENTS.md)：`ruff check`、`ruff format --check`、`pytest`。

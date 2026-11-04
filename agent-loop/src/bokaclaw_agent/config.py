@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class ModelConfig(BaseModel):
@@ -34,6 +34,31 @@ class AgentConfig(BaseModel):
     tool_choice: str | dict[str, Any] = "auto"
     tool_error_mode: Literal["return", "raise"] = "return"
     max_history_messages: int | None = Field(default=None, ge=1)
+    context_max_tokens: int | None = Field(
+        default=None,
+        ge=1024,
+        description=(
+            "Approximate token budget for the model view. When exceeded, older messages are "
+            "summarized or dropped. Disabled when None."
+        ),
+    )
+    context_keep_recent_tokens: int | None = Field(
+        default=None,
+        ge=0,
+        description="Recent tokens always kept by context compression; defaults to half the budget.",
+    )
+    context_compression: Literal["summary", "truncate"] = Field(
+        default="summary",
+        description="How to compress over-budget context: summarize with the provider or only drop.",
+    )
+    tool_result_max_chars: int | None = Field(
+        default=None,
+        ge=256,
+        description=(
+            "Maximum characters of a tool result in the model view. Full content is still "
+            "persisted and returned in RunResult.tool_results. Disabled when None."
+        ),
+    )
     model: ModelConfig | None = Field(
         default=None,
         description="Used to build the default provider; ignored when a provider is injected.",
@@ -45,3 +70,11 @@ class AgentConfig(BaseModel):
         if isinstance(value, str) and value not in {"auto", "none", "required"}:
             raise ValueError("tool_choice must be 'auto', 'none', 'required', or a dict")
         return value
+
+    @model_validator(mode="after")
+    def _validate_context_budget(self) -> "AgentConfig":
+        budget = self.context_max_tokens
+        keep_recent = self.context_keep_recent_tokens
+        if budget is not None and keep_recent is not None and keep_recent >= budget - 256:
+            raise ValueError("context_keep_recent_tokens must be at least 256 tokens below context_max_tokens")
+        return self

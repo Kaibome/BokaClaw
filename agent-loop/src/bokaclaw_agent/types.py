@@ -91,6 +91,7 @@ class EventType(str, Enum):
     MODEL_RESPONSE = "model_response"
     TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"
+    CONTEXT_COMPRESSED = "context_compressed"
     RUN_END = "run_ended"
     ERROR = "error"
 

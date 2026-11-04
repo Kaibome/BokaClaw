@@ -10,8 +10,16 @@ from collections.abc import Callable, Generator, Iterable, Iterator
 from typing import Any, NoReturn
 from uuid import uuid4
 
+from .compression import ContextCompressor
 from .config import AgentConfig
-from .context import ContextManager, assistant_message, normalize_input, tool_message
+from .context import (
+    ContextManager,
+    assistant_message,
+    estimate_tokens,
+    normalize_input,
+    tool_message,
+    truncate_text,
+)
 from .exceptions import AgentError, ConfigurationError, MaxIterationsExceeded, ModelError, RunCancelled
 from .providers.base import ModelProvider
 from .providers.openai_compatible import OpenAICompatibleProvider
@@ -193,11 +201,18 @@ class AgentRuntime:
 
         user_messages = normalize_input(input)
         session_id = session_id or uuid4().hex
-        context = ContextManager(self.config.system_prompt, self.config.max_history_messages)
+        context = ContextManager(
+            self.config.system_prompt,
+            self.config.max_history_messages,
+            tool_result_max_chars=self.config.tool_result_max_chars,
+        )
+        compressor = None
         new_messages: list[dict[str, Any]] = []
         tool_results: list[ToolResult] = []
         pending_calls: list[ToolCall] = []
         usage: dict[str, int] = {}
+        if self.config.context_max_tokens is not None:
+            compressor = ContextCompressor(self.config, self.provider, usage)
         iterations = 0
         stop_reason = "final"
         content: str | None = None
@@ -240,6 +255,20 @@ class AgentRuntime:
                 check_cancelled(iteration)
                 messages = context.build()
                 tool_specs = self.tools.specs()
+                if compressor is not None:
+                    # Tool schemas are part of the request; reserve their
+                    # estimated cost so compression applies to the messages
+                    # the model receives.
+                    tools_tokens = estimate_tokens(json.dumps(tool_specs, ensure_ascii=False, default=str))
+                    compressed = compressor.compress(messages, tools_tokens=tools_tokens)
+                    if compressed.changed:
+                        messages = compressed.messages
+                        self._emit(
+                            EventType.CONTEXT_COMPRESSED,
+                            session_id,
+                            iteration,
+                            compressed.stats,
+                        )
                 self._emit(
                     EventType.MODEL_REQUEST,
                     session_id,
@@ -296,6 +325,12 @@ class AgentRuntime:
                     )
                     result = self.tools.invoke(call, error_mode=self.config.tool_error_mode)
                     tool_results.append(result)
+                    # Events and the model view carry the capped copy; the
+                    # persisted message and RunResult keep the full result.
+                    view_content, truncated = truncate_text(
+                        result.content,
+                        self.config.tool_result_max_chars,
+                    )
                     self._emit(
                         EventType.TOOL_RESULT,
                         session_id,
@@ -303,7 +338,9 @@ class AgentRuntime:
                         {
                             "tool_call_id": result.tool_call_id,
                             "name": result.name,
-                            "content": result.content,
+                            "content": view_content,
+                            "truncated": truncated,
+                            "original_chars": len(result.content),
                             "is_error": result.is_error,
                             "status": "failed" if result.is_error else "completed",
                         },

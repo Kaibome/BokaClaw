@@ -152,6 +152,10 @@ def clean_agent_env(monkeypatch):
         "AGENT_LOOP_MAX_SECONDS",
         "AGENT_REQUEST_TIMEOUT_SECONDS",
         "AGENT_MAX_RETRIES",
+        "AGENT_CONTEXT_MAX_TOKENS",
+        "AGENT_CONTEXT_KEEP_RECENT_TOKENS",
+        "AGENT_CONTEXT_COMPRESSION",
+        "AGENT_TOOL_RESULT_MAX_CHARS",
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
         "DEEPSEEK_API_KEY",
@@ -281,6 +285,102 @@ def test_env_settings_are_applied(monkeypatch):
     assert config.max_iterations == 3
     assert config.max_seconds == 42
     assert config.system_prompt == "custom"
+
+
+def test_context_budgets_default_on_for_the_server(monkeypatch):
+    monkeypatch.setattr(agent_runtime, "_current_llm_config", lambda: {})
+    monkeypatch.setenv("AGENT_MODEL", "m")
+    monkeypatch.setenv("AGENT_API_KEY", "k")
+
+    config = agent_runtime.load_local_config()
+
+    assert config is not None
+    assert config.context_max_tokens == 32_000
+    assert config.context_keep_recent_tokens is None
+    assert config.context_compression == "summary"
+    assert config.tool_result_max_chars == 16_000
+
+
+def test_context_budgets_can_be_overridden(monkeypatch):
+    monkeypatch.setattr(agent_runtime, "_current_llm_config", lambda: {})
+    monkeypatch.setenv("AGENT_MODEL", "m")
+    monkeypatch.setenv("AGENT_API_KEY", "k")
+    monkeypatch.setenv("AGENT_CONTEXT_MAX_TOKENS", "8000")
+    monkeypatch.setenv("AGENT_CONTEXT_KEEP_RECENT_TOKENS", "2000")
+    monkeypatch.setenv("AGENT_CONTEXT_COMPRESSION", "truncate")
+    monkeypatch.setenv("AGENT_TOOL_RESULT_MAX_CHARS", "1000")
+
+    config = agent_runtime.load_local_config()
+
+    assert config is not None
+    assert config.context_max_tokens == 8000
+    assert config.context_keep_recent_tokens == 2000
+    assert config.context_compression == "truncate"
+    assert config.tool_result_max_chars == 1000
+
+
+@pytest.mark.parametrize("value", ["0", "off", "none", "disabled", "false"])
+def test_context_budgets_can_be_disabled(monkeypatch, value):
+    monkeypatch.setattr(agent_runtime, "_current_llm_config", lambda: {})
+    monkeypatch.setenv("AGENT_MODEL", "m")
+    monkeypatch.setenv("AGENT_API_KEY", "k")
+    monkeypatch.setenv("AGENT_CONTEXT_MAX_TOKENS", value)
+    monkeypatch.setenv("AGENT_TOOL_RESULT_MAX_CHARS", value)
+
+    config = agent_runtime.load_local_config()
+
+    assert config is not None
+    assert config.context_max_tokens is None
+    assert config.tool_result_max_chars is None
+
+
+def test_keep_recent_budget_is_clamped_for_a_valid_sdk_config(monkeypatch):
+    monkeypatch.setattr(agent_runtime, "_current_llm_config", lambda: {})
+    monkeypatch.setenv("AGENT_MODEL", "m")
+    monkeypatch.setenv("AGENT_API_KEY", "k")
+    monkeypatch.setenv("AGENT_CONTEXT_MAX_TOKENS", "1024")
+    monkeypatch.setenv("AGENT_CONTEXT_KEEP_RECENT_TOKENS", "5000")
+
+    config = agent_runtime.load_local_config()
+
+    assert config is not None
+    assert config.context_keep_recent_tokens == 768
+
+
+def test_negative_keep_recent_budget_is_clamped_to_zero(monkeypatch):
+    monkeypatch.setattr(agent_runtime, "_current_llm_config", lambda: {})
+    monkeypatch.setenv("AGENT_MODEL", "m")
+    monkeypatch.setenv("AGENT_API_KEY", "k")
+    monkeypatch.setenv("AGENT_CONTEXT_KEEP_RECENT_TOKENS", "-5")
+
+    config = agent_runtime.load_local_config()
+
+    assert config is not None
+    assert config.context_keep_recent_tokens == 0
+
+
+def test_unknown_compression_mode_falls_back_to_summary(monkeypatch):
+    monkeypatch.setattr(agent_runtime, "_current_llm_config", lambda: {})
+    monkeypatch.setenv("AGENT_MODEL", "m")
+    monkeypatch.setenv("AGENT_API_KEY", "k")
+    monkeypatch.setenv("AGENT_CONTEXT_COMPRESSION", "shrink")
+
+    config = agent_runtime.load_local_config()
+
+    assert config is not None
+    assert config.context_compression == "summary"
+
+
+def test_invalid_budget_value_falls_back_to_the_default(monkeypatch):
+    monkeypatch.setattr(agent_runtime, "_current_llm_config", lambda: {})
+    monkeypatch.setenv("AGENT_MODEL", "m")
+    monkeypatch.setenv("AGENT_API_KEY", "k")
+    monkeypatch.setenv("AGENT_CONTEXT_MAX_TOKENS", "lots")
+
+    config = agent_runtime.load_local_config()
+
+    assert config is not None
+    assert config.context_max_tokens == 32_000
 
 
 # ---- payload handling ---------------------------------------------------------
@@ -556,6 +656,24 @@ def test_build_runtime_registers_dev_tools_when_enabled(monkeypatch, tmp_path):
     assert {"Read", "Write", "Edit", "NotebookEdit", "Glob", "Grep", "WebFetch"} <= names
     assert "Bash" not in names
     assert "search_memories" not in names
+
+
+def test_build_runtime_forwards_context_settings():
+    sdk = FakeSDK()
+    config = _config(
+        context_max_tokens=8000,
+        context_keep_recent_tokens=2000,
+        context_compression="truncate",
+        tool_result_max_chars=1000,
+    )
+
+    agent_runtime.build_runtime(sdk, config, {"user_id": None, "message": "hi"})
+
+    kwargs = sdk.runtimes[0].config.kwargs
+    assert kwargs["context_max_tokens"] == 8000
+    assert kwargs["context_keep_recent_tokens"] == 2000
+    assert kwargs["context_compression"] == "truncate"
+    assert kwargs["tool_result_max_chars"] == 1000
 
 
 def test_available_sdk_with_config_is_configured(monkeypatch):

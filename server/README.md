@@ -175,6 +175,10 @@ JSON response instead. Requests are rate limited to 30/minute per IP.
 | `AGENT_MAX_TOKENS` | provider default | Max tokens per model call. |
 | `AGENT_REQUEST_TIMEOUT_SECONDS` | `60` | Timeout for one model call. |
 | `AGENT_MAX_RETRIES` | `2` | Model client retries. |
+| `AGENT_CONTEXT_MAX_TOKENS` | `32000` | Token budget for the in-process runtime's model view; `0` / `off` disables compression. |
+| `AGENT_CONTEXT_KEEP_RECENT_TOKENS` | half the budget | Recent tokens kept verbatim by compression. |
+| `AGENT_CONTEXT_COMPRESSION` | `summary` | `summary` (model summary, truncation fallback) or `truncate` (drop only). |
+| `AGENT_TOOL_RESULT_MAX_CHARS` | `16000` | Per-tool-result cap in the model view; full content is still stored. `0` / `off` disables it. |
 | `AGENT_DEV_TOOLS` | `true` | Register the developer tool set. |
 | `AGENT_WORKSPACE_ROOT` | `/app/workspace` | File tools cannot escape this directory. Created on first use. |
 | `AGENT_TOOLS_ALLOW_SHELL` | `false` | Register `Bash`, `PowerShell`, and `Monitor`. |
@@ -194,6 +198,10 @@ JSON response instead. Requests are rate limited to 30/minute per IP.
 | `AGENT_LOOP_READ_TIMEOUT_SECONDS` | `120` | Executor read timeout. |
 | `AGENT_LOOP_MAX_SECONDS` | `300` | Total wall clock for one turn. |
 | `AGENT_LOOP_HISTORY_MESSAGES` | `40` | Prior turns forwarded as context. |
+
+The `AGENT_CONTEXT_*` / `AGENT_TOOL_RESULT_*` variables apply only to the
+in-process runtime. A remote executor set through `AGENT_LOOP_URL` uses its own
+configuration.
 
 If no model can be resolved, `POST /agent` returns 503 `agent_not_configured`;
 set `AGENT_MODEL` (plus `AGENT_BASE_URL` for non-OpenAI providers). From inside

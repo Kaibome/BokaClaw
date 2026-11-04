@@ -199,6 +199,50 @@ from bokaclaw_agent import InMemorySessionStore
 runtime = AgentRuntime(config, provider=provider, tools=[get_weather], store=InMemorySessionStore())
 ```
 
+## Context compression and tool-result limits
+
+Long tool-using runs can outgrow the model window one iteration at a time.
+Four optional settings bound the model view; all are off by default in the SDK:
+
+| `AgentConfig` field | Default | Meaning |
+|---|---|---|
+| `context_max_tokens` | `None` (off) | Approximate token budget for one model request. When exceeded, older messages are folded into a rolling summary or dropped. |
+| `context_keep_recent_tokens` | `None` | Tokens kept verbatim; defaults to half the budget. Must stay at least 256 tokens below `context_max_tokens` when both are set. |
+| `context_compression` | `"summary"` | `"summary"` folds old messages with one model call; `"truncate"` only drops them. |
+| `tool_result_max_chars` | `None` (off) | Maximum characters of one tool result in the model view. Minimum 256. |
+
+```python
+config = AgentConfig(
+    context_max_tokens=32_000,
+    tool_result_max_chars=16_000,
+)
+```
+
+**Only the model view changes.** Compression and truncation run when the request
+is built, after history is loaded and before `MODEL_REQUEST` is emitted.
+`new_messages`, `RunResult.tool_results`, and everything written to a session
+store keep the full original content, so a later run can still work from it.
+
+- **Summary mode** keeps the system prompt, summarizes everything before the
+  recent window, and appends the summary to the system message. The summary
+  rolls forward: the next compression folds only newly dropped messages into
+  the previous summary. Summarization is best effort — a provider error,
+  empty reply, or too little content falls back to deterministic truncation,
+  and the run continues.
+- **Truncate mode** drops old messages at a safe boundary (never starting with
+  an orphaned `tool` message). The most recent user turn is always pinned, so a
+  single-user tool loop keeps its instruction.
+- **Hard fit**: if the view is still over budget (for example one oversized
+  message), the largest non-system messages get head/tail truncation with a
+  `\n... [truncated] ...\n` marker, matching the server's tool-trace convention.
+- Tool results longer than `tool_result_max_chars` are capped the same way. The
+  `TOOL_RESULT` event carries `truncated` and `original_chars` alongside the
+  view content, so observers can tell the difference.
+
+When the server runs the agent in-process, compression is on by default at
+32,000 tokens with 16,000-character tool results; see
+[Server configuration](#server-configuration) to change or disable it.
+
 ## Postgres configuration
 
 `PostgresConfig.from_env()` reads the same variables as the BokaClaw server:
@@ -248,14 +292,17 @@ def on_event(event):
 runtime = AgentRuntime(config, provider=provider, on_event=on_event)
 ```
 
-Events: `run_started`, `model_request`, `model_response`, `tool_call`, `tool_result`, `run_ended`, `error`. Callback exceptions are logged and never interrupt a run.
+Events: `run_started`, `model_request`, `model_response`, `tool_call`, `tool_result`, `context_compressed`, `run_ended`, `error`. Callback exceptions are logged and never interrupt a run.
+
+`context_compressed` is emitted only when a request was actually rewritten, immediately before the matching `model_request`. Its `data` is `{before_tokens, after_tokens, dropped_messages, summarized, fallback}`. The `seq` rule below applies to it like every other event.
 
 Every `AgentEvent` carries a `seq` that starts at `1` for each run and increases monotonically (`run_started` is 1; `run_ended` or `error` is last). Sequence numbers are allocated by this SDK and are independent of any server-side event sequence.
 
 ## v1 limits
 
 - `stream()` forwards text from the final answer; tool-call rounds produce no text.
-- No token counting or automatic summarisation; only message-count truncation on resume.
+- No tokenizer dependency: the context budget uses a conservative character-based estimate over messages only (tool schemas are deducted separately).
+- Context compression is opt-in in the SDK (`context_max_tokens` / `tool_result_max_chars` are `None` by default); `max_history_messages` still provides message-count truncation on resume.
 - Tool calls returned in one model turn are executed sequentially, in order.
 - One active run per session is recommended. Concurrent writers are serialised by a row lock and `UNIQUE(session_id, seq)`, but turn ordering is not guaranteed.
 - Text content only; multimodal `content` parts are not supported.
@@ -367,6 +414,14 @@ closing the request cancels the upstream turn.
 | `AGENT_LOOP_READ_TIMEOUT_SECONDS` | `120` | Read timeout. |
 | `AGENT_LOOP_MAX_SECONDS` | `300` | Total wall clock for one turn. |
 | `AGENT_LOOP_HISTORY_MESSAGES` | `40` | Prior turns forwarded as context. |
+| `AGENT_CONTEXT_MAX_TOKENS` | `32000` | In-process runtime token budget; `0` / `off` disables compression. |
+| `AGENT_CONTEXT_KEEP_RECENT_TOKENS` | — | Recent tokens kept verbatim; empty uses half the budget. |
+| `AGENT_CONTEXT_COMPRESSION` | `summary` | `summary` or `truncate`; anything else falls back to `summary`. |
+| `AGENT_TOOL_RESULT_MAX_CHARS` | `16000` | In-process runtime tool-result cap; `0` / `off` disables it. |
+
+The `AGENT_CONTEXT_*` / `AGENT_TOOL_RESULT_*` variables apply only when the
+server runs this package in-process; they are not part of the remote `/invoke`
+contract.
 
 From inside the compose network, a wrapper running on the host is reachable
 at `http://host.docker.internal:<port>`.
