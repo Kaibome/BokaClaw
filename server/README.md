@@ -242,12 +242,15 @@ user (`kind="research_conclusion"`, written with `infer=False` so nothing is
 paraphrased). An identical question updates that memory instead of appending a
 duplicate.
 
-Before a turn, the in-process runtime searches those memories with the current
-message. Conclusions that are older than `AGENT_RESEARCH_MEMORY_TTL_DAYS` or
-below `AGENT_RESEARCH_MEMORY_MIN_SCORE` are dropped; the rest are added to the
-system prompt with their age and an explicit instruction to re-verify facts
-that may have changed. The block is view-only and is not persisted as a
-message. Memory failures never fail the turn.
+Before a turn, the in-process runtime looks up an identical question by its
+stable key, then searches those memories by similarity for other phrasings.
+The exact lookup matters because a long stored conclusion can score below the
+similarity floor against its own question; the vector floor then separates
+paraphrases from unrelated questions. Matches older than
+`AGENT_RESEARCH_MEMORY_TTL_DAYS` or below `AGENT_RESEARCH_MEMORY_MIN_SCORE` are
+dropped; the rest are added to the system prompt with their age and an explicit
+instruction to re-verify facts that may have changed. The block is view-only
+and is not persisted as a message. Memory failures never fail the turn.
 
 This half applies to the in-process runtime only; a remote executor does not
 receive the block. Saving, however, runs for any completed turn whose trace

@@ -317,5 +317,84 @@ def test_prior_research_block_failure_is_swallowed(monkeypatch):
     assert rm.prior_research_block("user-1", "question") == ""
 
 
+def test_identical_question_is_found_without_a_vector_hit(monkeypatch):
+    key = rm.question_key("Which Qwen model is best for personal developers?")
+    fresh = _now() - timedelta(days=1)
+    memory = FakeMemory(
+        all_results=[
+            {
+                "id": "mem-exact",
+                "memory": "Saved conclusion.",
+                "created_at": fresh.isoformat(),
+                "metadata": {
+                    "kind": rm.RESEARCH_KIND,
+                    "question_key": key,
+                    "captured_at": fresh.isoformat(),
+                },
+            }
+        ]
+    )
+    _install_memory(monkeypatch, memory)
+
+    block = rm.prior_research_block(
+        "user-1",
+        "Which Qwen model is best for personal developers?",
+        ttl_days=30,
+        min_score=0.5,
+        top_k=1,
+    )
+
+    assert "Saved conclusion." in block
+    assert memory.get_all_calls[0]["filters"]["question_key"] == key
+    assert memory.search_calls == []
+
+
+def test_identical_question_match_still_respects_the_ttl(monkeypatch):
+    key = rm.question_key("Which Qwen model is best for personal developers?")
+    stale = _now() - timedelta(days=60)
+    memory = FakeMemory(
+        all_results=[
+            {
+                "id": "mem-stale",
+                "memory": "Stale conclusion.",
+                "created_at": stale.isoformat(),
+                "metadata": {
+                    "kind": rm.RESEARCH_KIND,
+                    "question_key": key,
+                    "captured_at": stale.isoformat(),
+                },
+            }
+        ]
+    )
+    _install_memory(monkeypatch, memory)
+
+    block = rm.prior_research_block(
+        "user-1",
+        "Which Qwen model is best for personal developers?",
+        ttl_days=30,
+        top_k=1,
+    )
+
+    assert block == ""
+
+
+def test_exact_and_vector_matches_are_not_duplicated(monkeypatch):
+    key = rm.question_key("a question")
+    fresh = _now() - timedelta(days=1)
+    item = {
+        "id": "mem-1",
+        "memory": "Saved conclusion.",
+        "score": 0.9,
+        "created_at": fresh.isoformat(),
+        "metadata": {"kind": rm.RESEARCH_KIND, "question_key": key, "captured_at": fresh.isoformat()},
+    }
+    memory = FakeMemory(search_results=[item], all_results=[item])
+    _install_memory(monkeypatch, memory)
+
+    block = rm.prior_research_block("user-1", "a question", ttl_days=30, min_score=0.5)
+
+    assert block.count("Saved conclusion.") == 1
+
+
 def test_question_key_ignores_case_and_whitespace():
     assert rm.question_key("  Same   Question ") == rm.question_key("same question")

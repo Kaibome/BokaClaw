@@ -10,10 +10,11 @@ otherwise starts from zero. This module has two halves:
   are labeled ``kind="research_conclusion"`` and written with ``infer=False``
   so the conclusion and its sources are preserved verbatim. An identical
   question updates the existing memory instead of appending a duplicate.
-* ``prior_research_block`` runs before a turn. It searches those labeled
-  memories for the new question, drops anything older than the TTL, and renders
-  a short block for the system prompt. The block tells the model that the
-  conclusion may be stale and that re-verification is allowed.
+* ``prior_research_block`` runs before a turn. It first looks up an identical
+  question by its stable key, then searches by similarity for paraphrases,
+  drops anything older than the TTL, and renders a short block for the system
+  prompt. The block tells the model that the conclusion may be stale and that
+  re-verification is allowed.
 
 Both halves are best-effort: memory being unavailable or slow must never fail
 the turn. The caller can disable the feature with ``AGENT_RESEARCH_MEMORY``.
@@ -226,43 +227,36 @@ def prior_research_block(
     if memory is None:
         return ""
 
+    limit = max(1, top_k)
+    now = datetime.now(timezone.utc)
+    fresh: List[Dict[str, Any]] = []
+    seen: set = set()
+
+    # An identical question is a certain match, so try the stable question key
+    # first. Its vector score is not reliable: a long stored conclusion can sit
+    # below the threshold even when the question is word-for-word the same.
+    for item in _exact_matches(memory, user_id, question_key(question)):
+        _append_fresh(fresh, seen, item, now=now, ttl=ttl)
+        if len(fresh) >= limit:
+            return _render_block(fresh)
+
+    # Different phrasings are found by similarity. Here the floor does real
+    # work: unrelated Chinese questions can score around 0.4 against a stored
+    # conclusion, so the default 0.5 keeps them out while paraphrases pass.
     try:
         response = memory.search(
             query=question,
             filters={"user_id": user_id, "kind": RESEARCH_KIND},
-            top_k=max(1, top_k),
+            top_k=limit,
             threshold=max(0.0, score_floor - 0.1),
         )
     except Exception:
         logger.warning("Failed to search research memories for user %s", user_id, exc_info=True)
-        return ""
+        return _render_block(fresh)
 
-    items = _results(response)
-    if not items:
-        return ""
-
-    now = datetime.now(timezone.utc)
-    fresh: List[Dict[str, Any]] = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-        if metadata.get("kind") != RESEARCH_KIND:
-            continue
-        score = _float(item.get("score"), 1.0)
-        if score < score_floor:
-            continue
-        captured = _parse_datetime(metadata.get("captured_at") or item.get("created_at"))
-        if captured is None:
-            continue
-        age_days = max(0.0, (now - captured).total_seconds() / 86_400)
-        if age_days > ttl:
-            continue
-        text = str(item.get("memory") or "").strip()
-        if not text:
-            continue
-        fresh.append({"text": text, "captured_at": captured, "age_days": age_days})
-        if len(fresh) >= max(1, top_k):
+    for item in _results(response):
+        _append_fresh(fresh, seen, item, now=now, ttl=ttl, score_floor=score_floor)
+        if len(fresh) >= limit:
             break
 
     return _render_block(fresh)
@@ -295,22 +289,85 @@ def _render_block(items: List[Dict[str, Any]]) -> str:
 
 
 def _find_existing(memory: Any, user_id: str, key: str) -> Optional[str]:
+    for item in _exact_matches(memory, user_id, key):
+        if item.get("id"):
+            return str(item["id"])
+    return None
+
+
+def _exact_matches(memory: Any, user_id: str, key: str) -> List[Dict[str, Any]]:
+    """Return memories whose metadata proves they are this question's conclusion."""
+
     try:
         response = memory.get_all(
             filters={"user_id": user_id, "kind": RESEARCH_KIND, "question_key": key},
             top_k=5,
         )
     except Exception:
-        return None
+        return []
+
+    matches: List[Dict[str, Any]] = []
     for item in _results(response):
-        if not isinstance(item, dict) or not item.get("id"):
+        if not isinstance(item, dict):
             continue
-        # Some vector stores ignore metadata filters; never update a memory that
+        # Some vector stores ignore metadata filters; never trust an item that
         # is not provably this question's conclusion.
         metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
         if metadata.get("kind") == RESEARCH_KIND and metadata.get("question_key") == key:
-            return str(item["id"])
-    return None
+            matches.append(item)
+    return matches
+
+
+def _append_fresh(
+    fresh: List[Dict[str, Any]],
+    seen: set,
+    item: Any,
+    *,
+    now: datetime,
+    ttl: int,
+    score_floor: Optional[float] = None,
+) -> None:
+    entry = _fresh_entry(item, now=now, ttl=ttl, score_floor=score_floor)
+    if entry is None:
+        return
+    key = entry["id"] or entry["text"][:80]
+    if key in seen:
+        return
+    seen.add(key)
+    fresh.append(entry)
+
+
+def _fresh_entry(
+    item: Any,
+    *,
+    now: datetime,
+    ttl: int,
+    score_floor: Optional[float] = None,
+) -> Optional[Dict[str, Any]]:
+    """Validate one memory item and turn it into a renderable conclusion."""
+
+    if not isinstance(item, dict):
+        return None
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    if metadata.get("kind") != RESEARCH_KIND:
+        return None
+    if score_floor is not None and _float(item.get("score"), 1.0) < score_floor:
+        return None
+    captured = _parse_datetime(metadata.get("captured_at") or item.get("created_at"))
+    if captured is None:
+        return None
+    age_days = max(0.0, (now - captured).total_seconds() / 86_400)
+    if age_days > ttl:
+        return None
+    text = str(item.get("memory") or "").strip()
+    if not text:
+        return None
+    return {
+        "id": str(item.get("id") or ""),
+        "text": text,
+        "captured_at": captured,
+        "age_days": age_days,
+    }
 
 
 def _memory() -> Any:
