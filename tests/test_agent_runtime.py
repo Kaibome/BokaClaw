@@ -693,10 +693,25 @@ def test_build_runtime_forwards_context_settings():
     assert kwargs["tool_result_max_chars"] == 1000
 
 
-def test_context_debug_is_silent_by_default(monkeypatch, caplog):
+def test_context_debug_is_on_by_default(monkeypatch, caplog):
     monkeypatch.setattr(agent_runtime, "_current_llm_config", lambda: {})
     monkeypatch.setenv("AGENT_MODEL", "test-model")
     monkeypatch.setenv("AGENT_API_KEY", "test-key")
+    config = agent_runtime.load_local_config()
+
+    with caplog.at_level("INFO", logger="app.agent.context"):
+        agent_runtime.build_runtime(FakeSDK(), config, {"user_id": None, "message": "hi"})
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert len(messages) == 1
+    assert "agent context config:" in messages[0]
+
+
+def test_context_debug_can_be_disabled(monkeypatch, caplog):
+    monkeypatch.setattr(agent_runtime, "_current_llm_config", lambda: {})
+    monkeypatch.setenv("AGENT_MODEL", "test-model")
+    monkeypatch.setenv("AGENT_API_KEY", "test-key")
+    monkeypatch.setenv("AGENT_CONTEXT_DEBUG", "0")
     config = agent_runtime.load_local_config()
 
     with caplog.at_level("INFO", logger="app.agent.context"):

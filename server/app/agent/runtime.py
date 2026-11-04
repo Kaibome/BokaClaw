@@ -107,16 +107,19 @@ def _env_compression_mode(name: str, default: str = "summary") -> str:
 
 
 _CONTEXT_DEBUG_ENV = "AGENT_CONTEXT_DEBUG"
+_CONTEXT_DEBUG_OFF = {"0", "false", "no", "off"}
 _context_logger = logging.getLogger("app.agent.context")
 
 
 def _context_debug(message: str, *args: Any) -> None:
-    """Log context-compression diagnostics when ``AGENT_CONTEXT_DEBUG`` is on.
+    """Log context-compression diagnostics unless ``AGENT_CONTEXT_DEBUG`` is off.
 
-    ``app.main`` already configures INFO logging for the server; the fallback keeps
-    these lines visible when this module is imported without it (CLI, scripts).
+    Diagnostics are on by default; set ``AGENT_CONTEXT_DEBUG=0`` (or ``false`` /
+    ``no`` / ``off``) to silence them. ``app.main`` already configures INFO
+    logging for the server; the fallback keeps these lines visible when this
+    module is imported without it (CLI, scripts).
     """
-    if (os.environ.get(_CONTEXT_DEBUG_ENV) or "").strip().lower() not in {"1", "true", "yes", "on"}:
+    if (os.environ.get(_CONTEXT_DEBUG_ENV) or "").strip().lower() in _CONTEXT_DEBUG_OFF:
         return
     if not logging.getLogger().handlers:
         logging.basicConfig(level=logging.INFO)
