@@ -189,6 +189,54 @@ class AgentRunEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
+SPAN_TYPES = ("agent", "llm", "tool")
+SPAN_STATUSES = ("running", "completed", "failed", "aborted", "interrupted")
+
+
+class AgentRunSpan(Base):
+    __tablename__ = "agent_run_spans"
+    __table_args__ = (
+        UniqueConstraint("run_id", "span_id", name="uq_agent_run_spans_run_span"),
+        CheckConstraint(
+            "span_type IN ('agent', 'llm', 'tool')",
+            name="ck_agent_run_spans_type",
+        ),
+        CheckConstraint(
+            "status IN ('running', 'completed', 'failed', 'aborted', 'interrupted')",
+            name="ck_agent_run_spans_status",
+        ),
+        Index("ix_agent_run_spans_run_started", "run_id", "started_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), primary_key=True)
+    run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("agent_runs.id", ondelete="CASCADE"))
+    span_id: Mapped[str] = mapped_column(String(128))
+    parent_span_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    span_type: Mapped[str] = mapped_column(String(16))
+    name: Mapped[str] = mapped_column(String(255))
+    status: Mapped[str] = mapped_column(String(20), default="running", server_default="running")
+    iteration: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    input: Mapped[dict] = mapped_column(
+        JSONB,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+    )
+    output: Mapped[dict] = mapped_column(
+        JSONB,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+    )
+    attributes: Mapped[dict] = mapped_column(
+        JSONB,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+    )
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class ConversationMessage(Base):
     __tablename__ = "conversation_messages"
     __table_args__ = (

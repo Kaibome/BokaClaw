@@ -1022,7 +1022,7 @@ def test_context_debug_logs_the_resolved_budget(monkeypatch, caplog):
     assert "tool_result_max_chars=16000" in messages[0]
 
 
-def test_context_debug_logs_compression_events_without_forwarding(monkeypatch, caplog):
+def test_context_debug_logs_compression_events_and_forwards_span(monkeypatch, caplog):
     monkeypatch.setenv("AGENT_CONTEXT_DEBUG", "1")
     forwarded = []
     event = types.SimpleNamespace(
@@ -1039,15 +1039,45 @@ def test_context_debug_logs_compression_events_without_forwarding(monkeypatch, c
     )
 
     with caplog.at_level("INFO", logger="app.agent.context"):
-        agent_runtime._bridge_tool_event(event, lambda kind, value=None: forwarded.append(kind))
+        agent_runtime._bridge_event(event, lambda kind, value=None: forwarded.append(kind))
 
-    assert forwarded == []
+    assert forwarded == ["span_context_compressed"]
     messages = [record.getMessage() for record in caplog.records]
     assert len(messages) == 1
     assert "context_compressed session=conv-1 iteration=6" in messages[0]
     assert "before_tokens=34000" in messages[0]
     assert "after_tokens=16000" in messages[0]
     assert "summarized=True" in messages[0]
+
+
+def test_model_request_span_captures_full_prompt_by_default(monkeypatch):
+    monkeypatch.delenv("AGENT_SPAN_PROMPT_MODE", raising=False)
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "hi"},
+    ]
+    data = {"messages": messages, "tools": [{"type": "function", "function": {"name": "Bash"}}]}
+
+    event = agent_runtime._model_request_event(data, 3, model="deepseek-flash", seq=7)
+
+    assert event.prompt == messages
+    # Snapshot, not a reference: the SDK keeps appending to its own list.
+    assert event.prompt[0] is not messages[0]
+    assert event.message_count == 2
+    assert event.roles == ["system", "user"]
+    assert event.model == "deepseek-flash"
+    assert event.seq == 7
+
+
+def test_model_request_span_can_store_summary_only(monkeypatch):
+    monkeypatch.setenv("AGENT_SPAN_PROMPT_MODE", "summary")
+    data = {"messages": [{"role": "user", "content": "hi"}]}
+
+    event = agent_runtime._model_request_event(data, 1)
+
+    assert event.prompt is None
+    assert event.message_count == 1
+    assert event.roles == ["user"]
 
 
 def test_available_sdk_with_config_is_configured(monkeypatch):

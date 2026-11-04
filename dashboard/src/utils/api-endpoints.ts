@@ -27,6 +27,11 @@ export const REQUEST_ENDPOINTS = {
   BASE: "/requests",
 } as const;
 
+export const TRACE_ENDPOINTS = {
+  BASE: "/traces",
+  BY_ID: (spanId: number) => `/traces/${spanId}`,
+} as const;
+
 export const ENTITY_ENDPOINTS = {
   BASE: "/entities",
   BY_ID: (type: string, id: string) =>

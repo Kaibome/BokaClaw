@@ -10,6 +10,7 @@ The SDK is optional at import time so the server can still start (and use
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -22,9 +23,15 @@ from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Tuple
 from app.agent.dev_tools import build_dev_tools
 from app.agent.events import (
     AgentCompleted,
+    AgentContextCompressed,
     AgentDelta,
+    AgentError,
     AgentEvent,
     AgentLoopError,
+    AgentModelRequest,
+    AgentModelResponse,
+    AgentRunEnded,
+    AgentRunStarted,
     AgentToolCall,
     AgentToolResult,
 )
@@ -397,32 +404,150 @@ def _memory_tools(sdk, user_id: Optional[str]):
 
 
 _TOOL_TERMINAL_STATUSES = {"completed", "failed", "aborted"}
+_SPAN_PROMPT_MODES = {"summary", "full"}
 
 
-def _bridge_tool_event(event: Any, put: Callable[[str, Any], None]) -> None:
-    """Map one SDK event to an ``AgentToolCall`` / ``AgentToolResult``.
+def _span_capture_enabled() -> bool:
+    raw = os.environ.get("AGENT_SPAN_CAPTURE")
+    if raw is None:
+        return True
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
-    Runs on the SDK worker thread, so it only calls ``put``; the queue write is
-    hopped back to the event loop by ``stream_local_agent``. ``context_compressed``
-    events are diagnostics only: they are logged when ``AGENT_CONTEXT_DEBUG`` is
-    on and never forwarded to the client.
+
+def _span_prompt_mode() -> str:
+    raw = (os.environ.get("AGENT_SPAN_PROMPT_MODE") or "full").strip().lower()
+    return raw if raw in _SPAN_PROMPT_MODES else "full"
+
+
+def _message_hash(message: Any) -> str:
+    encoded = json.dumps(message, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
+
+
+def _iteration(event: Any, data: dict[str, Any]) -> int:
+    iteration = data.get("iteration") or getattr(event, "iteration", 0)
+    try:
+        return int(iteration)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _model_request_event(
+    data: dict[str, Any],
+    iteration: int,
+    model: str | None = None,
+    seq: int | None = None,
+) -> AgentModelRequest:
+    """Describe a prompt without copying it unless full capture is enabled.
+
+    ``messages`` belongs to the SDK and is appended to after the event fires,
+    so a full prompt must be snapshotted here rather than referenced later.
+    """
+    messages = data.get("messages")
+    messages = messages if isinstance(messages, list) else []
+    roles = [str(message.get("role") or "unknown") if isinstance(message, dict) else "unknown" for message in messages]
+    tools = data.get("tools")
+    prompt = None
+    if _span_prompt_mode() == "full":
+        prompt = [dict(message) if isinstance(message, dict) else {"content": str(message)} for message in messages]
+    return AgentModelRequest(
+        iteration=iteration,
+        message_count=len(messages),
+        roles=roles,
+        last_message_hash=_message_hash(messages[-1]) if messages else None,
+        tools=[tool for tool in tools if isinstance(tool, dict)] if isinstance(tools, list) else [],
+        prompt=prompt,
+        model=model,
+        seq=seq,
+    )
+
+
+def _bridge_event(event: Any, put: Callable[[str, Any], None], *, model: str | None = None) -> None:
+    """Map one SDK event onto the executor's event stream.
+
+    Tool events keep their existing SSE-visible kinds. The remaining SDK events
+    are forwarded only when span capture is enabled; the runner turns them into
+    ``agent_run_spans`` rows without touching ``agent_run_events``.
     """
     event_type = getattr(getattr(event, "type", None), "value", getattr(event, "type", None))
+    data = getattr(event, "data", None) or {}
+    if not isinstance(data, dict):
+        data = {}
+
     if event_type == "context_compressed":
-        stats = getattr(event, "data", None) or {}
-        if isinstance(stats, dict):
-            _context_debug(
-                "context_compressed session=%s iteration=%s before_tokens=%s after_tokens=%s "
-                "dropped_messages=%s summarized=%s fallback=%s",
-                getattr(event, "session_id", "-"),
-                getattr(event, "iteration", 0),
-                stats.get("before_tokens"),
-                stats.get("after_tokens"),
-                stats.get("dropped_messages"),
-                stats.get("summarized"),
-                stats.get("fallback"),
+        for_debug = data
+        _context_debug(
+            "context_compressed session=%s iteration=%s before_tokens=%s after_tokens=%s "
+            "dropped_messages=%s summarized=%s fallback=%s",
+            getattr(event, "session_id", "-"),
+            getattr(event, "iteration", 0),
+            for_debug.get("before_tokens"),
+            for_debug.get("after_tokens"),
+            for_debug.get("dropped_messages"),
+            for_debug.get("summarized"),
+            for_debug.get("fallback"),
+        )
+        if _span_capture_enabled():
+            put(
+                "span_context_compressed",
+                AgentContextCompressed(
+                    iteration=_iteration(event, data),
+                    stats=dict(for_debug),
+                ),
             )
         return
+
+    if event_type in {"run_started", "model_request", "model_response", "run_ended", "error"}:
+        if not _span_capture_enabled():
+            return
+        iteration = _iteration(event, data)
+        seq = getattr(event, "seq", None)
+        try:
+            seq = int(seq) if seq is not None else None
+        except (TypeError, ValueError):
+            seq = None
+        if event_type == "run_started":
+            value = data.get("input")
+            put(
+                "span_run_started",
+                AgentRunStarted(input=value if isinstance(value, dict) else {"input": value}),
+            )
+        elif event_type == "model_request":
+            put("span_model_request", _model_request_event(data, iteration, model=model, seq=seq))
+        elif event_type == "model_response":
+            tool_calls = data.get("tool_calls")
+            content = data.get("content")
+            finish_reason = data.get("finish_reason")
+            put(
+                "span_model_response",
+                AgentModelResponse(
+                    iteration=iteration,
+                    content=content if isinstance(content, str) else "",
+                    tool_calls=[call for call in tool_calls if isinstance(call, dict)]
+                    if isinstance(tool_calls, list)
+                    else [],
+                    finish_reason=finish_reason if isinstance(finish_reason, str) else None,
+                    seq=seq,
+                ),
+            )
+        elif event_type == "run_ended":
+            stop_reason = data.get("stop_reason")
+            put(
+                "span_run_ended",
+                AgentRunEnded(stop_reason=stop_reason if isinstance(stop_reason, str) else None),
+            )
+        else:
+            error = data.get("error")
+            error_type = data.get("type")
+            put(
+                "span_error",
+                AgentError(
+                    error=str(error) if error is not None else "Agent failed.",
+                    type=error_type if isinstance(error_type, str) else None,
+                ),
+            )
+        return
+
     if event_type not in {"tool_call", "tool_result"}:
         return
 
@@ -436,11 +561,7 @@ def _bridge_tool_event(event: Any, put: Callable[[str, Any], None]) -> None:
     if not isinstance(name, str) or not name:
         return
 
-    iteration = data.get("iteration") or getattr(event, "iteration", 0)
-    try:
-        iteration = int(iteration)
-    except (TypeError, ValueError):
-        iteration = 0
+    iteration = _iteration(event, data)
 
     if event_type == "tool_call":
         arguments = data.get("arguments")
@@ -614,7 +735,7 @@ async def stream_local_agent(
             pass
 
     def on_event(event: Any) -> None:
-        _bridge_tool_event(event, put)
+        _bridge_event(event, put, model=getattr(config, "model", None))
 
     runtime = build_runtime(sdk, config, payload, on_event=on_event)
 
@@ -701,9 +822,16 @@ async def stream_local_agent(
                 yield AgentDelta(value)
             elif kind == "completed":
                 yield AgentCompleted(metadata=_completion_metadata(payload, value))
-            elif kind == "tool_call":
+            elif kind in {"tool_call", "tool_result"}:
                 yield value
-            elif kind == "tool_result":
+            elif kind in {
+                "span_run_started",
+                "span_model_request",
+                "span_model_response",
+                "span_context_compressed",
+                "span_run_ended",
+                "span_error",
+            }:
                 yield value
             elif kind == "error":
                 raise value

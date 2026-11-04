@@ -50,4 +50,64 @@ class AgentToolResult:
     duration_ms: int | None = None
 
 
-AgentEvent = AgentDelta | AgentCompleted | AgentToolCall | AgentToolResult
+@dataclass
+class AgentRunStarted:
+    """The SDK entered one ReAct run."""
+
+    input: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class AgentModelRequest:
+    """One model call, captured before the prompt is mutated by later turns."""
+
+    iteration: int = 0
+    message_count: int = 0
+    roles: list[str] = field(default_factory=list)
+    last_message_hash: str | None = None
+    tools: list[dict[str, Any]] = field(default_factory=list)
+    prompt: list[dict[str, Any]] | None = None
+    model: str | None = None
+    seq: int | None = None
+
+
+@dataclass
+class AgentModelResponse:
+    iteration: int = 0
+    content: str = ""
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    finish_reason: str | None = None
+    seq: int | None = None
+
+
+@dataclass
+class AgentContextCompressed:
+    iteration: int = 0
+    stats: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class AgentRunEnded:
+    stop_reason: str | None = None
+
+
+@dataclass
+class AgentError:
+    """The SDK-reported failure, before the bridge converts it to AgentLoopError."""
+
+    error: str
+    type: str | None = None
+
+
+AgentEvent = (
+    AgentDelta
+    | AgentCompleted
+    | AgentToolCall
+    | AgentToolResult
+    | AgentRunStarted
+    | AgentModelRequest
+    | AgentModelResponse
+    | AgentContextCompressed
+    | AgentRunEnded
+    | AgentError
+)

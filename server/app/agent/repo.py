@@ -13,7 +13,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import Integer, case, cast, delete, func, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 
 from app.core.db import SessionLocal
@@ -21,6 +22,7 @@ from app.models import (
     TERMINAL_RUN_STATUSES,
     AgentRun,
     AgentRunEvent,
+    AgentRunSpan,
     Conversation,
     ConversationMessage,
 )
@@ -297,6 +299,123 @@ class RunRepository:
                 return db.get(ConversationMessage, message_id)
             return message
 
+    def upsert_span(
+        self,
+        run_id: uuid.UUID | str,
+        *,
+        span_id: str,
+        span_type: str,
+        name: str,
+        parent_span_id: str | None = None,
+        status: str = "running",
+        iteration: int | None = None,
+        started_at: datetime | None = None,
+        ended_at: datetime | None = None,
+        duration_ms: int | None = None,
+        input: dict[str, Any] | None = None,
+        output: dict[str, Any] | None = None,
+        attributes: dict[str, Any] | None = None,
+        error: str | None = None,
+    ) -> bool:
+        """Write a full span snapshot, keyed by ``(run_id, span_id)``.
+
+        Callers keep the span state in memory and pass the whole snapshot on
+        every event, so a conflicting insert simply replaces the row. Returns
+        False when the run has been deleted (the FK would otherwise fail).
+        """
+        now = utcnow()
+        values: dict[str, Any] = {
+            "run_id": _uuid(run_id),
+            "span_id": span_id,
+            "parent_span_id": parent_span_id,
+            "span_type": span_type,
+            "name": name,
+            "status": status,
+            "iteration": iteration,
+            "started_at": started_at or now,
+            "ended_at": ended_at,
+            "duration_ms": duration_ms,
+            "input": input or {},
+            "output": output or {},
+            "attributes": attributes or {},
+            "error": error,
+        }
+        # ``None`` means "the caller did not supply this field", not "clear it":
+        # finalize passes input=None so the request snapshot survives.
+        supplied = {
+            "started_at": started_at,
+            "ended_at": ended_at,
+            "duration_ms": duration_ms,
+            "input": input,
+            "output": output,
+            "attributes": attributes,
+            "error": error,
+        }
+        update_columns = {
+            key: value
+            for key, value in values.items()
+            if key not in {"run_id", "span_id"} and supplied.get(key, True) is not None
+        }
+        statement = pg_insert(AgentRunSpan).values(**values)
+        terminal = ("completed", "failed", "aborted", "interrupted")
+        update_columns["status"] = case(
+            (AgentRunSpan.status.in_(terminal), AgentRunSpan.status),
+            else_=statement.excluded.status,
+        )
+        # A late duplicate event must not reopen a settled span or erase its end.
+        update_columns["ended_at"] = case(
+            (AgentRunSpan.status.in_(terminal), AgentRunSpan.ended_at),
+            else_=statement.excluded.ended_at,
+        )
+        update_columns["duration_ms"] = case(
+            (AgentRunSpan.status.in_(terminal), AgentRunSpan.duration_ms),
+            else_=statement.excluded.duration_ms,
+        )
+        with SessionLocal() as db:
+            statement = statement.on_conflict_do_update(
+                constraint="uq_agent_run_spans_run_span",
+                set_=update_columns,
+            )
+            try:
+                db.execute(statement)
+                db.commit()
+            except IntegrityError:
+                db.rollback()
+                return False
+            return True
+
+    def list_spans(self, run_id: uuid.UUID | str) -> list[AgentRunSpan]:
+        with SessionLocal() as db:
+            return list(
+                db.scalars(
+                    select(AgentRunSpan)
+                    .where(AgentRunSpan.run_id == _uuid(run_id))
+                    .order_by(AgentRunSpan.started_at.asc(), AgentRunSpan.id.asc())
+                ).all()
+            )
+
+    def settle_open_spans(
+        self,
+        run_id: uuid.UUID | str,
+        status: str,
+        *,
+        ended_at: datetime | None = None,
+    ) -> int:
+        """Close every span still marked running for one run."""
+        now = ended_at or utcnow()
+        with SessionLocal() as db:
+            result = db.execute(
+                update(AgentRunSpan)
+                .where(AgentRunSpan.run_id == _uuid(run_id), AgentRunSpan.status == "running")
+                .values(
+                    status=status,
+                    ended_at=now,
+                    duration_ms=cast(func.extract("epoch", now - AgentRunSpan.started_at) * 1000, Integer),
+                )
+            )
+            db.commit()
+            return result.rowcount or 0
+
     def prune_events(self, *, retention_days: int) -> int:
         cutoff = utcnow() - timedelta(days=retention_days)
         with SessionLocal() as db:
@@ -322,6 +441,28 @@ class RunRepository:
                     AgentRun.status.in_(TERMINAL_RUN_STATUSES),
                     AgentRun.finished_at.is_not(None),
                     AgentRun.finished_at < cutoff,
+                )
+            )
+            db.commit()
+            return result.rowcount or 0
+
+    def prune_spans(self, *, retention_days: int) -> int:
+        """Delete spans for terminal runs older than the cutoff.
+
+        Spans also disappear through the ``agent_runs`` cascade, so span
+        retention can never exceed run retention.
+        """
+        cutoff = utcnow() - timedelta(days=retention_days)
+        with SessionLocal() as db:
+            result = db.execute(
+                delete(AgentRunSpan).where(
+                    AgentRunSpan.run_id.in_(
+                        select(AgentRun.id).where(
+                            AgentRun.status.in_(TERMINAL_RUN_STATUSES),
+                            AgentRun.finished_at.is_not(None),
+                            AgentRun.finished_at < cutoff,
+                        )
+                    )
                 )
             )
             db.commit()

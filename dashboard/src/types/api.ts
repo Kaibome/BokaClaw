@@ -75,6 +75,36 @@ export interface AgentRun {
   finished_at: string | null;
 }
 
+export type SpanType = "agent" | "llm" | "tool";
+
+export type SpanStatus =
+  | "running"
+  | "completed"
+  | "failed"
+  | "aborted"
+  | "interrupted";
+
+export interface AgentRunSpanSummary {
+  id: number;
+  run_id: string;
+  span_id: string;
+  parent_span_id: string | null;
+  span_type: SpanType;
+  name: string;
+  status: SpanStatus;
+  iteration: number | null;
+  started_at: string;
+  ended_at: string | null;
+  duration_ms: number | null;
+  error: string | null;
+}
+
+export interface AgentRunSpanDetail extends AgentRunSpanSummary {
+  input: Record<string, unknown>;
+  output: Record<string, unknown>;
+  attributes: Record<string, unknown>;
+}
+
 export type ToolTraceStatus = "running" | "completed" | "failed" | "aborted";
 
 export interface ToolTraceEntry {

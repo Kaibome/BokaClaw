@@ -39,6 +39,7 @@ from app.agent.payloads import attach_trace, should_persist_reply, tool_call_pay
 from app.agent.repo import RunRepository, utcnow
 from app.agent.research_memory import remember_research
 from app.agent.schemas import ActiveRunOut, AgentRunOut
+from app.agent.spans import SpanOptions, SpanRecorder
 from app.agent.store import serialize_message
 from app.agent.trace import ToolTrace
 from app.models import TERMINAL_RUN_STATUSES, AgentRun
@@ -82,6 +83,11 @@ class RunConfig:
     delta_flush_ms: int
     delta_flush_bytes: int
     worker_id: str
+    span_capture: bool = True
+    span_max_bytes: int = 16_384
+    span_sample_rate: float = 1.0
+    span_tool_content: bool = True
+    span_retention_days: int = 30
 
 
 def load_run_config() -> RunConfig:
@@ -96,6 +102,11 @@ def load_run_config() -> RunConfig:
         delta_flush_ms=max(10, _env_int("AGENT_RUN_DELTA_FLUSH_MS", 150)),
         delta_flush_bytes=max(256, _env_int("AGENT_RUN_DELTA_FLUSH_BYTES", 4096)),
         worker_id=f"{socket.gethostname()}:{os.getpid()}",
+        span_capture=_env_bool("AGENT_SPAN_CAPTURE", True),
+        span_max_bytes=max(1, _env_int("AGENT_SPAN_MAX_BYTES", 16_384)),
+        span_sample_rate=min(1.0, max(0.0, _env_float("AGENT_SPAN_SAMPLE_RATE", 1.0))),
+        span_tool_content=_env_bool("AGENT_SPAN_TOOL_CONTENT", True),
+        span_retention_days=max(1, _env_int("AGENT_SPAN_RETENTION_DAYS", 30)),
     )
 
 
@@ -284,11 +295,11 @@ class AgentRunManager:
                 task.cancel()
             if pending:
                 await asyncio.wait(pending, timeout=1.0)
-        for submission in list(self._subscribers.values()):
+        for run_id, submission in list(self._subscribers.items()):
             for sub in submission:
                 sub.closed = True
                 with contextlib.suppress(asyncio.QueueFull):
-                    sub.queue.put_nowait(("done", {"status": "interrupted", "last_seq": 0}))
+                    sub.queue.put_nowait(("done", {"run_id": str(run_id), "status": "interrupted", "last_seq": 0}))
         # Anything still marked running lost its task (shutdown timeout or a
         # crashed task). Best effort; the next boot recovers the rest.
         for run in await asyncio.to_thread(self.repo.list_running):
@@ -401,6 +412,7 @@ class AgentRunManager:
         trace = ToolTrace()
         metadata: dict[str, Any] = {}
         interrupted = False
+        spans: SpanRecorder | None = None
 
         try:
             async with self._semaphore:
@@ -418,6 +430,17 @@ class AgentRunManager:
                     self.config.worker_id,
                     _seconds_since(run.created_at),
                 )
+                spans = SpanRecorder(
+                    self.repo,
+                    run_id,
+                    options=SpanOptions(
+                        capture=self.config.span_capture,
+                        max_bytes=self.config.span_max_bytes,
+                        sample_rate=self.config.span_sample_rate,
+                        tool_content=self.config.span_tool_content,
+                    ),
+                )
+                await asyncio.to_thread(spans.start, run)
                 writer = RunEventWriter(self, run)
                 await writer.start()
                 heartbeat = asyncio.create_task(self._heartbeat(run_id))
@@ -426,14 +449,15 @@ class AgentRunManager:
                     async for event in self._events(run, metadata):
                         if not writer.available:
                             break
-                        await self._handle_event(writer, trace, metadata, event)
+                        await self._handle_event(writer, spans, trace, metadata, event)
                     status, code, detail = self._completion_state(writer, trace)
-                    await self._finalize(run, writer, trace, metadata, status, code, detail, interrupted=False)
+                    await self._finalize(run, writer, spans, trace, metadata, status, code, detail, interrupted=False)
                 except AgentLoopError as exc:
                     status = "cancelled" if exc.code == "agent_cancelled" else "failed"
                     await self._finalize(
                         run,
                         writer,
+                        spans,
                         trace,
                         metadata,
                         status,
@@ -451,12 +475,15 @@ class AgentRunManager:
                         if interrupted
                         else "Agent run was cancelled."
                     )
-                    await self._finalize(run, writer, trace, metadata, status, code, detail, interrupted=interrupted)
+                    await self._finalize(
+                        run, writer, spans, trace, metadata, status, code, detail, interrupted=interrupted
+                    )
                 except Exception as exc:  # pragma: no cover - defensive
                     logger.exception("Agent run %s crashed", run_id)
                     await self._finalize(
                         run,
                         writer,
+                        spans,
                         trace,
                         metadata,
                         "failed",
@@ -512,10 +539,15 @@ class AgentRunManager:
     async def _handle_event(
         self,
         writer: RunEventWriter,
+        spans: SpanRecorder,
         trace: ToolTrace,
         metadata: dict[str, Any],
         event: AgentEvent,
     ) -> None:
+        # Span capture runs before the assistant-message guard: a run can lose
+        # its message row (deleted conversation) and still be evaluable.
+        if not isinstance(event, (AgentDelta, AgentCompleted)):
+            await asyncio.to_thread(spans.handle, event)
         assistant_id = writer.assistant_id
         if assistant_id is None:
             return
@@ -567,6 +599,7 @@ class AgentRunManager:
         self,
         run: AgentRun,
         writer: RunEventWriter,
+        spans: SpanRecorder,
         trace: ToolTrace,
         metadata: dict[str, Any],
         status: str,
@@ -588,6 +621,9 @@ class AgentRunManager:
                 )
 
         final_metadata = dict(metadata)
+        # The dashboard shows this under the reply so the run can be copied and
+        # looked up later; keep it in the message, not only in the done event.
+        final_metadata["run_id"] = str(run.id)
         if interrupted:
             status = "interrupted"
             error_code = "agent_interrupted"
@@ -596,6 +632,16 @@ class AgentRunManager:
         elif error_code:
             final_metadata["error_code"] = error_code
         attach_trace(trace, final_metadata)
+
+        # Settle spans before the early returns below: a missing conversation or
+        # an already-finalized run must not leave spans marked running.
+        await asyncio.to_thread(
+            spans.finalize,
+            status=status,
+            content=writer.content,
+            metadata=final_metadata,
+            error_detail=error_detail,
+        )
 
         message_status = {"completed": "completed", "cancelled": "cancelled"}.get(status, "failed")
         message = None
@@ -685,6 +731,12 @@ class AgentRunManager:
             return
         writer = RunEventWriter(self, context.run)
         message = context.assistant_message
+        span_status = "interrupted"
+        if message is not None:
+            span_status = {"completed": "completed", "cancelled": "aborted", "failed": "failed"}.get(
+                message.status, "interrupted"
+            )
+        await asyncio.to_thread(self.repo.settle_open_spans, run.id, span_status)
 
         if message is not None:
             if message.status == "completed":
@@ -700,6 +752,7 @@ class AgentRunManager:
             writer.metadata = dict(message.meta or {})
         else:
             metadata = dict(writer.metadata)
+            metadata["run_id"] = str(run.id)
             metadata["run_status"] = "interrupted"
             metadata["error_code"] = "agent_interrupted"
             aborted = _abort_trace_entries(metadata, reason)
@@ -775,6 +828,7 @@ class AgentRunManager:
         )
 
     async def _fail_unstartable(self, run: AgentRun) -> None:
+        await asyncio.to_thread(self.repo.settle_open_spans, run.id, "failed")
         writer = RunEventWriter(self, run)
         detail = "Stored run request is missing; it cannot be resumed."
         await writer.write("error", {"code": "agent_protocol_error", "detail": detail, "partial": False})
@@ -791,6 +845,7 @@ class AgentRunManager:
         )
 
     async def _append_cancelled_event(self, run: AgentRun) -> None:
+        await asyncio.to_thread(self.repo.settle_open_spans, run.id, "aborted")
         writer = RunEventWriter(self, run)
         await writer.write(
             "error",
@@ -809,8 +864,10 @@ class AgentRunManager:
         run = await asyncio.to_thread(self.repo.get_run, run_id)
         if run is None or run.status in TERMINAL:
             return
+        await asyncio.to_thread(self.repo.settle_open_spans, run_id, "aborted")
         writer = RunEventWriter(self, run)
         metadata = dict(writer.metadata)
+        metadata["run_id"] = str(run.id)
         metadata["error_code"] = "agent_cancelled"
         aborted = _abort_trace_entries(metadata, "run cancelled")
         if aborted and writer.assistant_id is not None:

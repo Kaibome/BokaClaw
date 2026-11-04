@@ -13,6 +13,7 @@ import {
   Settings,
   Tags,
   Users,
+  Waypoints,
   WebhookIcon,
   Wrench,
 } from "lucide-react";
@@ -65,22 +66,28 @@ export function MainNav({
                 )}
                 {[
                   {
+                    title: "Agent",
+                    url: "/dashboard/agent",
+                    icon: Bot,
+                    active: pathname === "/dashboard/agent",
+                  },
+                  {
                     title: "Requests",
                     url: "/dashboard/requests",
                     icon: Activity,
                     active: pathname === "/dashboard/requests",
                   },
                   {
+                    title: "Trace",
+                    url: "/dashboard/trace",
+                    icon: Waypoints,
+                    active: pathname === "/dashboard/trace",
+                  },
+                  {
                     title: "Memories",
                     url: "/dashboard/memories",
                     icon: GalleryVerticalEnd,
                     active: pathname === "/dashboard/memories",
-                  },
-                  {
-                    title: "Agent",
-                    url: "/dashboard/agent",
-                    icon: Bot,
-                    active: pathname === "/dashboard/agent",
                   },
                   {
                     title: "Entities",

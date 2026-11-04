@@ -92,6 +92,7 @@ class FakeRepo:
         self.runs = {}
         self.events = {}
         self.messages = {}
+        self.spans = {}
         self._lock = threading.RLock()
 
     def add_run(self, run):
@@ -226,7 +227,45 @@ class FakeRepo:
             self.messages[message_id] = message
             return message
 
+    def upsert_span(self, run_id, *, span_id, span_type, name, **fields):
+        with self._lock:
+            run_uuid = uuid.UUID(str(run_id))
+            if run_uuid not in self.runs:
+                return False
+            key = (run_uuid, span_id)
+            existing = self.spans.get(key)
+            if existing is not None and existing["status"] in (
+                "completed",
+                "failed",
+                "aborted",
+                "interrupted",
+            ):
+                return True
+            span = dict(fields)
+            span.update({"run_id": run_uuid, "span_id": span_id, "span_type": span_type, "name": name})
+            self.spans[key] = span
+            return True
+
+    def list_spans(self, run_id):
+        with self._lock:
+            run_uuid = uuid.UUID(str(run_id))
+            return [span for (span_run, _), span in self.spans.items() if span_run == run_uuid]
+
+    def settle_open_spans(self, run_id, status, *, ended_at=None):
+        with self._lock:
+            run_uuid = uuid.UUID(str(run_id))
+            settled = 0
+            for (span_run, _), span in self.spans.items():
+                if span_run == run_uuid and span.get("status") == "running":
+                    span["status"] = status
+                    span["ended_at"] = ended_at or _now()
+                    settled += 1
+            return settled
+
     def prune_events(self, **_kwargs):
+        return 0
+
+    def prune_spans(self, **_kwargs):
         return 0
 
     def prune_runs(self, **_kwargs):
@@ -307,6 +346,10 @@ async def test_manager_persists_ordered_events_and_completes():
     assert message.content == "hello"
     assert message.status == "completed"
     assert message.meta["tool_trace"][0]["status"] == "completed"
+    # The dashboard copies this straight from the persisted reply.
+    assert message.meta["run_id"] == str(run.id)
+    assert stored.partial_metadata["run_id"] == str(run.id)
+    assert items[-1][1]["run_id"] == str(run.id)
 
 
 @pytest.mark.asyncio
@@ -390,6 +433,7 @@ async def test_manager_cancel_settles_partial_message():
     message = repo.messages[stored.assistant_message_id]
     assert message.status == "cancelled"
     assert message.content == "partial"
+    assert message.meta["run_id"] == str(run.id)
     assert any(event.event_type == "error" and event.payload["code"] == "agent_cancelled" for event in repo.events[run.id])
     assert repo.events[run.id][-1].event_type == "error"
 
