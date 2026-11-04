@@ -198,20 +198,22 @@ export default function MemoriesPage() {
           if (!open) setSelectedMemory(null);
         }}
       >
-        <SheetContent className="sm:max-w-md">
-          <SheetHeader>
+        <SheetContent className="flex flex-col sm:max-w-md">
+          <SheetHeader className="shrink-0">
             <SheetTitle>Memory Detail</SheetTitle>
             <SheetDescription className="sr-only">
               View memory content and metadata
             </SheetDescription>
           </SheetHeader>
           {selectedMemory && (
-            <div className="mt-6 space-y-4">
+            <div className="mt-6 min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
               <div className="space-y-1">
                 <Label className="text-xs text-onSurface-default-tertiary">
                   Content
                 </Label>
-                <p className="text-sm">{selectedMemory.memory}</p>
+                <p className="text-sm break-words whitespace-pre-wrap">
+                  {selectedMemory.memory}
+                </p>
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-1">

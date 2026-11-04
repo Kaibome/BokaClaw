@@ -325,6 +325,26 @@
 
 ---
 
+## P-09 Dashboard Memory Detail 内容超长时被裁切、无法滚动
+
+- **状态**：已解决（2026-11-04）
+- **场景**：Dashboard「Memories」页点击任一行，右侧 Sheet 展示 Memory Detail（`dashboard/src/app/(root)/dashboard/memories/page.tsx`）。
+- **现象**：记忆内容较长时，抽屉只显示首屏可见部分，下方 ID / 元数据 / Delete memory 按钮被裁掉；鼠标滚轮与触控板都无法滚动，内容无法完整查看。
+- **根因（事实）**：
+  1. `SheetContent`（`dashboard/src/components/ui/sheet.tsx`）的右侧变体样式为 `fixed inset-y-0 right-0 h-full p-6`，没有任何 `overflow` 设置；
+  2. Memory Detail 的内容直接作为 `SheetContent` 子节点平铺，没有可滚动容器，超出 `h-full` 的部分被浏览器裁切；
+  3. 超长无空格字符串还会横向溢出（缺少 `break-words`）。
+- **解决措施**：
+  - `SheetContent` 改为 `flex flex-col sm:max-w-md`，`SheetHeader` 加 `shrink-0`；
+  - 详情内容容器改为 `mt-6 min-h-0 flex-1 space-y-4 overflow-y-auto pr-1`：头部固定、正文独立纵向滚动，写法与 `dashboard/src/app/(root)/dashboard/agent/page.tsx:145` 的移动端抽屉一致；
+  - Content 文案加 `break-words whitespace-pre-wrap`，避免长 token 横向溢出并保留原文换行。
+- **解决后效果**：
+  - `tsc --noEmit` 通过；`next build` 通过（`/dashboard/memories` 6.74 kB）；
+  - 内容超出视口时正文出现独立滚动条，标题与关闭按钮保持可见，长内容可完整查看。
+- **可复用结论**：`fixed inset-y-0 h-full` 的抽屉只保证占满视口，**不会自动滚动**；内容区必须显式设置 `flex-1 min-h-0 overflow-y-auto`（flex 子项默认 `min-height: auto`，漏掉 `min-h-0` 仍会被内容撑破）。
+
+---
+
 ## 变更记录
 
 | 日期 | 变更 |
@@ -337,3 +357,4 @@
 | 2026-11-04 | 追加 P-07：实现跨会话「可复用研究结论」——成功 run 后把结论 + 来源 + 抓取时间写入 mem0（`infer=False`、`kind=research_conclusion`、同问题 update），下一轮按相似度 + TTL 检索并注入 system prompt；新增 20 条用例、三文件 85 passed，跨会话复测待执行 |
 | 2026-11-04 | P-07 跨会话复测：同一问题向量相似度 0.356 < 0.5 导致零注入（无关问题反而 0.4007）；检索改为 `question_key` 精确命中 + 向量召回，容器内验证 `research memory injected ... chunk_chars=1520`；三会话工具调用 6/3/9，减少重复研究的效果待多样本 |
 | 2026-11-04 | 追加 P-08：server 历史重建回灌每次 run 的 `metadata.tool_trace`，按 `assistant.tool_calls` + `tool` 消息传入 SDK；结果/参数分别截断，预算不足整块丢弃；新增 `AGENT_LOOP_HISTORY_TOOL_TRACE` 等配置；相关 103 tests passed，跨 run 复测待执行 |
+| 2026-11-04 | 追加 P-09：Dashboard Memory Detail 抽屉补 `flex flex-col` + 正文 `flex-1 min-h-0 overflow-y-auto`，长内容可滚动；文案加 `break-words whitespace-pre-wrap`；`tsc` 与 `next build` 通过 |
