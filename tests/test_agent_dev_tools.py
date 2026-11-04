@@ -5,6 +5,7 @@ import os
 import shutil
 import sys
 import threading
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -379,13 +380,85 @@ class _PageHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-@pytest.fixture
-def page_server():
-    server = HTTPServer(("127.0.0.1", 0), _PageHandler)
+class _HtmlWithoutContentTypeHandler(_PageHandler):
+    def do_GET(self):
+        body = b"<!doctype html><html><head><title>T</title></head><body><h1>Hello</h1><p>World</p></body></html>"
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class _PlainTextWithoutContentTypeHandler(_PageHandler):
+    def do_GET(self):
+        body = "价格约为 10 元\n第二行".encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class _MislabeledHtmlHandler(_PageHandler):
+    def do_GET(self):
+        body = b"<html><body><h1>Hello</h1><p>World</p></body></html>"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class _NotFoundPageHandler(_PageHandler):
+    def do_GET(self):
+        body = (
+            "<!doctype html><html><head><title>404错误页-帮助中心</title></head>"
+            "<body><nav>首页 | 文档</nav><p>页面不存在</p></body></html>"
+        ).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class _ClientRenderedShellHandler(_PageHandler):
+    def do_GET(self):
+        body = (
+            b"<!doctype html><html><head><title>App</title></head><body>"
+            b'<div id="root"></div><script>window.__APP__ = 1;</script></body></html>'
+        )
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class _PageDiscussing404Handler(_PageHandler):
+    def do_GET(self):
+        paragraph = "HTTP 状态码文档：服务端返回 404 表示资源不存在，客户端应提示用户检查链接。" * 40
+        body = f"<html><head><title>HTTP 404 状态码</title></head><body><p>{paragraph}</p></body></html>".encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+@contextmanager
+def _serve(handler_cls):
+    server = HTTPServer(("127.0.0.1", 0), handler_cls)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    yield f"http://127.0.0.1:{server.server_address[1]}/"
-    server.shutdown()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}/"
+    finally:
+        server.shutdown()
+
+
+@pytest.fixture
+def page_server():
+    with _serve(_PageHandler) as url:
+        yield url
 
 
 def test_webfetch_blocks_private_addresses_by_default(tmp_path, page_server):
@@ -405,6 +478,66 @@ def test_webfetch_extracts_html_text(tmp_path, page_server):
     assert "World" in result["content"]
     assert "<h1>" not in result["content"]
     assert "x{}" not in result["content"]
+
+
+def test_webfetch_extracts_html_when_content_type_is_missing(tmp_path):
+    tools = _tools(tmp_path, web_allow_private=True)
+
+    with _serve(_HtmlWithoutContentTypeHandler) as url:
+        result = tools["WebFetch"](url)
+
+    assert result["content_type"] == "unknown"
+    assert "Hello" in result["content"]
+    assert "World" in result["content"]
+    assert "<h1>" not in result["content"]
+    assert "<!doctype" not in result["content"].lower()
+
+
+def test_webfetch_keeps_plain_text_when_content_type_is_missing(tmp_path):
+    tools = _tools(tmp_path, web_allow_private=True)
+
+    with _serve(_PlainTextWithoutContentTypeHandler) as url:
+        result = tools["WebFetch"](url)
+
+    assert result["content"] == "价格约为 10 元\n第二行"
+
+
+def test_webfetch_extracts_mislabeled_html(tmp_path):
+    tools = _tools(tmp_path, web_allow_private=True)
+
+    with _serve(_MislabeledHtmlHandler) as url:
+        result = tools["WebFetch"](url)
+
+    assert result["content_type"] == "text/plain"
+    assert "Hello" in result["content"]
+    assert "World" in result["content"]
+    assert "<h1>" not in result["content"]
+
+
+def test_webfetch_reports_a_not_found_page_served_with_200(tmp_path):
+    tools = _tools(tmp_path, web_allow_private=True)
+
+    with _serve(_NotFoundPageHandler) as url:
+        with pytest.raises(RuntimeError, match="reports itself as not found"):
+            tools["WebFetch"](url)
+
+
+def test_webfetch_reports_a_client_rendered_shell(tmp_path):
+    tools = _tools(tmp_path, web_allow_private=True)
+
+    with _serve(_ClientRenderedShellHandler) as url:
+        with pytest.raises(RuntimeError, match="no readable text"):
+            tools["WebFetch"](url)
+
+
+def test_webfetch_keeps_long_pages_that_mention_404(tmp_path):
+    tools = _tools(tmp_path, web_allow_private=True)
+
+    with _serve(_PageDiscussing404Handler) as url:
+        result = tools["WebFetch"](url)
+
+    assert result["status"] == 200
+    assert "资源不存在" in result["content"]
 
 
 def test_webfetch_rejects_unsupported_schemes(tmp_path):

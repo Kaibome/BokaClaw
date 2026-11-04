@@ -200,6 +200,63 @@ def _render_notebook(document: Dict[str, Any]) -> str:
     return "\n\n".join(chunks)
 
 
+_HTML_CONTENT_TYPES = {"text/html", "application/xhtml+xml"}
+# Servers that omit or undersell Content-Type still send HTML; sniff those bodies
+# so the model never receives raw markup. Anything else keeps its exact bytes.
+_HTML_SNIFF_CONTENT_TYPES = {"", "text/plain", "application/octet-stream", "binary/octet-stream"}
+_HTML_PREFIXES = ("<!doctype", "<html", "<head", "<body")
+# Leading whitespace and a byte-order mark are common in scraped pages.
+_HTML_LEADING_TRIM = " \t\r\n" + chr(0xFEFF)
+
+
+def _looks_like_html(text: str) -> bool:
+    head = text[:8192].lstrip(_HTML_LEADING_TRIM).lower()
+    return head.startswith(_HTML_PREFIXES)
+
+
+# Sites answer unknown routes with an error page under HTTP 200, or with a bare
+# client-rendered app shell. Both look successful to the model but carry no
+# content, so they are reported as tool errors instead.
+_TITLE_PATTERN = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+_H1_PATTERN = re.compile(r"<h1[^>]*>(.*?)</h1>", re.IGNORECASE | re.DOTALL)
+_TAG_PATTERN = re.compile(r"<[^>]+>")
+_NOT_FOUND_MARKERS = (
+    "404",
+    "not found",
+    "does not exist",
+    "no longer available",
+    "页面不存在",
+    "页面未找到",
+    "找不到页面",
+    "页面找不到",
+    "错误页",
+)
+# Content-rich pages that merely discuss 404s are not error pages.
+_NOT_FOUND_MAX_CHARS = 1500
+
+
+def _heading_text(markup: str, pattern: re.Pattern[str]) -> str:
+    match = pattern.search(markup)
+    if not match:
+        return ""
+    text = _TAG_PATTERN.sub(" ", match.group(1))
+    return re.sub(r"\s+", " ", text).strip().lower()
+
+
+def _page_problem(markup: str, text: str) -> Optional[str]:
+    """Return why an HTTP 200 HTML body is unusable, or ``None`` when it is fine."""
+    title = _heading_text(markup, _TITLE_PATTERN)
+    if not text or text.strip().lower() == title:
+        # Only the <title> survived extraction: the body is an app shell.
+        return "it rendered no readable text (client-side only page)"
+    if len(text) > _NOT_FOUND_MAX_CHARS:
+        return None
+    heading = title or _heading_text(markup, _H1_PATTERN)
+    if any(marker in heading for marker in _NOT_FOUND_MARKERS):
+        return f"it reports itself as not found ({heading[:80]})"
+    return None
+
+
 def _html_to_text(markup: str) -> str:
     class _Extractor(HTMLParser):
         def __init__(self) -> None:
@@ -302,8 +359,12 @@ def _fetch_url(config: DevToolConfig, url: str) -> Dict[str, Any]:
     content_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
     encoding = response.encoding or "utf-8"
     text = body.decode(encoding, errors="replace")
-    if content_type in {"text/html", "application/xhtml+xml"}:
-        text = _html_to_text(text)
+    if content_type in _HTML_CONTENT_TYPES or (content_type in _HTML_SNIFF_CONTENT_TYPES and _looks_like_html(text)):
+        markup = text
+        text = _html_to_text(markup)
+        problem = _page_problem(markup, text)
+        if problem:
+            raise RuntimeError(f"request to {response.url} returned HTTP {response.status_code} but {problem}")
 
     text, truncated = _truncate(text, config.max_output_bytes)
     return {
