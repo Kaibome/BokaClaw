@@ -148,6 +148,9 @@ class LocalAgentConfig:
     fact_ledger: bool = True
     fact_ledger_max_chars: int = 2_500
     step_budget_notice: bool = True
+    progress_guard: bool = True
+    progress_nudge_after: int = 3
+    progress_stop_after: int = 5
 
 
 def _current_llm_config() -> Dict[str, Any]:
@@ -211,6 +214,8 @@ def load_local_config() -> Optional[LocalAgentConfig]:
         if context_max_tokens is not None:
             context_keep_recent_tokens = min(context_keep_recent_tokens, max(0, context_max_tokens - 256))
 
+    nudge_after = max(2, _env_int("AGENT_PROGRESS_NUDGE_AFTER", 3))
+    stop_after = max(nudge_after, _env_int("AGENT_PROGRESS_STOP_AFTER", 5))
     return LocalAgentConfig(
         model=str(model),
         api_key=str(api_key),
@@ -230,6 +235,9 @@ def load_local_config() -> Optional[LocalAgentConfig]:
         fact_ledger=_env_flag("AGENT_FACT_LEDGER", True),
         fact_ledger_max_chars=max(256, _env_int("AGENT_FACT_LEDGER_MAX_CHARS", 2_500)),
         step_budget_notice=_env_flag("AGENT_STEP_BUDGET_NOTICE", True),
+        progress_guard=_env_flag("AGENT_PROGRESS_GUARD", True),
+        progress_nudge_after=nudge_after,
+        progress_stop_after=stop_after,
     )
 
 
@@ -442,11 +450,15 @@ def build_runtime(
         fact_ledger=config.fact_ledger,
         fact_ledger_max_chars=config.fact_ledger_max_chars,
         step_budget_notice=config.step_budget_notice,
+        progress_guard=config.progress_guard,
+        progress_nudge_after=config.progress_nudge_after,
+        progress_stop_after=config.progress_stop_after,
     )
     _context_debug(
         "agent context config: model=%s max_iterations=%s context_max_tokens=%s "
         "context_keep_recent_tokens=%s context_compression=%s tool_result_max_chars=%s "
-        "fact_ledger=%s fact_ledger_max_chars=%s step_budget_notice=%s",
+        "fact_ledger=%s fact_ledger_max_chars=%s step_budget_notice=%s "
+        "progress_guard=%s progress_nudge_after=%s progress_stop_after=%s",
         config.model,
         config.max_iterations,
         config.context_max_tokens,
@@ -456,6 +468,9 @@ def build_runtime(
         config.fact_ledger,
         config.fact_ledger_max_chars,
         config.step_budget_notice,
+        config.progress_guard,
+        config.progress_nudge_after,
+        config.progress_stop_after,
     )
     tools = [*_memory_tools(sdk, payload.get("user_id")), *build_dev_tools(sdk)]
     return sdk.AgentRuntime(agent_config, tools=tools, on_event=on_event)
@@ -544,6 +559,14 @@ async def stream_local_agent(
                 put("cancelled")
         except sdk.MaxIterationsExceeded:
             put("error", AgentLoopError("agent_upstream_error", "Agent exceeded the maximum number of steps."))
+        except sdk.NoProgressError:
+            put(
+                "error",
+                AgentLoopError(
+                    "agent_no_progress",
+                    "Agent kept repeating the same steps without new results.",
+                ),
+            )
         except sdk.ConfigurationError as exc:
             put("error", AgentLoopError("agent_not_configured", str(exc)))
         except Exception as exc:

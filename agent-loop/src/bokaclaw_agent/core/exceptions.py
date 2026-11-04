@@ -54,6 +54,22 @@ class MaxIterationsExceeded(AgentError):
         super().__init__(f"Agent session {session_id!r} exceeded max_iterations{detail}")
 
 
+class NoProgressError(AgentError):
+    """Raised when consecutive tool calls added no new evidence.
+
+    After ``AgentConfig.progress_stop_after`` such calls the runtime asks for a
+    tool-free final answer. The run only fails when that answer is empty; the
+    partial run is then persisted with status ``failed`` and attached as
+    ``result``.
+    """
+
+    def __init__(self, session_id: str, result: "RunResult | None" = None) -> None:
+        self.session_id = session_id
+        self.result = result
+        detail = f" after {result.iterations} iteration(s)" if result is not None else ""
+        super().__init__(f"Agent session {session_id!r} made no progress{detail}")
+
+
 class RunCancelled(AgentError):
     """Raised when ``cancel_event`` was set at a safe boundary.
 

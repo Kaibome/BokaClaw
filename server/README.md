@@ -188,6 +188,9 @@ JSON response instead. Requests are rate limited to 30/minute per IP.
 | `AGENT_FACT_LEDGER` | `true` | Keep a run-scoped ledger of tool calls and findings in the model view so early facts survive compression. Set to `false` to disable. |
 | `AGENT_FACT_LEDGER_MAX_CHARS` | `2500` | Ledger cap; values below 256 are raised to 256. |
 | `AGENT_STEP_BUDGET_NOTICE` | `true` | Append `Step X of N` and a wrap-up directive near the step limit so the agent stops researching. Set to `false` to disable. |
+| `AGENT_PROGRESS_GUARD` | `true` | Detect tool calls that return no new evidence; after a few the agent is nudged to change course, then forced to answer. Set to `false` to disable. |
+| `AGENT_PROGRESS_NUDGE_AFTER` | `3` | Consecutive no-progress calls before the nudge; values below 2 are raised to 2. |
+| `AGENT_PROGRESS_STOP_AFTER` | `5` | Consecutive no-progress calls before the forced final answer; raised to the nudge threshold when lower. |
 | `AGENT_CONTEXT_DEBUG` | on | Log the resolved model-view settings once per turn and each `context_compressed` decision at INFO. Diagnostics only; the event is never sent to the client. Set to `0` / `false` / `no` / `off` to silence. |
 | `AGENT_DEV_TOOLS` | `true` | Register the developer tool set. |
 | `AGENT_WORKSPACE_ROOT` | `/app/workspace` | File tools cannot escape this directory. Created on first use. |

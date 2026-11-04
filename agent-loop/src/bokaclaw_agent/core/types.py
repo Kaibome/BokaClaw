@@ -76,7 +76,7 @@ class RunResult(BaseModel):
 
     session_id: str
     content: str | None = None
-    stop_reason: Literal["final", "length", "content_filter", "max_iterations", "cancelled"]
+    stop_reason: Literal["final", "length", "content_filter", "max_iterations", "no_progress", "cancelled"]
     new_messages: list[dict[str, Any]] = Field(default_factory=list)
     tool_results: list[ToolResult] = Field(default_factory=list)
     iterations: int = 0

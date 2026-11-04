@@ -199,7 +199,7 @@ from bokaclaw_agent import InMemorySessionStore
 runtime = AgentRuntime(config, provider=provider, tools=[get_weather], store=InMemorySessionStore())
 ```
 
-## Context compression, fact ledger, and step notice
+## Context compression, fact ledger, and loop guards
 
 Long tool-using runs can outgrow the model window one iteration at a time.
 Optional settings bound the model view and keep the agent from looping; all are
@@ -214,6 +214,9 @@ off by default in the SDK:
 | `fact_ledger` | `False` | Keep a compact, deduplicated ledger of this run's tool calls and findings in the model view, appended after compression. |
 | `fact_ledger_max_chars` | `2500` | Maximum characters of the fact ledger. Minimum 256. |
 | `step_budget_notice` | `False` | Append `Step X of N` (with a wrap-up directive near the end) to each request view. |
+| `progress_guard` | `False` | Count tool calls that returned no new evidence; nudge after `progress_nudge_after`, then force a final answer after `progress_stop_after`. |
+| `progress_nudge_after` | `3` | Consecutive no-progress calls before the nudge. Minimum 2. |
+| `progress_stop_after` | `5` | Consecutive no-progress calls before the forced final answer. Must be at least `progress_nudge_after`. |
 
 ```python
 config = AgentConfig(
@@ -221,6 +224,7 @@ config = AgentConfig(
     tool_result_max_chars=16_000,
     fact_ledger=True,
     step_budget_notice=True,
+    progress_guard=True,
 )
 ```
 
@@ -257,13 +261,25 @@ it exists only in the request view.
 `Step X of N` line; the last two steps switch to a wrap-up instruction (answer
 now, or make at most one final call). This is view-only as well.
 
-Both blocks are appended as one trailing `user` message prefixed with
+**No-progress guard.** With `progress_guard=True` the runtime fingerprints the
+*evidence* each tool result returns — the URL set of a search, the content of a
+fetch or read, a command's stdout — and counts consecutive calls that add
+nothing new. Errors, empty results, cache hits, repeated searches, and
+different URLs that return an identical body all count as no progress. After
+`progress_nudge_after`
+such calls the request view gains a "change course or answer" note; after
+`progress_stop_after` the loop stops and makes one tool-free request for a final
+answer, exactly like the step limit. The successful path returns
+`stop_reason="no_progress"`; if that request returns no text the run raises
+`NoProgressError`. Both notices are view-only.
+
+All blocks are appended as one trailing `user` message prefixed with
 `[Runtime context, not a new user request]`, after compression and before
 `MODEL_REQUEST`, so the emitted event shows exactly what the model received.
 
-When the server runs the agent in-process, compression and both loop controls
-are on by default at 32,000 tokens, 16,000-character tool results, a
-2,500-character ledger, and the step notice; see
+When the server runs the agent in-process, compression, both loop controls, and
+the no-progress guard are on by default at 32,000 tokens, 16,000-character tool
+results, a 2,500-character ledger, and the step notice; see
 [Server configuration](#server-configuration) to change or disable them.
 
 ## Step limit
@@ -340,7 +356,9 @@ Every `AgentEvent` carries a `seq` that starts at `1` for each run and increases
 
 - `stream()` forwards text from the final answer; tool-call rounds produce no text.
 - No tokenizer dependency: the context budget uses a conservative character-based estimate over messages only (tool schemas are deducted separately).
-- Context compression, the fact ledger, and the step notice are opt-in in the SDK (off by default); `max_history_messages` still provides message-count truncation on resume.
+- Context compression, the fact ledger, the step notice, and the no-progress
+  guard are opt-in in the SDK (off by default); `max_history_messages` still
+  provides message-count truncation on resume.
 - Tool calls returned in one model turn are executed sequentially, in order.
 - One active run per session is recommended. Concurrent writers are serialised by a row lock and `UNIQUE(session_id, seq)`, but turn ordering is not guaranteed.
 - Text content only; multimodal `content` parts are not supported.
@@ -460,6 +478,9 @@ closing the request cancels the upstream turn.
 | `AGENT_FACT_LEDGER` | `true` | In-process runtime: keep a run-scoped fact ledger in the request view so early findings survive compression. |
 | `AGENT_FACT_LEDGER_MAX_CHARS` | `2500` | Fact ledger cap; values below 256 are raised to 256. |
 | `AGENT_STEP_BUDGET_NOTICE` | `true` | In-process runtime: append `Step X of N` and a wrap-up directive near the step limit. |
+| `AGENT_PROGRESS_GUARD` | `true` | In-process runtime: detect tool calls that return no new evidence and stop the loop when the model keeps repeating itself. |
+| `AGENT_PROGRESS_NUDGE_AFTER` | `3` | Consecutive no-progress calls before the model is nudged; values below 2 are raised to 2. |
+| `AGENT_PROGRESS_STOP_AFTER` | `5` | Consecutive no-progress calls before a final answer is forced; raised to the nudge threshold when lower. |
 | `AGENT_CONTEXT_DEBUG` | off | Log the resolved context settings once per turn and each `context_compressed` event at INFO. Diagnostics only; the event is never forwarded to clients. |
 
 The `AGENT_CONTEXT_*` / `AGENT_TOOL_RESULT_*` variables apply only when the

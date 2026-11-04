@@ -458,6 +458,31 @@ class _PageDiscussing404Handler(_PageHandler):
         self.wfile.write(body)
 
 
+class _LongPageHandler(_PageHandler):
+    def do_GET(self):
+        body = ("<html><head><title>Long</title></head><body><p>" + "长文本 " * 800 + "</p></body></html>").encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class _TablePageHandler(_PageHandler):
+    def do_GET(self):
+        body = (
+            "<html><head><title>T</title></head><body><table>"
+            "<tr><th>Region</th><th>Price</th></tr>"
+            "<tr><td>Beijing</td><td>10</td></tr>"
+            "</table></body></html>"
+        ).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
 @contextmanager
 def _serve(handler_cls):
     server = HTTPServer(("127.0.0.1", 0), handler_cls)
@@ -487,6 +512,45 @@ def test_webfetch_reuses_a_url_within_one_run(tmp_path):
     assert first["cached"] is False
     assert second["cached"] is True
     assert second["content"] == first["content"]
+
+
+def test_webfetch_cache_hit_returns_a_digest_for_a_long_page(tmp_path):
+    tools = _tools(tmp_path, web_allow_private=True)
+
+    with _serve(_LongPageHandler) as url:
+        first = tools["WebFetch"](url)
+        second = tools["WebFetch"](url)
+        full = tools["WebFetch"](url, full=True)
+
+    assert len(first["content"]) > 1200
+    assert second["cached"] is True
+    assert second["digest"] is True
+    assert len(second["content"]) < len(first["content"])
+    assert "full=true" in second["note"]
+    assert full["content"] == first["content"]
+    assert "digest" not in full
+
+
+def test_webfetch_cache_hit_keeps_a_short_page_intact(tmp_path):
+    tools = _tools(tmp_path, web_allow_private=True)
+
+    with _serve(_PageHandler) as url:
+        first = tools["WebFetch"](url)
+        second = tools["WebFetch"](url)
+
+    assert second["cached"] is True
+    assert "digest" not in second
+    assert second["content"] == first["content"]
+
+
+def test_webfetch_separates_table_cells(tmp_path):
+    tools = _tools(tmp_path, web_allow_private=True)
+
+    with _serve(_TablePageHandler) as url:
+        result = tools["WebFetch"](url)
+
+    assert "Region | Price" in result["content"]
+    assert "Beijing | 10" in result["content"]
 
 
 def test_webfetch_cache_is_scoped_to_one_run(tmp_path):
@@ -778,13 +842,27 @@ def test_websearch_reuses_a_query_within_one_run(tmp_path):
     with _serve(_QuerySearxngHandler) as url:
         tools = _tools(tmp_path, web_allow_private=True, web_search_url=url.rstrip("/"))
         first = tools["WebSearch"]("first", max_results=5)
-        second = tools["WebSearch"]("  FIRST  ", max_results=3)
+        second = tools["WebSearch"]("  FIRST  ", max_results=5)
 
     assert len(_QuerySearxngHandler.hits) == 1
     assert first.get("cached") is None
     assert second["cached"] is True
     assert second["results"] == first["results"]
     assert "Do not run it again" in second["note"]
+
+
+def test_websearch_reruns_when_max_results_changes(tmp_path):
+    _QuerySearxngHandler.hits = []
+    with _serve(_QuerySearxngHandler) as url:
+        tools = _tools(tmp_path, web_allow_private=True, web_search_url=url.rstrip("/"))
+        first = tools["WebSearch"]("first", max_results=5)
+        second = tools["WebSearch"]("first", max_results=3)
+        third = tools["WebSearch"]("first", max_results=3)
+
+    assert len(_QuerySearxngHandler.hits) == 2
+    assert first.get("cached") is None
+    assert second.get("cached") is None
+    assert third["cached"] is True
 
 
 def test_websearch_cache_is_scoped_to_one_run(tmp_path):

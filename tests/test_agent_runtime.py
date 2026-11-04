@@ -29,6 +29,10 @@ class FakeMaxIterationsExceeded(Exception):
     pass
 
 
+class FakeNoProgressError(Exception):
+    pass
+
+
 class FakeConfigurationError(Exception):
     pass
 
@@ -91,6 +95,7 @@ class FakeRuntime:
 
 class FakeSDK:
     MaxIterationsExceeded = FakeMaxIterationsExceeded
+    NoProgressError = FakeNoProgressError
     ConfigurationError = FakeConfigurationError
     ModelConfig = FakeModelConfig
     AgentConfig = FakeAgentConfig
@@ -161,6 +166,9 @@ def clean_agent_env(monkeypatch):
         "AGENT_FACT_LEDGER",
         "AGENT_FACT_LEDGER_MAX_CHARS",
         "AGENT_STEP_BUDGET_NOTICE",
+        "AGENT_PROGRESS_GUARD",
+        "AGENT_PROGRESS_NUDGE_AFTER",
+        "AGENT_PROGRESS_STOP_AFTER",
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
         "DEEPSEEK_API_KEY",
@@ -308,6 +316,40 @@ def test_context_budgets_default_on_for_the_server(monkeypatch):
     assert config.fact_ledger is True
     assert config.fact_ledger_max_chars == 2_500
     assert config.step_budget_notice is True
+    assert config.progress_guard is True
+    assert config.progress_nudge_after == 3
+    assert config.progress_stop_after == 5
+
+
+def test_progress_guard_can_be_disabled_and_tuned(monkeypatch):
+    monkeypatch.setattr(agent_runtime, "_current_llm_config", lambda: {})
+    monkeypatch.setenv("AGENT_MODEL", "m")
+    monkeypatch.setenv("AGENT_API_KEY", "k")
+    monkeypatch.setenv("AGENT_PROGRESS_GUARD", "false")
+    monkeypatch.setenv("AGENT_PROGRESS_NUDGE_AFTER", "2")
+    monkeypatch.setenv("AGENT_PROGRESS_STOP_AFTER", "4")
+
+    config = agent_runtime.load_local_config()
+
+    assert config is not None
+    assert config.progress_guard is False
+    assert config.progress_nudge_after == 2
+    assert config.progress_stop_after == 4
+
+
+def test_progress_stop_is_clamped_to_the_nudge_threshold(monkeypatch):
+    monkeypatch.setattr(agent_runtime, "_current_llm_config", lambda: {})
+    monkeypatch.setenv("AGENT_MODEL", "m")
+    monkeypatch.setenv("AGENT_API_KEY", "k")
+    monkeypatch.setenv("AGENT_PROGRESS_NUDGE_AFTER", "6")
+    monkeypatch.setenv("AGENT_PROGRESS_STOP_AFTER", "2")
+
+    config = agent_runtime.load_local_config()
+
+    assert config is not None
+    assert config.progress_nudge_after == 6
+    # A stop before the nudge would make the SDK config invalid; clamp instead.
+    assert config.progress_stop_after == 6
 
 
 def test_context_budgets_can_be_overridden(monkeypatch):
@@ -637,6 +679,18 @@ async def test_stream_local_agent_maps_max_iterations(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_stream_local_agent_maps_no_progress(monkeypatch):
+    sdk = FakeSDK(error=FakeNoProgressError("stalled"))
+    monkeypatch.setattr(agent_runtime, "load_local_config", lambda: _config())
+    monkeypatch.setattr(agent_runtime, "_load_sdk", lambda: sdk)
+
+    with pytest.raises(AgentLoopError) as excinfo:
+        await _collect(_payload())
+
+    assert excinfo.value.code == "agent_no_progress"
+
+
+@pytest.mark.asyncio
 async def test_stream_local_agent_maps_configuration_error(monkeypatch):
     sdk = FakeSDK(error=FakeConfigurationError("bad key"))
     monkeypatch.setattr(agent_runtime, "load_local_config", lambda: _config())
@@ -707,6 +761,9 @@ def test_build_runtime_forwards_context_settings():
         fact_ledger=False,
         fact_ledger_max_chars=1200,
         step_budget_notice=False,
+        progress_guard=False,
+        progress_nudge_after=2,
+        progress_stop_after=4,
     )
 
     agent_runtime.build_runtime(sdk, config, {"user_id": None, "message": "hi"})
@@ -720,6 +777,9 @@ def test_build_runtime_forwards_context_settings():
     assert kwargs["fact_ledger"] is False
     assert kwargs["fact_ledger_max_chars"] == 1200
     assert kwargs["step_budget_notice"] is False
+    assert kwargs["progress_guard"] is False
+    assert kwargs["progress_nudge_after"] == 2
+    assert kwargs["progress_stop_after"] == 4
 
 
 def test_context_debug_is_on_by_default(monkeypatch, caplog):

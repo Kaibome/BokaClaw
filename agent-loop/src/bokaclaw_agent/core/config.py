@@ -87,6 +87,27 @@ class AgentConfig(BaseModel):
             "directive to the model view. The notice is never persisted."
         ),
     )
+    progress_guard: bool = Field(
+        default=False,
+        description=(
+            "Detect tool calls that return no new evidence. After progress_nudge_after "
+            "consecutive calls the model is told to change course; after "
+            "progress_stop_after it is forced to answer. Neither notice is persisted."
+        ),
+    )
+    progress_nudge_after: int = Field(
+        default=3,
+        ge=2,
+        description="Consecutive no-progress tool calls before the model is nudged.",
+    )
+    progress_stop_after: int = Field(
+        default=5,
+        ge=2,
+        description=(
+            "Consecutive no-progress tool calls before the runtime forces a final answer "
+            "with stop_reason 'no_progress'. Must be at least progress_nudge_after."
+        ),
+    )
     model: ModelConfig | None = Field(
         default=None,
         description="Used to build the default provider; ignored when a provider is injected.",
@@ -105,4 +126,10 @@ class AgentConfig(BaseModel):
         keep_recent = self.context_keep_recent_tokens
         if budget is not None and keep_recent is not None and keep_recent >= budget - 256:
             raise ValueError("context_keep_recent_tokens must be at least 256 tokens below context_max_tokens")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_progress_thresholds(self) -> "AgentConfig":
+        if self.progress_stop_after < self.progress_nudge_after:
+            raise ValueError("progress_stop_after must be greater than or equal to progress_nudge_after")
         return self

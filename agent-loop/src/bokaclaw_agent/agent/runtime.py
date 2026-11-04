@@ -11,7 +11,14 @@ from typing import Any, NoReturn
 from uuid import uuid4
 
 from ..core.config import AgentConfig
-from ..core.exceptions import AgentError, ConfigurationError, MaxIterationsExceeded, ModelError, RunCancelled
+from ..core.exceptions import (
+    AgentError,
+    ConfigurationError,
+    MaxIterationsExceeded,
+    ModelError,
+    NoProgressError,
+    RunCancelled,
+)
 from ..core.types import (
     AgentEvent,
     EventType,
@@ -37,6 +44,7 @@ from .context import (
     truncate_text,
 )
 from .ledger import ToolLedger
+from .progress import ProgressGuard
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +54,21 @@ _STEP_LIMIT_NOTICE = (
     "You have reached the maximum number of steps for this turn. Do not call any tools. "
     "Answer the user's question now using only the information already gathered above. "
     "If some facts could not be verified, say so explicitly instead of guessing."
+)
+
+# Appended to the request view after several tool calls returned no new
+# evidence, before the hard stop.
+_NO_PROGRESS_NUDGE = (
+    "Progress check: your last few tool calls returned nothing new — the same pages, the same "
+    "results, or errors. Do not repeat them. Use a genuinely different query or URL, or answer "
+    "now from the facts already gathered."
+)
+
+# Sent as the last user turn when the no-progress guard stops the loop.
+_NO_PROGRESS_NOTICE = (
+    "No new information has been gathered in your last several tool calls. Do not call any "
+    "tools. Answer the user's question now using only the information already gathered above. "
+    "State explicitly which facts you could not verify instead of guessing."
 )
 
 # Added to the request view only (never persisted) so the model can tell the
@@ -221,6 +244,13 @@ class AgentRuntime:
         )
         compressor = None
         ledger = ToolLedger() if self.config.fact_ledger else None
+        guard = (
+            ProgressGuard(self.config.progress_nudge_after, self.config.progress_stop_after)
+            if self.config.progress_guard
+            else None
+        )
+        guard_notice: str | None = None
+        guard_stop = False
         new_messages: list[dict[str, Any]] = []
         tool_results: list[ToolResult] = []
         pending_calls: list[ToolCall] = []
@@ -283,9 +313,10 @@ class AgentRuntime:
                             iteration,
                             compressed.stats,
                         )
-                # Appended after compression so the ledger and the step notice
-                # are never summarized away. View-only: never persisted.
-                messages = self._with_runtime_context(messages, iteration, ledger)
+                # Appended after compression so the ledger, the step notice, and
+                # the no-progress nudge are never summarized away. View-only:
+                # never persisted.
+                messages = self._with_runtime_context(messages, iteration, ledger, guard_notice)
                 self._emit(
                     EventType.MODEL_REQUEST,
                     session_id,
@@ -344,6 +375,16 @@ class AgentRuntime:
                     tool_results.append(result)
                     if ledger is not None:
                         ledger.record(call, result)
+                    if guard is not None:
+                        action = guard.record(result)
+                        if action == "stop":
+                            guard_stop = True
+                        elif action == "nudge":
+                            guard_notice = _NO_PROGRESS_NUDGE
+                        elif guard.last_was_progress and guard_notice is not None:
+                            # New evidence arrived, so the nudge has served its
+                            # purpose; a later stall gets a fresh one.
+                            guard_notice = None
                     # Events and the model view carry the capped copy; the
                     # persisted message and RunResult keep the full result.
                     view_content, truncated = truncate_text(
@@ -372,6 +413,12 @@ class AgentRuntime:
                     # the next call or the next ReAct iteration.
                     check_cancelled(iteration)
                 pending_calls = []
+                if guard_stop:
+                    # Every call in this turn already ran, so the assistant
+                    # message and its tool messages stay paired; stop between
+                    # turns instead of mid-turn.
+                    stop_reason = "no_progress"
+                    break
             else:
                 # The step budget ran out while the model was still calling
                 # tools. One tool-free turn lets it answer from what it already
@@ -441,6 +488,71 @@ class AgentRuntime:
                 content = final.content
                 stop_reason = "max_iterations"
 
+            if stop_reason == "no_progress":
+                # The guard stopped the loop; ask for the answer the model
+                # should already be able to give, without tools.
+                check_cancelled(iterations)
+                response = None
+                try:
+                    response = yield from self._answer_without_tools(
+                        context=context,
+                        session_id=session_id,
+                        iteration=iterations,
+                        usage=usage,
+                        model_kwargs=model_kwargs,
+                        stream=stream,
+                        compressor=compressor,
+                        ledger=ledger,
+                        notice=_NO_PROGRESS_NOTICE,
+                    )
+                except RunCancelled:
+                    raise
+                except Exception:  # noqa: BLE001 - the guard still ends the run
+                    logger.warning("Tool-free no-progress answer failed", exc_info=True)
+                    response = None
+
+                answer = (response.content or "").strip() if response is not None else ""
+                if not answer:
+                    result = self._build_result(
+                        session_id,
+                        content,
+                        "no_progress",
+                        new_messages,
+                        tool_results,
+                        iterations,
+                        usage,
+                    )
+                    self._persist_best_effort(
+                        session_id,
+                        new_messages,
+                        user_id,
+                        metadata,
+                        status="failed",
+                        error="no progress",
+                    )
+                    self._emit(EventType.RUN_END, session_id, iterations, {"stop_reason": "no_progress"})
+                    raise NoProgressError(session_id, result)
+
+                final = ModelResponse(
+                    content=response.content,
+                    tool_calls=[],
+                    finish_reason=response.finish_reason or "stop",
+                )
+                self._emit(
+                    EventType.MODEL_RESPONSE,
+                    session_id,
+                    iterations,
+                    {
+                        "content": final.content,
+                        "tool_calls": [],
+                        "finish_reason": final.finish_reason,
+                    },
+                )
+                assistant = assistant_message(final)
+                context.append(assistant)
+                new_messages.append(assistant)
+                content = final.content
+
             result = self._build_result(
                 session_id,
                 content,
@@ -454,7 +566,7 @@ class AgentRuntime:
             self._emit(EventType.RUN_END, session_id, iterations, {"stop_reason": stop_reason})
             return result
 
-        except MaxIterationsExceeded:
+        except (MaxIterationsExceeded, NoProgressError):
             raise
         except RunCancelled:
             # Already filled aborted tool messages, persisted as cancelled,
@@ -540,11 +652,12 @@ class AgentRuntime:
         stream: bool,
         compressor: ContextCompressor | None,
         ledger: ToolLedger | None = None,
+        notice: str = _STEP_LIMIT_NOTICE,
     ) -> Generator[str, None, ModelResponse]:
         """Ask for a final answer with tools disabled; returns the response.
 
-        The ledger and the step-limit notice are appended to the request view
-        only, so they are never persisted as part of the conversation.
+        The ledger and the notice are appended to the request view only, so
+        they are never persisted as part of the conversation.
         """
 
         messages = context.build()
@@ -563,7 +676,7 @@ class AgentRuntime:
             rendered = ledger.render(self.config.fact_ledger_max_chars)
             if rendered:
                 parts.append(rendered)
-        parts.append(_STEP_LIMIT_NOTICE)
+        parts.append(notice)
         messages = [*messages, {"role": "user", "content": "\n\n".join(parts)}]
         self._emit(
             EventType.MODEL_REQUEST,
@@ -588,12 +701,15 @@ class AgentRuntime:
         messages: list[dict[str, Any]],
         iteration: int,
         ledger: ToolLedger | None,
+        guard_notice: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Append the step notice and fact ledger to the request view only."""
+        """Append the step notice, no-progress nudge, and fact ledger to the request view only."""
 
         parts: list[str] = []
         if self.config.step_budget_notice:
             parts.append(self._step_budget_notice(iteration))
+        if guard_notice:
+            parts.append(guard_notice)
         if ledger is not None:
             rendered = ledger.render(self.config.fact_ledger_max_chars)
             if rendered:

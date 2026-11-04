@@ -7,7 +7,7 @@ from conftest import FakeProvider
 
 from bokaclaw_agent.agent.runtime import AgentRuntime
 from bokaclaw_agent.core.config import AgentConfig
-from bokaclaw_agent.core.exceptions import MaxIterationsExceeded, ModelError, ToolExecutionError
+from bokaclaw_agent.core.exceptions import MaxIterationsExceeded, ModelError, NoProgressError, ToolExecutionError
 from bokaclaw_agent.core.types import EventType, ModelResponse, ToolCall
 from bokaclaw_agent.sessions.memory import InMemorySessionStore
 from bokaclaw_agent.tools import tool
@@ -709,3 +709,125 @@ def test_fact_ledger_reaches_the_forced_final_answer():
     assert "## Research state (this run)" in final_messages[-1]["content"]
     assert "-> ok: 3" in final_messages[-1]["content"]
     assert "maximum number of steps" in final_messages[-1]["content"]
+
+
+def test_progress_guard_nudges_then_forces_a_final_answer():
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                tool_calls=[ToolCall(id=f"call_{index}", name="add", arguments={"a": 1, "b": 2})],
+                finish_reason="tool_calls",
+            )
+            for index in range(1, 6)
+        ]
+        + [ModelResponse(content="final from what I have", finish_reason="stop")]
+    )
+    store = InMemorySessionStore()
+    runtime = AgentRuntime(
+        AgentConfig(
+            progress_guard=True,
+            progress_nudge_after=2,
+            progress_stop_after=4,
+            max_iterations=8,
+        ),
+        provider=provider,
+        tools=[add],
+        store=store,
+    )
+
+    result = runtime.run("stuck", session_id="s1")
+
+    assert result.stop_reason == "no_progress"
+    assert result.content == "final from what I have"
+    assert result.iterations == 5
+    # The first call is new evidence; the nudge follows the second repeat and
+    # stays in view while the model keeps repeating.
+    assert "Progress check" not in provider.calls[2]["messages"][-1]["content"]
+    assert "Progress check" in provider.calls[3]["messages"][-1]["content"]
+    assert "Progress check" in provider.calls[4]["messages"][-1]["content"]
+    # The forced answer runs without tools and carries the stop notice.
+    assert provider.calls[5]["tools"] is None
+    assert "No new information" in provider.calls[5]["messages"][-1]["content"]
+    # Both notices are views, never persisted.
+    assert all("Progress check" not in str(message.get("content")) for message in store.load_messages("s1"))
+    assert all("No new information" not in str(message.get("content")) for message in store.load_messages("s1"))
+
+
+def test_progress_guard_stays_quiet_while_new_evidence_arrives():
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                tool_calls=[ToolCall(id="call_1", name="add", arguments={"a": 1, "b": 2})],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(
+                tool_calls=[ToolCall(id="call_2", name="add", arguments={"a": 1, "b": 2})],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(
+                tool_calls=[ToolCall(id="call_3", name="add", arguments={"a": 2, "b": 3})],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(content="5", finish_reason="stop"),
+        ]
+    )
+    runtime = AgentRuntime(
+        AgentConfig(progress_guard=True, progress_nudge_after=2, progress_stop_after=3),
+        provider=provider,
+        tools=[add],
+    )
+
+    result = runtime.run("add", session_id="s1")
+
+    assert result.stop_reason == "final"
+    assert all("Progress check" not in call["messages"][-1]["content"] for call in provider.calls)
+
+
+def test_progress_guard_is_off_by_default():
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                tool_calls=[ToolCall(id="call_1", name="add", arguments={"a": 1, "b": 2})],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(
+                tool_calls=[ToolCall(id="call_2", name="add", arguments={"a": 1, "b": 2})],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(
+                tool_calls=[ToolCall(id="call_3", name="add", arguments={"a": 1, "b": 2})],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(content="done", finish_reason="stop"),
+        ]
+    )
+    runtime = AgentRuntime(AgentConfig(max_iterations=6), provider=provider, tools=[add])
+
+    result = runtime.run("add", session_id="s1")
+
+    assert result.stop_reason == "final"
+    assert all("Progress check" not in call["messages"][-1]["content"] for call in provider.calls)
+
+
+def test_progress_guard_raises_when_the_forced_answer_is_empty():
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                tool_calls=[ToolCall(id=f"call_{index}", name="add", arguments={"a": 1, "b": 2})],
+                finish_reason="tool_calls",
+            )
+            for index in range(1, 5)
+        ]
+        + [ModelResponse(content=None, finish_reason="stop")]
+    )
+    runtime = AgentRuntime(
+        AgentConfig(progress_guard=True, progress_nudge_after=2, progress_stop_after=3, max_iterations=8),
+        provider=provider,
+        tools=[add],
+    )
+
+    with pytest.raises(NoProgressError) as excinfo:
+        runtime.run("stuck", session_id="s1")
+
+    assert excinfo.value.result is not None
+    assert excinfo.value.result.stop_reason == "no_progress"

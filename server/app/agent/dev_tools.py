@@ -51,6 +51,8 @@ BING_RSS_ENDPOINT = "https://www.bing.com/search"
 MAX_READ_LINES = 5000
 MAX_MONITOR_LINES = 5000
 MAX_REDIRECTS = 5
+# A repeated WebFetch returns this much of the cached page unless full=True.
+CACHED_DIGEST_CHARS = 1_200
 
 # Search engines reject non-browser clients; WebFetch keeps its own agent UA.
 SEARCH_USER_AGENT = (
@@ -286,6 +288,11 @@ def _html_to_text(markup: str) -> str:
         def handle_starttag(self, tag: str, attrs) -> None:
             if tag in {"script", "style", "noscript"}:
                 self.skip_depth += 1
+            elif tag in {"td", "th"}:
+                # Table cells would otherwise run together ("RegionPrice"),
+                # which makes pricing and comparison tables unreadable.
+                if self._last_char() != "\n":
+                    self.parts.append(" | ")
             elif tag in {"p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6"}:
                 self.parts.append("\n")
 
@@ -299,10 +306,22 @@ def _html_to_text(markup: str) -> str:
             if not self.skip_depth:
                 self.parts.append(data)
 
+        def _last_char(self) -> str:
+            for part in reversed(self.parts):
+                stripped = part.rstrip()
+                if stripped:
+                    return stripped[-1]
+            return "\n"
+
     extractor = _Extractor()
     extractor.feed(markup)
     text = "".join(extractor.parts)
-    lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.splitlines()]
+    lines: List[str] = []
+    for raw in text.splitlines():
+        line = re.sub(r"[ \t]+", " ", raw).strip()
+        line = re.sub(r"(?:\s*\|\s*)+", " | ", line)
+        line = re.sub(r"^\| ?| ?\|$", "", line)
+        lines.append(line)
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
 
 
@@ -356,11 +375,15 @@ def _fetch_url(
     url: str,
     *,
     cache: Optional[Dict[str, Dict[str, Any]]] = None,
+    full: bool = False,
 ) -> Dict[str, Any]:
     """Fetch a URL, reusing a result already fetched in this run.
 
     ``cache`` is scoped to one agent run by ``build_dev_tools``. Failed fetches
     raise before anything is stored, so a later attempt still hits the network.
+    A cache hit returns a short digest by default so a repeated call cannot
+    re-inject a large page into the context; ``full=True`` returns the whole
+    cached content.
     """
     key = _normalize_fetch_url(url)
     if cache is not None:
@@ -368,11 +391,24 @@ def _fetch_url(
         if cached is not None:
             note = "Already fetched earlier in this run; reuse this content instead of fetching it again."
             existing = cached.get("note")
-            return {
+            result = {
                 **cached,
                 "cached": True,
                 "note": f"{existing} {note}" if existing else note,
             }
+            content = str(result.get("content") or "")
+            if not full and len(content) > CACHED_DIGEST_CHARS:
+                result["content"] = (
+                    content[:CACHED_DIGEST_CHARS]
+                    + "\n... [shortened digest of the cached page; call WebFetch with full=true "
+                    "for the rest] ..."
+                )
+                result["digest"] = True
+                result["note"] += (
+                    " This is a shortened digest of the cached page; call WebFetch again with "
+                    "full=true if you need the whole content."
+                )
+            return result
 
     result = _fetch_url_uncached(config, url)
     if cache is not None:
@@ -585,11 +621,14 @@ def _search_web_scoped(
     searching again, and results already returned by another query or already
     fetched are annotated so the model can tell new evidence from repeats.
     """
-    key = _normalize_query(query)
+    key = (_normalize_query(query), max(1, min(int(max_results), MAX_SEARCH_RESULTS)))
     if cache is not None:
         cached = cache.get(key)
         if cached is not None:
-            note = "This exact search was already run in this run; reuse its results. Do not run it again."
+            note = (
+                "This exact search (same query and max_results) was already run in this run; "
+                "reuse its results. Do not run it again."
+            )
             existing = cached.get("note")
             return {**cached, "cached": True, "note": f"{existing} {note}" if existing else note}
 
@@ -1077,16 +1116,18 @@ def build_dev_tools(sdk, config: Optional[DevToolConfig] = None):
     search_cache: Dict[str, Dict[str, Any]] = {}
     seen_urls: Dict[str, str] = {}
 
-    def WebFetch(url: str) -> Dict[str, Any]:
+    def WebFetch(url: str, full: bool = False) -> Dict[str, Any]:
         """Fetch a public URL and return its text content.
 
         Repeating a URL within the same run returns the cached result with
-        ``cached: true`` instead of fetching the page again.
+        ``cached: true`` instead of fetching the page again. A large cached page
+        comes back as a short digest unless ``full`` is true.
 
         Args:
             url: HTTP or HTTPS URL. Private and loopback addresses are rejected unless explicitly allowed.
+            full: Return the whole cached page instead of a digest when the URL was already fetched.
         """
-        return _fetch_url(cfg, url, cache=fetch_cache)
+        return _fetch_url(cfg, url, cache=fetch_cache, full=full)
 
     def WebSearch(query: str, max_results: int = DEFAULT_SEARCH_RESULTS) -> Dict[str, Any]:
         """Search the web and return result titles, URLs, and snippets.

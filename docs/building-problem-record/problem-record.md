@@ -158,7 +158,41 @@
   - 两次「25–29 秒 / 10 次工具调用」的复测中，全部查询与 URL 无重复，模型在预算内主动作答；`0c475da4` 是更保守的一次采样：模型一直查到第 16 轮，但读到「最后一步」提示后停止调工具，仍未落入兜底路径。
   - 两次短复测都没有触发上下文压缩（`context_compressed` 无日志），因此账本「防摘要丢事实」的作用由单元测试验证（压缩后账本仍在、且带 `(x2)` 计数），端到端样本尚未覆盖；`0c475da4` 的压缩日志显示压缩确实会发生（第 10–16 轮 before 32k→61k tokens，after 2k–19k）。
   - 答案质量：10 轮版本给出 `qwen3.7-plus` 为主力、`qwen3.8-flash` 备选的结论与价格表；16 轮版本给出 `qwen3.8-flash` 为主力。两次结论不同，说明开放式问题的「正确答案」仍有模型采样差异，但都基于本轮抓到的可读来源，并标注了未核实项。
-- **仍未实施**：S2（哈希指纹 + 无进展/循环守卫）、S4（显式 `submit_answer` 工具）、S6（充分性评估器）。`0c475da4` 说明模型仍可能把预算用满才发现该收尾，S2 是下一步最值得做的护栏。
+- **仍未实施**：S4（显式 `submit_answer` 工具）、S6（充分性评估器）。`0c475da4` 说明模型仍可能把预算用满才发现该收尾，S2 已作为下一批护栏实现（见下）。
+
+- **解决措施（2026-11-04，第二批 S2 + 三处工具反馈修复）**：
+  - **S2 无进展/循环守卫**：新增 `agent-loop/src/bokaclaw_agent/agent/progress.py`。
+    - 证据指纹按**结果内容**而非调用参数计算：搜索取排序后的 URL 集合；抓取/读取取正文 SHA-256（不同 URL 返回同一正文＝无进展）；命令取 stdout；错误、空结果、空对象一律不计为证据。参数改写、换 slug 但结果相同的循环能被抓住，而读取同一文件的不同区间仍算进展。
+    - 连续无进展达到 `progress_nudge_after`（默认 3）时，在模型视图追加「换一个来源或现在作答」提示；达到 `progress_stop_after`（默认 5）时结束循环，发一次禁用工具、带「不要调工具、说明未核实项」提示的请求。提示只进请求视图、不落库。
+    - 停止发生在**一轮工具调用全部执行完之后**，保证 assistant `tool_calls` 与 `tool` 消息始终成对，不产生非法会话。
+    - 成功终答标记 `stop_reason="no_progress"`；若强制请求仍无文本，落库为 `failed` 并抛新增的 `NoProgressError`，server 映射为错误码 `agent_no_progress`（不是 `agent_upstream_error`）。
+    - 配置：SDK 默认关闭（`progress_guard=False`、`progress_nudge_after=3`、`progress_stop_after=5`，后者不得小于前者）；server 默认开启 `AGENT_PROGRESS_GUARD=true`、`AGENT_PROGRESS_NUDGE_AFTER=3`、`AGENT_PROGRESS_STOP_AFTER=5`，server 侧把 stop 夹到不小于 nudge，避免非法配置让整轮失败。
+  - **HTML 表格单元格分隔**（清单 2）：`_html_to_text` 在 `td`/`th` 开始标签处插入 ` | `，行内保留 `Region | Price`，不再把价格表拍平成 `Qwen3.8-Flash0.82.7`。
+  - **缓存命中的抓取结果改为摘要**（清单 5）：重复 `WebFetch` 命中缓存时，正文超过 1,200 字符只返回前 1,200 字符 + 截断标记，并提示可用 `full=true` 取全文（`digest: true`）；短页面原样返回。避免「为避免重复请求而重发 16k 正文」。
+  - **搜索缓存 key 纳入 `max_results`**（清单 6）：key 从 query 改为 `(归一化 query, 截断后的 limit)`，同一 query 换 limit 会真正重新搜索；同 query 同 limit 仍直接复用。
+  - **测试**：新增 `agent-loop/tests/test_progress.py`（11 条：证据指纹、排序无关、同正文不同 URL、缓存命中、错误/空结果、阈值夹取、nudge 只发一次）；`tests/test_runtime.py` 新增 5 条（nudge 出现时机、停止后强制终答、证据更新后重置、默认关闭、空终答抛 `NoProgressError`）；server 侧新增表格分隔、缓存摘要、搜索 key、环境变量与 `build_runtime` 透传、`agent_no_progress` 映射用例。agent-loop 全量 156 passed / 1 skipped；server agent 相关 131 passed。
+
+- **解决后效果（2026-11-04 第二批，同一问题、`deepseek-flash`、16 轮上限、仅代码不同）**：
+
+  | run_id | 耗时 | 轮次 | 工具调用 | 压缩 | 结束方式 |
+  |---|---|---|---|---|---|
+  | `eed19c6a` | 58.7s | 10 | 17（9 搜索 / 8 抓取） | 3 次（第 8–10 轮） | `final`，模型自然收尾 |
+  | `f46c9c49` | 29.1s | 6 | 12（5 搜索 / 7 抓取） | 0 次 | `final`，模型自然收尾 |
+
+  - `eed19c6a` 第 5 次调用用带 `#text-generation` 的同一 URL 重抓，命中缓存并返回 1,289 字符摘要（首次 4,027 字符，`digest: true`），没有再次发请求或重发全文；第 6–8 次搜索的结果全部与早前重复并带「Every result was already returned…」提示，按 3/5 阈值在第 8 次触发一次 nudge，模型随后转向抓取新的中文价格页。
+  - `f46c9c49` 无重复 URL、无压缩，6 轮内自然收尾；两次都没有落入步数兜底，也没有触发「强制终答」。
+  - 两次采样均未触发 S2 的 `progress_stop_after`，强制终答与 `NoProgressError` 路径目前只由单元测试覆盖；单次样本方差大（第一批同类样本为 10 次调用 25–29s 与 23 次调用 78s），S2 的边际收益需要清单第 9 项的多问题自动评测来量化。
+
+- **后续优化清单（2026-11-04 分析；第 2、5、6 项已在第二批实施）**：
+  1. **压缩过于频繁（已有日志证据）**：`0c475da4` 第 10–16 轮**每轮**触发一次压缩，其中 3 次调用模型生成摘要。原因是每轮工具结果增长 8k–16k tokens，压缩后视图又很快回到预算上方。可选：降低 `AGENT_TOOL_RESULT_MAX_CHARS`、压缩后只保留最近 1–2 条原始 tool 消息（细节交给账本）、或提高 `SUMMARY_MIN_FOLD_TOKENS` 并设置「距上次压缩新增不足 N tokens 时不重复摘要」。
+  2. **HTML 表格被拍平（代码证据）**：`_html_to_text` 只在 `tr` 处换行，`td`/`th` 之间没有分隔符，价格表可能变成 `Qwen3.8-Flash0.82.7`。建议在单元格边界插入 ` | ` 或制表符。价格类页面几乎全是表格，收益直接。
+  3. **WebFetch 截断诱发变体重抓**：正文到 16k 字符被截断后，模型会去抓 `.md` / `en/` 版本补全。建议提供「按关键词/章节提取」参数，或返回标题大纲，而不是让模型换 URL 重抓。
+  4. **URL 变体归一化**：`model-pricing` / `model-pricing.md` / `en/model-studio/model-pricing` 视为同页；同域连续 3 次 404 或列表页兜底后做域名级熔断。
+  5. **缓存命中返回全文**：`WebFetch` 缓存命中仍重发最多 16k 字符正文，浪费上下文；可返回 1–2k 摘要 + 「全文已在早前工具消息中」，细节由账本兜底。
+  6. **搜索缓存 key 忽略 `max_results`**：同一 query 先 `max_results=5` 再 `max_results=10` 会拿到 5 条。把 limit 纳入 key，或命中条数不足时重新搜索。
+  7. **可观测性**：`MODEL_REQUEST` 视图不落库，排查「为什么还在查」只能看服务器日志。建议把每轮 `iteration`、压缩事件数、账本字符数写进 run metadata，并在 UI 上区分「自然收尾 / 步数兜底」。
+  8. **可复用研究结论**：同一问题已被重复问 4 次，每次从零研究。可在成功运行后把「结论 + 来源 + 抓取时间」写入 mem0 记忆，下一轮先检索再决定是否重查。
+  9. **评测**：用 3–5 个固定研究问题 × 多次重复，自动统计 `finish_reason`、轮次、工具调用、重复 URL、压缩次数，替代单次人工复测。
 
 ---
 
@@ -227,6 +261,7 @@
   - 线上同一问题的复测（2026-11-04，S1/S3/S5 上线后）：`ff4c7f5c`（10 轮上限，29s，10 次调用）与 `e7e8f61b`（16 轮上限，25s，10 次调用）中 5 次 WebFetch 的 URL 全部唯一，0 次重复；更保守的 `0c475da4`（78s，23 次调用）中也没有精确重复的 URL；
   - `WebSearch` 现在同样按 run 去重：重复查询直接返回 `cached: true`；已被本轮其他查询返回过的结果标 `previously_seen`，已抓取过的标 `already_fetched`，全部见过时给顶层提示；
   - 需要说明：缓存只消除「完全相同 URL」的重复网络请求。若上下文压缩让模型看不到早前结果，模型仍可能再次调用同一 URL（此时命中缓存、不再发请求）；`.md` / 英文站变体、跨 run 重试仍会重新抓取。
+  - 2026-11-04 第二批修复后：缓存命中不再重发全文，超过 1,200 字符只返回摘要并提示 `full=true`（避免重复调用再次占用 16k 上下文）；搜索缓存 key 纳入 `max_results`，换条数会真正重新搜索；无进展守卫（S2）在连续 5 次没有新证据时强制终答，覆盖「换 slug / 换关键词但结果相同」的变体重抓。
 - **后续方向**：
   - `.md` / 英文站变体的归一化（同源同路径去扩展名）尚未实现；
   - 对重定向到列表页的 URL 现在会返回 `note` 提示，但未做跨 slug 熔断。
@@ -241,3 +276,4 @@
 | 2026-11-04 | 追加 P-06（WebFetch 单 run URL 去重缓存，commit `c3d3334`）；标为部分缓解，线上效果待复测 |
 | 2026-11-04 | P-04 补充量化证据（16 轮工具结果 ≈50,880 tokens > 32,000 预算）、外部调研（LangChain / OpenAI Agents SDK / AutoGen / OpenHands / PraisonAI / 4 篇论文）与 6 个候选方案及推荐顺序 |
 | 2026-11-04 | 实现 P-04 的 S1（事实账本）+ S3（步数感知收尾）+ S5（可行动的工具反馈）；三次同题复测 `finish_reason=final`（10 轮 29s / 16 轮 25s，均 10 次工具调用），P-04 改为已解决，P-06 效果补测 |
+| 2026-11-04 | 实现 P-04 第二批：S2（无进展守卫，nudge 3 / 强制终答 5、`stop_reason=no_progress`、`NoProgressError` / `agent_no_progress`）；修复 HTML 表格单元格分隔、缓存抓取返回摘要（`full=true` 取全文）、搜索缓存 key 纳入 `max_results`；agent-loop 156 passed / server agent 131 passed；两次同题复测 `final`（58.7s/17 调用、29.1s/12 调用） |
