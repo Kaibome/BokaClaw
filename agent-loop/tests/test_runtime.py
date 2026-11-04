@@ -145,6 +145,108 @@ def test_max_iterations_persists_failed_session_and_raises():
     assert len(store.load_messages("s1")) == 5  # user + 2 * (assistant + tool)
 
 
+def test_step_limit_final_answer_uses_one_tool_free_call():
+    responses = [
+        ModelResponse(
+            tool_calls=[ToolCall(id=f"call_{index}", name="add", arguments={"a": index, "b": 1})],
+            finish_reason="tool_calls",
+        )
+        for index in range(2)
+    ]
+    responses.append(ModelResponse(content="best effort answer", finish_reason="stop"))
+    provider = FakeProvider(responses)
+    store = InMemorySessionStore()
+    runtime = AgentRuntime(AgentConfig(max_iterations=2), provider=provider, tools=[add], store=store)
+
+    result = runtime.run("stuck", session_id="s1")
+
+    assert result.content == "best effort answer"
+    assert result.stop_reason == "max_iterations"
+    assert result.iterations == 2
+    assert store.get_session("s1").status == "completed"
+    assert store.load_messages("s1")[-1] == {"role": "assistant", "content": "best effort answer"}
+
+    final_call = provider.calls[-1]
+    assert final_call["tools"] is None
+    assert final_call["tool_choice"] is None
+    assert final_call["messages"][-1]["role"] == "user"
+    assert "maximum number of steps" in final_call["messages"][-1]["content"]
+    # The notice is part of the request view only, never the conversation.
+    assert all("maximum number of steps" not in str(message.get("content")) for message in store.load_messages("s1"))
+
+
+def test_step_limit_without_a_final_answer_still_fails():
+    responses = [
+        ModelResponse(
+            tool_calls=[ToolCall(id=f"call_{index}", name="add", arguments={"a": index, "b": 1})],
+            finish_reason="tool_calls",
+        )
+        for index in range(2)
+    ]
+    responses.append(ModelResponse(content=None, finish_reason="stop"))
+    store = InMemorySessionStore()
+    runtime = AgentRuntime(
+        AgentConfig(max_iterations=2),
+        provider=FakeProvider(responses),
+        tools=[add],
+        store=store,
+    )
+
+    with pytest.raises(MaxIterationsExceeded) as exc_info:
+        runtime.run("stuck", session_id="s1")
+
+    assert exc_info.value.result.stop_reason == "max_iterations"
+    assert store.get_session("s1").status == "failed"
+
+
+def test_step_limit_final_answer_can_be_disabled():
+    responses = [
+        ModelResponse(
+            tool_calls=[ToolCall(id=f"call_{index}", name="add", arguments={"a": index, "b": 1})],
+            finish_reason="tool_calls",
+        )
+        for index in range(2)
+    ]
+    provider = FakeProvider(responses)
+    runtime = AgentRuntime(
+        AgentConfig(max_iterations=2, final_answer_on_max_iterations=False),
+        provider=provider,
+        tools=[add],
+    )
+
+    with pytest.raises(MaxIterationsExceeded):
+        runtime.run("stuck", session_id="s1")
+
+    assert len(provider.calls) == 2
+
+
+def test_step_limit_drops_tool_calls_from_the_final_response():
+    tool_call = ModelResponse(
+        tool_calls=[ToolCall(id="call_1", name="add", arguments={"a": 1, "b": 2})],
+        finish_reason="tool_calls",
+    )
+    provider = FakeProvider(
+        [
+            tool_call,
+            tool_call,
+            ModelResponse(
+                content="answer anyway",
+                finish_reason="stop",
+                tool_calls=[ToolCall(id="call_x", name="add", arguments={"a": 3, "b": 4})],
+            ),
+        ]
+    )
+    store = InMemorySessionStore()
+    runtime = AgentRuntime(AgentConfig(max_iterations=2), provider=provider, tools=[add], store=store)
+
+    result = runtime.run("stuck", session_id="s1")
+
+    assert result.content == "answer anyway"
+    assert result.stop_reason == "max_iterations"
+    assert "tool_calls" not in result.new_messages[-1]
+    assert result.new_messages[-1] == {"role": "assistant", "content": "answer anyway"}
+
+
 def test_provider_error_persists_failed_session_and_reraises():
     store = InMemorySessionStore()
     runtime = AgentRuntime(AgentConfig(), provider=FakeProvider([RuntimeError("offline")]), store=store)

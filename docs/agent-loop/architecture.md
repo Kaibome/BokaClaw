@@ -401,8 +401,16 @@ sequenceDiagram
     end
 
     Note over RT: 超过 max_iterations
-    RT->>ST: persist_run(status=failed)
-    RT-->>App: raise MaxIterationsExceeded(result)
+    opt final_answer_on_max_iterations
+        RT->>MD: complete(无 tools, 收尾提示)
+        MD-->>RT: 答案文本
+        RT->>ST: persist_run(status=completed)
+        RT-->>App: RunResult(stop_reason=max_iterations)
+    end
+    opt 收尾请求没有文本
+        RT->>ST: persist_run(status=failed)
+        RT-->>App: raise MaxIterationsExceeded(result)
+    end
 
     RT->>ST: persist_run(status=completed, new_messages)
     RT-->>App: RunResult
@@ -415,7 +423,7 @@ sequenceDiagram
 3. 每轮先 `build()` 出模型视图，再调用 Provider；assistant 消息（含 `tool_calls`）立即进入上下文和 `new_messages`。
 4. 无 `tool_calls` 时按 `finish_reason` 映射结束原因：`stop`/`None` → `final`，`length` → `length`，`content_filter` → `content_filter`。
 5. 有 `tool_calls` 时**串行**执行，每个调用都追加一条匹配 `tool_call_id` 的 tool 消息；工具异常按 `tool_error_mode` 处理。
-6. 循环耗尽仍没有最终答案时，写入 `failed` 状态，并抛 `MaxIterationsExceeded`，异常上带 `result`。
+6. 循环耗尽仍没有最终答案时，先发一次**不带工具**的收尾请求（`final_answer_on_max_iterations=True`，默认开启）；有文本则追加 assistant 消息、以 `completed` 持久化并返回 `stop_reason="max_iterations"`，否则写入 `failed` 并抛 `MaxIterationsExceeded`（异常上带 `result`）。收尾请求的提示语只存在于该次请求视图，不写入会话。
 7. 成功结束只调用一次 `persist_run`，写入本次新增消息和 `completed` 状态。
 8. 若 `cancel_event` 在任一安全检查点已设置，走取消分支而不是正常结束：abort 待执行工具、持久化 `cancelled`、发出 `run_ended(stop_reason="cancelled")`、抛 `RunCancelled`。取消分支不写 `error` 事件，也不返回 `RunResult`；部分结果在异常对象上。
 
@@ -576,7 +584,7 @@ CREATE TABLE IF NOT EXISTS bokaclaw_agent_messages (
 | 未知工具 | `return` 模式回填错误结果；`raise` 模式抛 `ToolNotFoundError` |
 | 工具参数不合法 | 同上，对应 `ToolArgumentError` |
 | 工具执行抛异常 | 同上，对应 `ToolExecutionError` |
-| 超过最大轮数 | 持久化 `failed`，抛 `MaxIterationsExceeded`，异常带 `result` |
+| 超过最大轮数 | 先发一次不带工具的收尾请求；有答案则 `completed` + `stop_reason="max_iterations"`，否则持久化 `failed`，抛 `MaxIterationsExceeded`（带 `result`） |
 | `cancel_event` 命中 | abort 待执行工具，持久化 `cancelled`，发 `run_ended`，抛 `RunCancelled`；不发 `error` 事件 |
 | 成功路径持久化失败 | 触发失败处理（尽力再写一次 failed），最终抛 `PersistenceError` |
 | 失败路径持久化失败 | 只记日志，不覆盖原始异常 |

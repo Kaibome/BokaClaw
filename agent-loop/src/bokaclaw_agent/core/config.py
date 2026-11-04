@@ -31,6 +31,14 @@ class AgentConfig(BaseModel):
     name: str = Field(default="agent", min_length=1)
     system_prompt: str | None = None
     max_iterations: int = Field(default=10, ge=1)
+    final_answer_on_max_iterations: bool = Field(
+        default=True,
+        description=(
+            "When the step budget runs out while the model is still calling tools, make one "
+            "final tool-free request so it answers from what it already gathered instead of "
+            "failing the run."
+        ),
+    )
     tool_choice: str | dict[str, Any] = "auto"
     tool_error_mode: Literal["return", "raise"] = "return"
     max_history_messages: int | None = Field(default=None, ge=1)

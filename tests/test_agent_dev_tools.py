@@ -15,7 +15,12 @@ _SERVER_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "server")
 if _SERVER_DIR not in sys.path:
     sys.path.insert(0, _SERVER_DIR)
 
-from app.agent.dev_tools import DevToolConfig, build_dev_tools, load_dev_tool_config  # noqa: E402
+from app.agent.dev_tools import (  # noqa: E402
+    DevToolConfig,
+    _parse_bing_rss,
+    build_dev_tools,
+    load_dev_tool_config,
+)
 
 
 class FakeTool:
@@ -81,7 +86,7 @@ def test_config_defaults_and_overrides(monkeypatch, tmp_path):
 def test_core_tools_registered_without_shell(tmp_path):
     names = set(_tools(tmp_path))
 
-    assert names == {"Read", "Write", "Edit", "NotebookEdit", "Glob", "Grep", "WebFetch"}
+    assert names == {"Read", "Write", "Edit", "NotebookEdit", "Glob", "Grep", "WebFetch", "WebSearch"}
 
 
 def test_shell_tools_registered_only_when_allowed(tmp_path):
@@ -590,3 +595,110 @@ def test_webfetch_rejects_unsupported_schemes(tmp_path):
 
     with pytest.raises(ValueError, match="http and https"):
         tools["WebFetch"]("file:///etc/passwd")
+
+
+# ---- WebSearch -------------------------------------------------------------------
+
+
+class _SearxngHandler(_PageHandler):
+    def do_GET(self):
+        path, _, query = self.path.partition("?")
+        if path != "/search" or "format=json" not in query or not query.startswith("q="):
+            self.send_response(404)
+            self.end_headers()
+            return
+        body = json.dumps(
+            {
+                "results": [
+                    {
+                        "title": "Qwen pricing",
+                        "url": "https://example.com/pricing",
+                        "content": "Input price per million tokens",
+                    },
+                    {"title": "Qwen models", "url": "https://example.com/models", "content": "Model list"},
+                    {"url": "https://example.com/no-title"},
+                    {"title": "missing url"},
+                ]
+            }
+        ).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def test_websearch_parses_bing_rss():
+    markup = """<?xml version="1.0" encoding="utf-8" ?>
+    <rss version="2.0"><channel>
+      <title>必应：qwen</title>
+      <item>
+        <title>Qwen pricing</title>
+        <link>https://example.com/pricing</link>
+        <description>Input   price per
+        million tokens</description>
+      </item>
+      <item><title>Docs</title><link>https://example.org/doc</link><description>Model list</description></item>
+      <item><title>No link</title><description>skipped</description></item>
+    </channel></rss>
+    """
+
+    results = _parse_bing_rss(markup, 5)
+
+    assert results == [
+        {
+            "title": "Qwen pricing",
+            "url": "https://example.com/pricing",
+            "snippet": "Input price per million tokens",
+        },
+        {"title": "Docs", "url": "https://example.org/doc", "snippet": "Model list"},
+    ]
+
+
+def test_websearch_uses_a_configured_searxng_endpoint(tmp_path):
+    with _serve(_SearxngHandler) as url:
+        tools = _tools(tmp_path, web_allow_private=True, web_search_url=url.rstrip("/"))
+        result = tools["WebSearch"]("qwen 价格", max_results=5)
+
+    assert result["provider"] == "searxng"
+    assert result["query"] == "qwen 价格"
+    assert result["results"] == [
+        {
+            "title": "Qwen pricing",
+            "url": "https://example.com/pricing",
+            "snippet": "Input price per million tokens",
+        },
+        {"title": "Qwen models", "url": "https://example.com/models", "snippet": "Model list"},
+        {"title": "", "url": "https://example.com/no-title", "snippet": ""},
+    ]
+    assert result["truncated"] is False
+
+
+def test_websearch_honours_max_results(tmp_path):
+    with _serve(_SearxngHandler) as url:
+        tools = _tools(tmp_path, web_allow_private=True, web_search_url=url.rstrip("/"))
+        result = tools["WebSearch"]("qwen", max_results=1)
+
+    assert len(result["results"]) == 1
+    assert result["truncated"] is True
+
+
+def test_websearch_reports_a_non_json_search_endpoint(tmp_path):
+    with _serve(_PageHandler) as url:
+        tools = _tools(tmp_path, web_allow_private=True, web_search_url=url)
+        with pytest.raises(RuntimeError, match="did not return JSON"):
+            tools["WebSearch"]("anything")
+
+
+def test_websearch_blocks_private_search_endpoints_by_default(tmp_path):
+    with _serve(_SearxngHandler) as url:
+        tools = _tools(tmp_path, web_search_url=url)
+        with pytest.raises(ValueError, match="non-public address"):
+            tools["WebSearch"]("anything")
+
+
+def test_websearch_rejects_an_empty_query(tmp_path):
+    tools = _tools(tmp_path)
+
+    with pytest.raises(ValueError, match="query must not be empty"):
+        tools["WebSearch"]("   ")

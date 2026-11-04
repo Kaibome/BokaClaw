@@ -33,7 +33,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are BokaClaw's assistant. Answer in the user's language.\n"
-    "Use the provided file, search, command, and web tools when a task requires them. "
+    "Use the provided file, command, and web tools when a task requires them. Use WebSearch to "
+    "find pages and WebFetch to read them; do not guess URLs when a search can find them. "
     "File paths are relative to the workspace root; never assume a path outside it is accessible. "
     "Do not run destructive commands or overwrite files unless the user explicitly asks.\n"
     "Use search_memories before answering questions about the user's preferences, plans, or "
@@ -56,6 +57,13 @@ def _env_int(name: str, default: int) -> int:
         return int(os.environ.get(name, default))
     except (TypeError, ValueError):
         return default
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _env_optional_float(name: str, default: Optional[float] = None) -> Optional[float]:
@@ -129,6 +137,7 @@ class LocalAgentConfig:
     system_prompt: str
     max_iterations: int
     max_seconds: float
+    final_answer_on_max_iterations: bool = True
     context_max_tokens: Optional[int] = None
     context_keep_recent_tokens: Optional[int] = None
     context_compression: str = "summary"
@@ -207,6 +216,7 @@ def load_local_config() -> Optional[LocalAgentConfig]:
         system_prompt=(os.getenv("AGENT_SYSTEM_PROMPT") or "").strip() or DEFAULT_SYSTEM_PROMPT,
         max_iterations=max(1, _env_int("AGENT_MAX_ITERATIONS", 10)),
         max_seconds=max(1.0, _env_float("AGENT_LOOP_MAX_SECONDS", 300.0)),
+        final_answer_on_max_iterations=_env_flag("AGENT_FINAL_ANSWER_ON_MAX_ITERATIONS", True),
         context_max_tokens=context_max_tokens,
         context_keep_recent_tokens=context_keep_recent_tokens,
         context_compression=_env_compression_mode("AGENT_CONTEXT_COMPRESSION"),
@@ -414,6 +424,7 @@ def build_runtime(
         name="bokaclaw-agent",
         system_prompt=config.system_prompt,
         max_iterations=config.max_iterations,
+        final_answer_on_max_iterations=config.final_answer_on_max_iterations,
         model=model_config,
         context_max_tokens=config.context_max_tokens,
         context_keep_recent_tokens=config.context_keep_recent_tokens,

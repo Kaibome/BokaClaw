@@ -128,8 +128,8 @@ so `OPENAI_API_KEY` or `DEEPSEEK_API_KEY` is enough; set `AGENT_MODEL` /
 Two memory tools are exposed to the model, both scoped to the signed-in user's
 UUID: `search_memories` and `save_memory`. The Claude Code-style developer
 tools are also registered by default: `Read`, `Write`, `Edit`, `NotebookEdit`,
-`Glob`, `Grep`, and `WebFetch`. `Bash`, `PowerShell`, and `Monitor` are added
-only when `AGENT_TOOLS_ALLOW_SHELL=true`.
+`Glob`, `Grep`, `WebFetch`, and `WebSearch`. `Bash`, `PowerShell`, and `Monitor`
+are added only when `AGENT_TOOLS_ALLOW_SHELL=true`.
 
 `WebFetch` caches every successful page for the duration of one run: repeating a
 URL (ignoring the fragment) returns the earlier result with `"cached": true`
@@ -175,7 +175,8 @@ JSON response instead. Requests are rate limited to 30/minute per IP.
 | `AGENT_API_KEY` | mem0's provider key | Override the API key. |
 | `AGENT_BASE_URL` | provider default | OpenAI-compatible base URL (Qwen, vLLM, Ollama, OpenRouter, ...). |
 | `AGENT_SYSTEM_PROMPT` | built-in prompt | Replace the system prompt. |
-| `AGENT_MAX_ITERATIONS` | `10` | ReAct steps before the turn fails. |
+| `AGENT_MAX_ITERATIONS` | `10` | ReAct steps before the turn stops calling tools. |
+| `AGENT_FINAL_ANSWER_ON_MAX_ITERATIONS` | `true` | On the step limit, make one final tool-free request so the model answers from what it gathered; `false` restores the hard failure. |
 | `AGENT_TEMPERATURE` | `0.2` | Sampling temperature. |
 | `AGENT_MAX_TOKENS` | provider default | Max tokens per model call. |
 | `AGENT_REQUEST_TIMEOUT_SECONDS` | `60` | Timeout for one model call. |
@@ -196,7 +197,8 @@ JSON response instead. Requests are rate limited to 30/minute per IP.
 | `AGENT_TOOL_MAX_FILE_BYTES` | `2000000` | Largest file the file tools will read or write. |
 | `AGENT_WEB_FETCH_TIMEOUT_SECONDS` | `30` | `WebFetch` request timeout. |
 | `AGENT_WEB_FETCH_MAX_BYTES` | `1000000` | `WebFetch` download cap. |
-| `AGENT_WEB_FETCH_ALLOW_PRIVATE` | `false` | Allow `WebFetch` to reach localhost / private networks. |
+| `AGENT_WEB_FETCH_ALLOW_PRIVATE` | `false` | Allow `WebFetch` and `WebSearch` to reach localhost / private networks. |
+| `AGENT_WEB_SEARCH_URL` | — | SearXNG base URL for `WebSearch`; empty uses Bing's RSS endpoint. |
 | `AGENT_LOOP_URL` | — | External executor base URL, without `/invoke`. Takes precedence over the in-process runtime. |
 | `AGENT_LOOP_API_KEY` | — | Sent as `Authorization: Bearer ...` to the external executor. |
 | `AGENT_LOOP_MOCK` | `false` | Stream a canned reply for local UI work. |

@@ -149,6 +149,7 @@ def clean_agent_env(monkeypatch):
         "AGENT_TEMPERATURE",
         "AGENT_MAX_TOKENS",
         "AGENT_MAX_ITERATIONS",
+        "AGENT_FINAL_ANSWER_ON_MAX_ITERATIONS",
         "AGENT_LOOP_MAX_SECONDS",
         "AGENT_REQUEST_TIMEOUT_SECONDS",
         "AGENT_MAX_RETRIES",
@@ -300,6 +301,7 @@ def test_context_budgets_default_on_for_the_server(monkeypatch):
     assert config.context_keep_recent_tokens is None
     assert config.context_compression == "summary"
     assert config.tool_result_max_chars == 16_000
+    assert config.final_answer_on_max_iterations is True
 
 
 def test_context_budgets_can_be_overridden(monkeypatch):
@@ -318,6 +320,18 @@ def test_context_budgets_can_be_overridden(monkeypatch):
     assert config.context_keep_recent_tokens == 2000
     assert config.context_compression == "truncate"
     assert config.tool_result_max_chars == 1000
+
+
+def test_step_limit_final_answer_can_be_disabled(monkeypatch):
+    monkeypatch.setattr(agent_runtime, "_current_llm_config", lambda: {})
+    monkeypatch.setenv("AGENT_MODEL", "m")
+    monkeypatch.setenv("AGENT_API_KEY", "k")
+    monkeypatch.setenv("AGENT_FINAL_ANSWER_ON_MAX_ITERATIONS", "false")
+
+    config = agent_runtime.load_local_config()
+
+    assert config is not None
+    assert config.final_answer_on_max_iterations is False
 
 
 @pytest.mark.parametrize("value", ["0", "off", "none", "disabled", "false"])
@@ -654,7 +668,7 @@ def test_build_runtime_registers_dev_tools_when_enabled(monkeypatch, tmp_path):
     agent_runtime.build_runtime(sdk, _config(), {"user_id": None, "message": "hi"})
 
     names = {tool.name for tool in sdk.tools}
-    assert {"Read", "Write", "Edit", "NotebookEdit", "Glob", "Grep", "WebFetch"} <= names
+    assert {"Read", "Write", "Edit", "NotebookEdit", "Glob", "Grep", "WebFetch", "WebSearch"} <= names
     assert "Bash" not in names
     assert "search_memories" not in names
 
@@ -666,11 +680,13 @@ def test_build_runtime_forwards_context_settings():
         context_keep_recent_tokens=2000,
         context_compression="truncate",
         tool_result_max_chars=1000,
+        final_answer_on_max_iterations=False,
     )
 
     agent_runtime.build_runtime(sdk, config, {"user_id": None, "message": "hi"})
 
     kwargs = sdk.runtimes[0].config.kwargs
+    assert kwargs["final_answer_on_max_iterations"] is False
     assert kwargs["context_max_tokens"] == 8000
     assert kwargs["context_keep_recent_tokens"] == 2000
     assert kwargs["context_compression"] == "truncate"

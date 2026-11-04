@@ -155,6 +155,40 @@ def test_stream_emits_tool_events_alongside_the_final_text():
     assert [event.data["content"] for event in model_response_events] == [None, "3"]
 
 
+def test_stream_step_limit_yields_the_tool_free_final_answer():
+    provider = StreamingProvider(
+        [
+            [
+                ModelStreamChunk(
+                    tool_calls=[ToolCallDelta(index=0, id="call_1", name="add", arguments='{"a": 1, "b": 2}')],
+                    finish_reason="tool_calls",
+                ),
+            ],
+            [
+                ModelStreamChunk(
+                    tool_calls=[ToolCallDelta(index=0, id="call_2", name="add", arguments='{"a": 2, "b": 3}')],
+                    finish_reason="tool_calls",
+                ),
+            ],
+            [
+                ModelStreamChunk(content="Best effort answer"),
+                ModelStreamChunk(finish_reason="stop"),
+            ],
+        ]
+    )
+    runtime = AgentRuntime(AgentConfig(max_iterations=2), provider=provider, tools=[add])
+
+    deltas, result = _collect(runtime.stream("keep going", session_id="s1"))
+
+    assert deltas == ["Best effort answer"]
+    assert result.content == "Best effort answer"
+    assert result.stop_reason == "max_iterations"
+    final_call = provider.calls[-1]
+    assert final_call["tools"] is None
+    assert final_call["tool_choice"] is None
+    assert "maximum number of steps" in final_call["messages"][-1]["content"]
+
+
 def test_stream_falls_back_to_a_single_chunk_for_non_streaming_providers():
     provider = FakeProvider([ModelResponse(content="hello", finish_reason="stop")])
     store = InMemorySessionStore()

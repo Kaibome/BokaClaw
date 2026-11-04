@@ -39,6 +39,14 @@ from .context import (
 
 logger = logging.getLogger(__name__)
 
+# Sent as a last user turn when the step budget runs out, so the model answers
+# from the tool results it already has instead of asking for more calls.
+_STEP_LIMIT_NOTICE = (
+    "You have reached the maximum number of steps for this turn. Do not call any tools. "
+    "Answer the user's question now using only the information already gathered above. "
+    "If some facts could not be verified, say so explicitly instead of guessing."
+)
+
 
 def _map_stop_reason(finish_reason: str | None) -> str:
     if finish_reason == "length":
@@ -354,25 +362,72 @@ class AgentRuntime:
                     check_cancelled(iteration)
                 pending_calls = []
             else:
-                result = self._build_result(
+                # The step budget ran out while the model was still calling
+                # tools. One tool-free turn lets it answer from what it already
+                # gathered; the run only fails when that turn has no answer.
+                response = None
+                if self.config.final_answer_on_max_iterations:
+                    check_cancelled(iterations)
+                    try:
+                        response = yield from self._answer_without_tools(
+                            context=context,
+                            session_id=session_id,
+                            iteration=iterations,
+                            usage=usage,
+                            model_kwargs=model_kwargs,
+                            stream=stream,
+                            compressor=compressor,
+                        )
+                    except RunCancelled:
+                        raise
+                    except Exception:  # noqa: BLE001 - the step limit still applies
+                        logger.warning("Tool-free final answer failed; reporting the step limit", exc_info=True)
+                        response = None
+
+                answer = (response.content or "").strip() if response is not None else ""
+                if not answer:
+                    result = self._build_result(
+                        session_id,
+                        content,
+                        "max_iterations",
+                        new_messages,
+                        tool_results,
+                        iterations,
+                        usage,
+                    )
+                    self._persist_best_effort(
+                        session_id,
+                        new_messages,
+                        user_id,
+                        metadata,
+                        status="failed",
+                        error="max_iterations exceeded",
+                    )
+                    self._emit(EventType.RUN_END, session_id, iterations, {"stop_reason": "max_iterations"})
+                    raise MaxIterationsExceeded(session_id, result)
+
+                # Providers can ignore the instruction and still return tool
+                # calls; drop them so the stored turn stays valid.
+                final = ModelResponse(
+                    content=response.content,
+                    tool_calls=[],
+                    finish_reason=response.finish_reason or "stop",
+                )
+                self._emit(
+                    EventType.MODEL_RESPONSE,
                     session_id,
-                    content,
-                    "max_iterations",
-                    new_messages,
-                    tool_results,
                     iterations,
-                    usage,
+                    {
+                        "content": final.content,
+                        "tool_calls": [],
+                        "finish_reason": final.finish_reason,
+                    },
                 )
-                self._persist_best_effort(
-                    session_id,
-                    new_messages,
-                    user_id,
-                    metadata,
-                    status="failed",
-                    error="max_iterations exceeded",
-                )
-                self._emit(EventType.RUN_END, session_id, iterations, {"stop_reason": "max_iterations"})
-                raise MaxIterationsExceeded(session_id, result)
+                assistant = assistant_message(final)
+                context.append(assistant)
+                new_messages.append(assistant)
+                content = final.content
+                stop_reason = "max_iterations"
 
             result = self._build_result(
                 session_id,
@@ -462,12 +517,69 @@ class AgentRuntime:
     async def aclose(self) -> None:
         await asyncio.to_thread(self.close)
 
-    def _complete(self, messages: list[dict[str, Any]], **model_kwargs: Any) -> ModelResponse:
+    def _answer_without_tools(
+        self,
+        *,
+        context: ContextManager,
+        session_id: str,
+        iteration: int,
+        usage: dict[str, int],
+        model_kwargs: dict[str, Any],
+        stream: bool,
+        compressor: ContextCompressor | None,
+    ) -> Generator[str, None, ModelResponse]:
+        """Ask for a final answer with tools disabled; returns the response.
+
+        The step-limit notice is appended to the request view only, so it is
+        never persisted as part of the conversation.
+        """
+
+        messages = context.build()
+        if compressor is not None:
+            compressed = compressor.compress(messages, tools_tokens=0)
+            if compressed.changed:
+                messages = compressed.messages
+                self._emit(
+                    EventType.CONTEXT_COMPRESSED,
+                    session_id,
+                    iteration,
+                    compressed.stats,
+                )
+        messages = [*messages, {"role": "user", "content": _STEP_LIMIT_NOTICE}]
+        self._emit(
+            EventType.MODEL_REQUEST,
+            session_id,
+            iteration,
+            {"messages": messages, "tools": []},
+        )
+        if stream:
+            response = yield from self._stream_response(
+                messages,
+                usage,
+                model_kwargs,
+                use_tools=False,
+            )
+        else:
+            response = self._complete(messages, use_tools=False, **model_kwargs)
+            self._merge_usage(usage, response.usage)
+        return response
+
+    def _request_options(self, use_tools: bool) -> dict[str, Any]:
+        if not use_tools:
+            return {"tools": None, "tool_choice": None}
+        return {"tools": self.tools.specs(), "tool_choice": self.config.tool_choice}
+
+    def _complete(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        use_tools: bool = True,
+        **model_kwargs: Any,
+    ) -> ModelResponse:
         try:
             response = self.provider.complete(
                 messages,
-                tools=self.tools.specs(),
-                tool_choice=self.config.tool_choice,
+                **self._request_options(use_tools),
                 **model_kwargs,
             )
             response = resolve_awaitable(response)
@@ -490,6 +602,8 @@ class AgentRuntime:
         messages: list[dict[str, Any]],
         usage: dict[str, int],
         model_kwargs: dict[str, Any],
+        *,
+        use_tools: bool = True,
     ) -> Generator[str, None, ModelResponse]:
         """Consume provider chunks, forwarding text and reassembling tool calls."""
 
@@ -497,7 +611,7 @@ class AgentRuntime:
         call_parts: dict[int, dict[str, str]] = {}
         finish_reason: str | None = None
 
-        for chunk in self._stream_complete(messages, **model_kwargs):
+        for chunk in self._stream_complete(messages, use_tools=use_tools, **model_kwargs):
             if chunk.content:
                 content_parts.append(chunk.content)
                 yield chunk.content
@@ -518,10 +632,16 @@ class AgentRuntime:
             finish_reason=finish_reason,
         )
 
-    def _stream_complete(self, messages: list[dict[str, Any]], **model_kwargs: Any) -> Iterator[ModelStreamChunk]:
+    def _stream_complete(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        use_tools: bool = True,
+        **model_kwargs: Any,
+    ) -> Iterator[ModelStreamChunk]:
         stream_method = getattr(self.provider, "stream_complete", None)
         if stream_method is None:
-            response = self._complete(messages, **model_kwargs)
+            response = self._complete(messages, use_tools=use_tools, **model_kwargs)
             tool_calls = [
                 ToolCallDelta(
                     index=index,
@@ -544,8 +664,7 @@ class AgentRuntime:
         try:
             chunks = stream_method(
                 messages,
-                tools=self.tools.specs(),
-                tool_choice=self.config.tool_choice,
+                **self._request_options(use_tools),
                 **model_kwargs,
             )
             for chunk in chunks:

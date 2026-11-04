@@ -31,6 +31,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 from urllib.parse import urljoin, urlparse, urlunparse
+from xml.etree import ElementTree
 
 import httpx
 
@@ -42,9 +43,25 @@ DEFAULT_WORKSPACE = "/app/workspace"
 DEFAULT_MAX_OUTPUT_BYTES = 200_000
 DEFAULT_MAX_FILE_BYTES = 2_000_000
 DEFAULT_WEB_MAX_BYTES = 1_000_000
+DEFAULT_SEARCH_RESULTS = 5
+MAX_SEARCH_RESULTS = 10
+# Bing's RSS view is a stable, script-free search API and works where the HTML
+# search pages are blocked or rate limited.
+BING_RSS_ENDPOINT = "https://www.bing.com/search"
 MAX_READ_LINES = 5000
 MAX_MONITOR_LINES = 5000
 MAX_REDIRECTS = 5
+
+# Search engines reject non-browser clients; WebFetch keeps its own agent UA.
+SEARCH_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+_SEARCH_HEADERS = {
+    "User-Agent": SEARCH_USER_AGENT,
+    "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
+}
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico"}
 SKIP_DIRECTORIES = {".git", ".hg", ".svn", "node_modules", "__pycache__", ".venv", "venv", ".next"}
@@ -83,6 +100,7 @@ class DevToolConfig:
     web_timeout: float
     web_max_bytes: int
     web_allow_private: bool
+    web_search_url: str = ""
     executor: Optional[agent_executor.ExecutorConfig] = None
 
 
@@ -101,6 +119,7 @@ def load_dev_tool_config() -> Optional[DevToolConfig]:
         web_timeout=max(1.0, _env_float("AGENT_WEB_FETCH_TIMEOUT_SECONDS", 30.0)),
         web_max_bytes=max(1000, _env_int("AGENT_WEB_FETCH_MAX_BYTES", DEFAULT_WEB_MAX_BYTES)),
         web_allow_private=_env_bool("AGENT_WEB_FETCH_ALLOW_PRIVATE", False),
+        web_search_url=(os.environ.get("AGENT_WEB_SEARCH_URL") or "").strip(),
         executor=agent_executor.load_executor_config(),
     )
 
@@ -410,6 +429,116 @@ def _fetch_url_uncached(config: DevToolConfig, url: str) -> Dict[str, Any]:
         "content": text,
         "truncated": truncated or len(body) >= config.web_max_bytes,
     }
+
+
+def _parse_bing_rss(text: str, limit: int) -> List[Dict[str, str]]:
+    """Read Bing's RSS search response into title/url/snippet entries."""
+    try:
+        root = ElementTree.fromstring(text)
+    except ElementTree.ParseError as exc:
+        raise RuntimeError("Bing returned a malformed RSS response") from exc
+
+    results: List[Dict[str, str]] = []
+    for item in root.iter("item"):
+        url = (item.findtext("link") or "").strip()
+        if not url:
+            continue
+        results.append(
+            {
+                "title": re.sub(r"\s+", " ", item.findtext("title") or "").strip(),
+                "url": url,
+                "snippet": re.sub(r"\s+", " ", item.findtext("description") or "").strip(),
+            }
+        )
+        if len(results) >= limit:
+            break
+    return results
+
+
+def _search_results_from_payload(payload: Any, limit: int) -> List[Dict[str, str]]:
+    """Read SearXNG's JSON ``results`` array."""
+    if not isinstance(payload, dict):
+        raise RuntimeError("search endpoint returned an unexpected payload")
+    results: List[Dict[str, str]] = []
+    for item in payload.get("results") or []:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or "").strip()
+        if not url:
+            continue
+        results.append(
+            {
+                "title": re.sub(r"\s+", " ", str(item.get("title") or "")).strip(),
+                "url": url,
+                "snippet": re.sub(r"\s+", " ", str(item.get("content") or "")).strip(),
+            }
+        )
+        if len(results) >= limit:
+            break
+    return results
+
+
+def _request_search(
+    config: DevToolConfig,
+    method: str,
+    url: str,
+    *,
+    params: Optional[Dict[str, str]] = None,
+) -> str:
+    with httpx.Client(timeout=config.web_timeout, follow_redirects=True) as client:
+        try:
+            with client.stream(method, url, params=params, headers=_SEARCH_HEADERS) as streamed:
+                if streamed.status_code >= 400:
+                    raise RuntimeError(f"search request to {streamed.url} failed with HTTP {streamed.status_code}")
+                chunks: List[bytes] = []
+                total = 0
+                for chunk in streamed.iter_bytes():
+                    total += len(chunk)
+                    if total > config.web_max_bytes:
+                        break
+                    chunks.append(chunk)
+                body = b"".join(chunks)
+                return body.decode(streamed.encoding or "utf-8", errors="replace")
+        except httpx.HTTPError as exc:
+            raise RuntimeError(f"could not reach the search endpoint {url}: {exc}") from exc
+
+
+def _search_web(config: DevToolConfig, query: str, max_results: int) -> Dict[str, Any]:
+    """Search with a configured SearXNG endpoint, or Bing RSS when unset."""
+    query = (query or "").strip()
+    if not query:
+        raise ValueError("query must not be empty")
+    limit = max(1, min(int(max_results), MAX_SEARCH_RESULTS))
+
+    if config.web_search_url:
+        base = config.web_search_url.rstrip("/")
+        url = base if base.endswith("/search") else f"{base}/search"
+        _validate_public_url(url, config.web_allow_private)
+        body = _request_search(config, "GET", url, params={"q": query, "format": "json"})
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"search endpoint {url} did not return JSON; "
+                "point AGENT_WEB_SEARCH_URL at a SearXNG instance or leave it empty"
+            ) from exc
+        results = _search_results_from_payload(payload, limit)
+        provider = "searxng"
+    else:
+        _validate_public_url(BING_RSS_ENDPOINT, config.web_allow_private)
+        body = _request_search(config, "GET", BING_RSS_ENDPOINT, params={"q": query, "format": "rss"})
+        results = _parse_bing_rss(body, limit)
+        provider = "bing"
+
+    response: Dict[str, Any] = {
+        "query": query,
+        "provider": provider,
+        "results": results,
+        "truncated": len(results) >= limit,
+    }
+    if not results:
+        response["note"] = "No results. Try different keywords, or fetch a known URL with WebFetch."
+    return response
 
 
 class _Monitor:
@@ -875,6 +1004,17 @@ def build_dev_tools(sdk, config: Optional[DevToolConfig] = None):
         """
         return _fetch_url(cfg, url, cache=fetch_cache)
 
+    def WebSearch(query: str, max_results: int = DEFAULT_SEARCH_RESULTS) -> Dict[str, Any]:
+        """Search the web and return result titles, URLs, and snippets.
+
+        Use it to discover pages, then pass a result URL to WebFetch.
+
+        Args:
+            query: Search keywords in natural language.
+            max_results: Maximum number of results to return (1-10).
+        """
+        return _search_web(cfg, query, max_results)
+
     def Monitor(
         action: Literal["start", "poll", "stop"],
         command: str = "",
@@ -901,6 +1041,7 @@ def build_dev_tools(sdk, config: Optional[DevToolConfig] = None):
         sdk.tool(Glob, name="Glob"),
         sdk.tool(Grep, name="Grep"),
         sdk.tool(WebFetch, name="WebFetch"),
+        sdk.tool(WebSearch, name="WebSearch"),
     ]
 
     if cfg.allow_shell:

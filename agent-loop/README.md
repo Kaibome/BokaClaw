@@ -243,6 +243,21 @@ When the server runs the agent in-process, compression is on by default at
 32,000 tokens with 16,000-character tool results; see
 [Server configuration](#server-configuration) to change or disable it.
 
+## Step limit
+
+`AgentConfig.max_iterations` caps the number of ReAct steps. When the budget
+runs out while the model is still calling tools, the runtime makes **one final
+request with tools disabled** and a short instruction to answer from what it
+already gathered; set
+`AgentConfig(final_answer_on_max_iterations=False)` to fail the turn instead.
+
+The successful path returns a normal `RunResult` with
+`stop_reason="max_iterations"` (the step limit is informational, not an
+error), persists the turn as `completed`, and streams the answer in
+`stream()` mode. The step-limit instruction is part of that one request view
+only; it is never written to the session. If the final request returns no
+text, the run raises `MaxIterationsExceeded` exactly as before.
+
 ## Postgres configuration
 
 `PostgresConfig.from_env()` reads the same variables as the BokaClaw server:
@@ -414,6 +429,7 @@ closing the request cancels the upstream turn.
 | `AGENT_LOOP_READ_TIMEOUT_SECONDS` | `120` | Read timeout. |
 | `AGENT_LOOP_MAX_SECONDS` | `300` | Total wall clock for one turn. |
 | `AGENT_LOOP_HISTORY_MESSAGES` | `40` | Prior turns forwarded as context. |
+| `AGENT_FINAL_ANSWER_ON_MAX_ITERATIONS` | `true` | In-process runtime: answer with one tool-free request at the step limit instead of failing. |
 | `AGENT_CONTEXT_MAX_TOKENS` | `32000` | In-process runtime token budget; `0` / `off` disables compression. |
 | `AGENT_CONTEXT_KEEP_RECENT_TOKENS` | — | Recent tokens kept verbatim; empty uses half the budget. |
 | `AGENT_CONTEXT_COMPRESSION` | `summary` | `summary` or `truncate`; anything else falls back to `summary`. |
