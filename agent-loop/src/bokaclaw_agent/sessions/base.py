@@ -9,7 +9,12 @@ from pydantic import BaseModel, Field
 
 
 class SessionRecord(BaseModel):
-    """Metadata for one persisted conversation."""
+    """Metadata for one persisted conversation.
+
+    ``status`` is one of ``active``, ``completed``, ``failed``, or
+    ``cancelled``. A run stopped through ``cancel_event`` is recorded as
+    ``cancelled`` after its pending tool calls are filled with aborted results.
+    """
 
     id: str
     agent_name: str

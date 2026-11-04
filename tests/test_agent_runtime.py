@@ -16,7 +16,13 @@ if _SERVER_DIR not in sys.path:
     sys.path.insert(0, _SERVER_DIR)
 
 import app.agent.runtime as agent_runtime  # noqa: E402
-from app.agent.events import AgentCompleted, AgentDelta, AgentLoopError  # noqa: E402
+from app.agent.events import (  # noqa: E402
+    AgentCompleted,
+    AgentDelta,
+    AgentLoopError,
+    AgentToolCall,
+    AgentToolResult,
+)
 
 
 class FakeMaxIterationsExceeded(Exception):
@@ -44,10 +50,11 @@ class FakeTool:
 
 
 class FakeRuntime:
-    def __init__(self, sdk, config, tools):
+    def __init__(self, sdk, config, tools, on_event=None):
         self.sdk = sdk
         self.config = config
         self.tools = list(tools)
+        self.on_event = on_event
         self.run_calls = []
         self.stream_calls = []
         self.closed = False
@@ -64,6 +71,9 @@ class FakeRuntime:
 
     def stream(self, messages, **kwargs):
         self.stream_calls.append((messages, kwargs))
+        for event in self.sdk.events:
+            if self.on_event is not None:
+                self.on_event(event)
         if self.sdk.delay:
             import time
 
@@ -91,14 +101,15 @@ class FakeSDK:
         self.delay = delay
         self.tools = []
         self.runtimes = []
+        self.events = []
 
     def tool(self, fn, *, name=None):
         wrapped = FakeTool(fn, name=name)
         self.tools.append(wrapped)
         return wrapped
 
-    def AgentRuntime(self, config, *, tools=()):
-        runtime = FakeRuntime(self, config, tools)
+    def AgentRuntime(self, config, *, tools=(), on_event=None):
+        runtime = FakeRuntime(self, config, tools, on_event=on_event)
         self.runtimes.append(runtime)
         return runtime
 
@@ -392,6 +403,53 @@ async def test_stream_local_agent_emits_final_answer(monkeypatch):
     assert len(runtime.tools) == 2
     assert runtime.closed is True
     assert runtime.config.kwargs["model"].kwargs["model"] == "test-model"
+
+
+@pytest.mark.asyncio
+async def test_stream_local_agent_forwards_tool_events(monkeypatch):
+    sdk = FakeSDK(result=_result("done"))
+    sdk.events = [
+        types.SimpleNamespace(
+            type="tool_call",
+            iteration=1,
+            data={
+                "tool_call_id": "call_1",
+                "name": "Read",
+                "arguments": {"path": "README.md"},
+                "raw_arguments": '{"path": "README.md"}',
+                "arguments_error": None,
+            },
+        ),
+        types.SimpleNamespace(
+            type="tool_result",
+            iteration=1,
+            data={
+                "tool_call_id": "call_1",
+                "name": "Read",
+                "content": "hello",
+                "is_error": False,
+                "status": "completed",
+            },
+        ),
+    ]
+    monkeypatch.setattr(agent_runtime, "load_local_config", lambda: _config())
+    monkeypatch.setattr(agent_runtime, "_load_sdk", lambda: sdk)
+
+    events = await _collect(_payload())
+
+    tool_events = [event for event in events if isinstance(event, (AgentToolCall, AgentToolResult))]
+    assert [type(event) for event in tool_events] == [AgentToolCall, AgentToolResult]
+    call, result = tool_events
+    assert call.tool_call_id == "call_1"
+    assert call.name == "Read"
+    assert call.iteration == 1
+    assert call.arguments == {"path": "README.md"}
+    assert call.raw_arguments == '{"path": "README.md"}'
+    assert result.tool_call_id == "call_1"
+    assert result.content == "hello"
+    assert result.is_error is False
+    assert result.status == "completed"
+    assert sdk.runtimes[0].on_event is not None
 
 
 @pytest.mark.asyncio

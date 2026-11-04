@@ -80,6 +80,75 @@ def test_ensure_schema_creates_both_tables_once():
     assert len(pool.executed) == executed_before
 
 
+LEGACY_STATUS_CHECK = "CHECK ((status = ANY (ARRAY['active'::text, 'completed'::text, 'failed'::text])))"
+UPGRADED_STATUS_CHECK = (
+    "CHECK ((status = ANY (ARRAY['active'::text, 'completed'::text, 'failed'::text, 'cancelled'::text])))"
+)
+
+
+def test_sessions_ddl_allows_the_cancelled_status():
+    pool = FakePool()
+    PostgresSessionStore(PostgresConfig(auto_create_schema=True), pool=pool)
+
+    sessions_ddl = next(
+        sql for sql, _ in pool.executed if "CREATE TABLE IF NOT EXISTS bokaclaw_agent_sessions (" in sql
+    )
+    assert "'cancelled'" in sessions_ddl
+
+
+def test_ensure_schema_upgrades_a_legacy_status_check():
+    pool = FakePool(fetchall=[[("bokaclaw_agent_sessions_status_check", LEGACY_STATUS_CHECK)]])
+
+    PostgresSessionStore(PostgresConfig(auto_create_schema=True), pool=pool)
+
+    alters = [(sql, params) for sql, params in pool.executed if "ALTER TABLE" in sql]
+    assert len(alters) == 2
+    assert "DROP CONSTRAINT" in alters[0][0]
+    assert '"bokaclaw_agent_sessions_status_check"' in alters[0][0]
+    assert "ADD CONSTRAINT" in alters[1][0]
+    assert '"bokaclaw_agent_sessions_status_check"' in alters[1][0]
+    assert "'cancelled'" in alters[1][0]
+
+
+def test_ensure_schema_uses_the_actual_constraint_name():
+    pool = FakePool(fetchall=[[("custom_status_check", LEGACY_STATUS_CHECK)]])
+
+    PostgresSessionStore(PostgresConfig(auto_create_schema=True), pool=pool)
+
+    alters = [sql for sql, _ in pool.executed if "ALTER TABLE" in sql]
+    assert len(alters) == 2
+    assert '"custom_status_check"' in alters[0]
+    assert '"custom_status_check"' in alters[1]
+
+
+def test_ensure_schema_leaves_an_upgraded_status_check_alone():
+    pool = FakePool(fetchall=[[("bokaclaw_agent_sessions_status_check", UPGRADED_STATUS_CHECK)]])
+
+    PostgresSessionStore(PostgresConfig(auto_create_schema=True), pool=pool)
+
+    assert not any("ALTER TABLE" in sql for sql, _ in pool.executed)
+
+
+def test_status_check_migration_does_not_run_twice():
+    pool = FakePool(fetchall=[[("bokaclaw_agent_sessions_status_check", LEGACY_STATUS_CHECK)]])
+    store = PostgresSessionStore(PostgresConfig(auto_create_schema=True), pool=pool)
+    executed_after_init = len(pool.executed)
+
+    store.ensure_schema()
+
+    assert len(pool.executed) == executed_after_init
+
+
+def test_persist_run_accepts_the_cancelled_status():
+    pool = FakePool(fetchone=[(0,)])
+    store = make_store(pool)
+
+    store.persist_run("s1", [{"role": "user", "content": "hi"}], agent_name="agent", status="cancelled")
+
+    session_params = pool.executed[0][1]
+    assert session_params[5] == "cancelled"
+
+
 def test_get_session_maps_row():
     now = datetime.now(timezone.utc)
     pool = FakePool(fetchone=[("s1", "agent", "u1", "title", {"a": 1}, "completed", None, now, now)])

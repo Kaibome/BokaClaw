@@ -1,12 +1,20 @@
 import asyncio
 import json
 import os
+import threading
 from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
 import httpx
 
-from app.agent.events import AgentCompleted, AgentDelta, AgentEvent, AgentLoopError
+from app.agent.events import (
+    AgentCompleted,
+    AgentDelta,
+    AgentEvent,
+    AgentLoopError,
+    AgentToolCall,
+    AgentToolResult,
+)
 from app.agent.runtime import is_locally_configured, stream_local_agent
 
 MOCK_RESPONSE = (
@@ -75,14 +83,99 @@ def sse_comment(text: str = "ping") -> str:
     return f": {text}\n\n"
 
 
-async def _mock_events() -> AsyncIterator[AgentEvent]:
+async def _mock_events(cancel_event: threading.Event | None = None) -> AsyncIterator[AgentEvent]:
     for index in range(0, len(MOCK_RESPONSE), 3):
+        if cancel_event is not None and cancel_event.is_set():
+            raise AgentLoopError("agent_cancelled", "Agent run was cancelled.")
         await asyncio.sleep(0.03)
         yield AgentDelta(MOCK_RESPONSE[index : index + 3])
     yield AgentCompleted(metadata={"finish_reason": "stop", "mock": True})
 
 
+def _parse_json_object(event_name: str, data: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(data)
+    except json.JSONDecodeError as exc:
+        raise AgentLoopError(
+            "agent_protocol_error",
+            f"Agent executor sent invalid JSON in {event_name}.",
+        ) from exc
+    if not isinstance(payload, dict):
+        raise AgentLoopError(
+            "agent_protocol_error",
+            f"Agent executor sent a non-object payload in {event_name}.",
+        )
+    return payload
+
+
+def _as_int(value: Any, default: int | None = None) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _tool_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False, default=str)
+
+
+def _tool_arguments(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
+
+
+def _handle_tool_event(event_name: str, payload: dict[str, Any]) -> AgentEvent | None:
+    tool_call_id = payload.get("tool_call_id")
+    name = payload.get("name")
+    if not isinstance(tool_call_id, str) or not tool_call_id:
+        return None
+    if not isinstance(name, str) or not name:
+        return None
+
+    iteration = _as_int(payload.get("iteration"), 0) or 0
+    if event_name in {"tool.call", "tool_call"}:
+        raw_arguments = payload.get("raw_arguments")
+        arguments_error = payload.get("arguments_error")
+        return AgentToolCall(
+            tool_call_id=tool_call_id,
+            name=name,
+            iteration=iteration,
+            arguments=_tool_arguments(payload.get("arguments")),
+            raw_arguments=raw_arguments if isinstance(raw_arguments, str) else None,
+            arguments_error=arguments_error if isinstance(arguments_error, str) else None,
+        )
+
+    is_error = bool(payload.get("is_error"))
+    status = payload.get("status")
+    if status not in {"completed", "failed", "aborted"}:
+        status = "failed" if is_error else "completed"
+    return AgentToolResult(
+        tool_call_id=tool_call_id,
+        name=name,
+        content=_tool_text(payload.get("content")),
+        is_error=is_error,
+        iteration=iteration,
+        status=status,
+        duration_ms=_as_int(payload.get("duration_ms")),
+    )
+
+
 def _handle_upstream_event(event_name: str, data: str) -> AgentEvent | None:
+    if event_name in {"tool.call", "tool_call", "tool.result", "tool_result"}:
+        return _handle_tool_event(event_name, _parse_json_object(event_name, data))
+
     if event_name == "message.delta":
         try:
             payload = json.loads(data)
@@ -160,21 +253,32 @@ async def _parse_json_fallback(response: httpx.Response) -> AsyncIterator[AgentE
     yield AgentCompleted(metadata={"finish_reason": payload.get("finish_reason", "stop")})
 
 
-async def stream_agent(payload: dict[str, Any], request_id: str) -> AsyncIterator[AgentEvent]:
+def _cancelled(cancel_event: threading.Event | None) -> bool:
+    return cancel_event is not None and cancel_event.is_set()
+
+
+async def stream_agent(
+    payload: dict[str, Any],
+    request_id: str,
+    *,
+    cancel_event: threading.Event | None = None,
+    max_seconds: float | None = None,
+) -> AsyncIterator[AgentEvent]:
     """Yield deltas from the configured agent executor.
 
     Raises AgentLoopError for configuration, transport, and protocol failures.
     Callers are responsible for persisting partial content when this raises
-    after some deltas were yielded."""
+    after some deltas were yielded. ``cancel_event`` is polled between events
+    so a cancelled run stops without waiting for the next model token."""
     config = load_config()
 
     if config.mock:
-        async for event in _mock_events():
+        async for event in _mock_events(cancel_event):
             yield event
         return
 
     if not config.url:
-        async for event in stream_local_agent(payload):
+        async for event in stream_local_agent(payload, cancel_event=cancel_event, max_seconds=max_seconds):
             yield event
         return
 
@@ -192,9 +296,10 @@ async def stream_agent(payload: dict[str, Any], request_id: str) -> AsyncIterato
         write=10.0,
         pool=5.0,
     )
+    deadline = max_seconds if max_seconds is not None else config.max_seconds
 
     try:
-        async with asyncio.timeout(config.max_seconds):
+        async with asyncio.timeout(deadline):
             async with httpx.AsyncClient(timeout=timeout) as client:
                 async with client.stream(
                     "POST",
@@ -212,9 +317,13 @@ async def stream_agent(payload: dict[str, Any], request_id: str) -> AsyncIterato
                     content_type = response.headers.get("content-type", "")
                     if "text/event-stream" in content_type:
                         async for event in _parse_upstream_sse(response):
+                            if _cancelled(cancel_event):
+                                raise AgentLoopError("agent_cancelled", "Agent run was cancelled.")
                             yield event
                     else:
                         async for event in _parse_json_fallback(response):
+                            if _cancelled(cancel_event):
+                                raise AgentLoopError("agent_cancelled", "Agent run was cancelled.")
                             yield event
     except AgentLoopError:
         raise

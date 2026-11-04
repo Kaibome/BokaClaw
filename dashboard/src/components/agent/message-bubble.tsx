@@ -1,5 +1,7 @@
-import { AlertCircle } from "lucide-react";
+import { AlertCircle, RotateCcw } from "lucide-react";
 
+import { ToolTrace } from "@/components/agent/tool-trace";
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { ChatMessageView } from "@/hooks/use-agent-chat";
 
@@ -16,8 +18,31 @@ function TypingDots() {
   );
 }
 
-export function MessageBubble({ message }: { message: ChatMessageView }) {
+export function MessageBubble({
+  message,
+  onRetry,
+}: {
+  message: ChatMessageView;
+  onRetry?: (message: ChatMessageView) => void;
+}) {
   const isUser = message.role === "user";
+  const isInterrupted = !isUser && message.runStatus === "interrupted";
+  const isFailed =
+    !isUser &&
+    !isInterrupted &&
+    (message.runStatus === "failed" || message.failed === true);
+  const isCancelled =
+    !isUser &&
+    !isInterrupted &&
+    (message.runStatus === "cancelled" || message.status === "cancelled");
+  const isReconnecting = message.reconnecting === true;
+  const isStopping = message.cancelRequested === true && message.streaming;
+  const canRetry =
+    !isUser &&
+    !message.streaming &&
+    !isReconnecting &&
+    (isInterrupted || isFailed || isCancelled) &&
+    typeof onRetry === "function";
 
   return (
     <div
@@ -36,24 +61,57 @@ export function MessageBubble({ message }: { message: ChatMessageView }) {
       >
         {message.content ? (
           <span>{message.content}</span>
-        ) : message.streaming ? (
+        ) : message.streaming && !isReconnecting ? (
           <TypingDots />
         ) : null}
-        {message.streaming && message.content && (
+        {message.streaming && !isReconnecting && message.content && (
           <span className="ml-0.5 inline-block h-4 w-[2px] translate-y-0.5 animate-pulse bg-onSurface-default-primary align-middle" />
         )}
       </div>
 
-      {message.status === "cancelled" && (
+      {!isUser && message.toolTrace?.length ? (
+        <ToolTrace entries={message.toolTrace} />
+      ) : null}
+
+      {isReconnecting && (
+        <span className="typo-caption-sm text-onSurface-default-tertiary">
+          RECONNECTING…
+        </span>
+      )}
+      {isStopping && (
+        <span className="typo-caption-sm text-onSurface-default-tertiary">
+          STOPPING…
+        </span>
+      )}
+      {isInterrupted && (
+        <span className="flex items-center gap-1 typo-caption-sm text-onSurface-danger-primary">
+          <AlertCircle className="size-3" />
+          INTERRUPTED
+        </span>
+      )}
+      {isCancelled && (
         <span className="typo-caption-sm text-onSurface-default-tertiary">
           STOPPED
         </span>
       )}
-      {message.failed && (
+      {isFailed && (
         <span className="flex items-center gap-1 typo-caption-sm text-onSurface-danger-primary">
           <AlertCircle className="size-3" />
           FAILED
         </span>
+      )}
+
+      {canRetry && (
+        <Button
+          type="button"
+          variant="ghost"
+          size="xs"
+          className="h-6 gap-1 px-1.5 text-onSurface-default-secondary"
+          onClick={() => onRetry?.(message)}
+        >
+          <RotateCcw className="size-3" />
+          Retry
+        </Button>
       )}
     </div>
   );

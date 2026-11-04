@@ -1,8 +1,11 @@
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
+from app.agent.repo import RunRepository
+from app.agent.runner import serialize_active_run
 from app.agent.schemas import (
     ConversationCreate,
     ConversationDetailOut,
@@ -68,9 +71,11 @@ def get_conversation(
     conversation = get_owned_conversation(db, conversation_id, user.id)
     messages = list_messages(db, conversation.id, limit=MAX_DETAIL_MESSAGES)
     detail = serialize_conversation(conversation)
+    active = RunRepository().get_active_run(conversation.id)
     return ConversationDetailOut(
         **detail.model_dump(),
         messages=[serialize_message(message) for message in messages],
+        active_run=serialize_active_run(active) if active is not None else None,
     )
 
 
@@ -96,6 +101,17 @@ def delete_conversation(
     db: Session = Depends(get_db),
 ):
     conversation = get_owned_conversation(db, conversation_id, user.id)
+    active = RunRepository().get_active_run(conversation.id)
+    if active is not None:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": "Cancel the active agent run before deleting this conversation.",
+                "code": "agent_run_active",
+                "run_id": str(active.id),
+                "conversation_id": str(conversation.id),
+            },
+        )
     db.delete(conversation)
     db.commit()
     return MessageResponse(message="Conversation deleted.")

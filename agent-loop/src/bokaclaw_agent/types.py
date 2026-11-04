@@ -76,7 +76,7 @@ class RunResult(BaseModel):
 
     session_id: str
     content: str | None = None
-    stop_reason: Literal["final", "length", "content_filter", "max_iterations"]
+    stop_reason: Literal["final", "length", "content_filter", "max_iterations", "cancelled"]
     new_messages: list[dict[str, Any]] = Field(default_factory=list)
     tool_results: list[ToolResult] = Field(default_factory=list)
     iterations: int = 0
@@ -101,5 +101,6 @@ class AgentEvent(BaseModel):
     type: EventType
     session_id: str
     iteration: int = 0
+    seq: int = 0
     data: dict[str, Any] = Field(default_factory=dict)
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

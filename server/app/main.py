@@ -2,8 +2,10 @@ import asyncio
 import logging
 import os
 import time
+from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
+from app.agent.runner import AgentRunManager
 from app.core import telemetry
 from app.core.auth import ADMIN_API_KEY, AUTH_DISABLED, JWT_SECRET, require_admin, verify_auth
 from app.core.db import SessionLocal
@@ -155,6 +157,30 @@ set_session_factory(SessionLocal)
 initialize_state(DEFAULT_CONFIG)
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Own the background agent-run worker for this process.
+
+    Startup recovery and shutdown finalization are best effort: a database that
+    has not been migrated yet must not stop the rest of the API (memories,
+    auth, configuration) from serving."""
+    manager = AgentRunManager()
+    app.state.agent_runs = manager
+    if manager.config.background:
+        try:
+            await manager.startup()
+        except Exception:
+            logging.exception("Failed to start the agent run manager")
+    try:
+        yield
+    finally:
+        if manager.config.background:
+            try:
+                await manager.shutdown()
+            except Exception:
+                logging.exception("Failed to shut down the agent run manager")
+
+
 app = FastAPI(
     title="Mem0 REST APIs",
     description=(
@@ -165,6 +191,7 @@ app = FastAPI(
     ),
     version="1.0.0",
     redirect_slashes=False,
+    lifespan=lifespan,
 )
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)

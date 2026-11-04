@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field, field_validator
 
 ChatRole = Literal["user", "assistant", "system", "tool"]
 MessageStatus = Literal["completed", "cancelled", "failed"]
+RunStatus = Literal["queued", "running", "completed", "failed", "cancelled", "interrupted"]
 
 
 class ConversationCreate(BaseModel):
@@ -55,15 +56,48 @@ class ConversationMessageOut(BaseModel):
     created_at: datetime
 
 
+class ActiveRunOut(BaseModel):
+    id: str
+    status: RunStatus
+    last_seq: int
+    assistant_message_id: str | None
+    cancel_requested_at: datetime | None
+    created_at: datetime
+
+
+class AgentRunOut(BaseModel):
+    id: str
+    conversation_id: str
+    status: RunStatus
+    error_code: str | None
+    error_detail: str | None
+    last_seq: int
+    partial_content: str
+    assistant_message_id: str | None
+    cancel_requested_at: datetime | None
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+
+
+class RunCancelOut(BaseModel):
+    run_id: str
+    status: RunStatus
+    cancel_requested_at: datetime | None
+
+
 class ConversationDetailOut(ConversationOut):
     messages: list[ConversationMessageOut]
+    active_run: ActiveRunOut | None = None
 
 
 class AgentInvokeRequest(BaseModel):
     conversation_id: uuid.UUID | None = None
     message: str = Field(..., min_length=1, max_length=32_000)
     agent_id: str | None = Field(None, max_length=255)
+    # Deprecated: mem0 memory scope. Execution uses agent_runs.id (run_id).
     run_id: str | None = Field(None, max_length=255)
+    client_run_id: str | None = Field(None, max_length=255)
     metadata: dict[str, Any] = Field(default_factory=dict)
     stream: bool = False
 
@@ -80,3 +114,4 @@ class AgentInvokeResponse(BaseModel):
     conversation: ConversationOut
     user_message: ConversationMessageOut
     message: ConversationMessageOut
+    run_id: str | None = None

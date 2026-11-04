@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 from collections.abc import Callable, Generator, Iterable, Iterator
-from typing import Any
+from typing import Any, NoReturn
 from uuid import uuid4
 
 from .config import AgentConfig
 from .context import ContextManager, assistant_message, normalize_input, tool_message
-from .exceptions import AgentError, ConfigurationError, MaxIterationsExceeded, ModelError
+from .exceptions import AgentError, ConfigurationError, MaxIterationsExceeded, ModelError, RunCancelled
 from .providers.base import ModelProvider
 from .providers.openai_compatible import OpenAICompatibleProvider
 from .sessions.base import SessionRecord, SessionStore
@@ -78,6 +79,7 @@ class AgentRuntime:
         self.store = store
         self.on_event = on_event
         self.tools = ToolRegistry(tools)
+        self._event_seq = 0
 
     def register_tool(self, item: Tool | Callable[..., Any]) -> Tool:
         """Register a tool after construction and return it."""
@@ -91,6 +93,7 @@ class AgentRuntime:
         session_id: str | None = None,
         user_id: str | None = None,
         metadata: dict[str, Any] | None = None,
+        cancel_event: threading.Event | None = None,
         **model_kwargs: Any,
     ) -> RunResult:
         """Run the ReAct loop once and return the final assistant turn.
@@ -101,7 +104,13 @@ class AgentRuntime:
                 when omitted.
             user_id: Optional owner recorded on the session row.
             metadata: Session metadata merged into the existing JSONB object.
+            cancel_event: Cooperative cancellation signal checked at safe
+                boundaries. When set, the run stops and raises
+                :class:`~bokaclaw_agent.exceptions.RunCancelled`.
             **model_kwargs: Forwarded to the provider's ``complete``.
+
+        Raises:
+            RunCancelled: ``cancel_event`` was set at a safe boundary.
         """
 
         turn = self._execute(
@@ -111,6 +120,7 @@ class AgentRuntime:
             metadata=metadata,
             stream=False,
             model_kwargs=model_kwargs,
+            cancel_event=cancel_event,
         )
         while True:
             try:
@@ -125,6 +135,7 @@ class AgentRuntime:
         session_id: str | None = None,
         user_id: str | None = None,
         metadata: dict[str, Any] | None = None,
+        cancel_event: threading.Event | None = None,
         **model_kwargs: Any,
     ) -> Generator[str, None, RunResult]:
         """Run the ReAct loop, yielding assistant text deltas as they arrive.
@@ -132,7 +143,8 @@ class AgentRuntime:
         The final :class:`RunResult` is returned when the generator is
         exhausted. Providers that do not implement ``stream_complete`` are
         supported through a one-chunk fallback. Closing the generator before
-        exhaustion abandons the turn without persisting it.
+        exhaustion abandons the turn without persisting it; that is not
+        cancellation.
 
         Args:
             input: A user string or a list of OpenAI wire-format messages.
@@ -140,7 +152,14 @@ class AgentRuntime:
                 when omitted.
             user_id: Optional owner recorded on the session row.
             metadata: Session metadata merged into the existing JSONB object.
+            cancel_event: Cooperative cancellation signal checked between the
+                streaming chunks and the tool calls, never inside the chunk
+                loop. When set, the run stops and raises
+                :class:`~bokaclaw_agent.exceptions.RunCancelled`.
             **model_kwargs: Forwarded to the provider's ``stream_complete``.
+
+        Raises:
+            RunCancelled: ``cancel_event`` was set at a safe boundary.
         """
 
         turn = self._execute(
@@ -150,6 +169,7 @@ class AgentRuntime:
             metadata=metadata,
             stream=True,
             model_kwargs=model_kwargs,
+            cancel_event=cancel_event,
         )
         while True:
             try:
@@ -167,6 +187,7 @@ class AgentRuntime:
         metadata: dict[str, Any] | None,
         stream: bool,
         model_kwargs: dict[str, Any],
+        cancel_event: threading.Event | None = None,
     ) -> Generator[str, None, RunResult]:
         """Shared ReAct loop. Yields text deltas only when ``stream`` is true."""
 
@@ -181,12 +202,29 @@ class AgentRuntime:
         stop_reason = "final"
         content: str | None = None
 
+        # Event sequence numbers are scoped to one run and restart at 1.
+        self._event_seq = 0
         self._emit(
             EventType.RUN_START,
             session_id,
             0,
             {"input": input if isinstance(input, str) else "[messages]"},
         )
+
+        def check_cancelled(iteration: int) -> None:
+            if cancel_event is not None and cancel_event.is_set():
+                self._cancel_run(
+                    session_id=session_id,
+                    new_messages=new_messages,
+                    context=context,
+                    pending_calls=pending_calls,
+                    tool_results=tool_results,
+                    user_id=user_id,
+                    metadata=metadata,
+                    iteration=iteration,
+                    content=content,
+                    usage=usage,
+                )
 
         try:
             history = self.store.load_messages(session_id) if self.store is not None else []
@@ -198,6 +236,8 @@ class AgentRuntime:
 
             for iteration in range(1, self.config.max_iterations + 1):
                 iterations = iteration
+                # Cooperative cancellation: before each ReAct iteration.
+                check_cancelled(iteration)
                 messages = context.build()
                 tool_specs = self.tools.specs()
                 self._emit(
@@ -227,12 +267,20 @@ class AgentRuntime:
                 new_messages.append(assistant)
                 content = response.content
 
+                # Cooperative cancellation: after the model response and
+                # before this response's tool calls execute. Never inside the
+                # streaming chunk loop, so the assistant message is complete.
+                pending_calls = list(response.tool_calls)
+                check_cancelled(iteration)
+
                 if not response.tool_calls:
                     stop_reason = _map_stop_reason(response.finish_reason)
                     break
 
                 for index, call in enumerate(response.tool_calls):
                     pending_calls = response.tool_calls[index:]
+                    # Cooperative cancellation: before each tool call.
+                    check_cancelled(iteration)
                     self._emit(
                         EventType.TOOL_CALL,
                         session_id,
@@ -241,6 +289,9 @@ class AgentRuntime:
                             "tool_call_id": call.id,
                             "name": call.name,
                             "arguments": call.arguments,
+                            "raw_arguments": call.raw_arguments,
+                            "arguments_error": call.arguments_error,
+                            "status": "running",
                         },
                     )
                     result = self.tools.invoke(call, error_mode=self.config.tool_error_mode)
@@ -254,12 +305,16 @@ class AgentRuntime:
                             "name": result.name,
                             "content": result.content,
                             "is_error": result.is_error,
+                            "status": "failed" if result.is_error else "completed",
                         },
                     )
                     message = tool_message(result)
                     context.append(message)
                     new_messages.append(message)
                     pending_calls = response.tool_calls[index + 1 :]
+                    # Cooperative cancellation: after each tool call, before
+                    # the next call or the next ReAct iteration.
+                    check_cancelled(iteration)
                 pending_calls = []
             else:
                 result = self._build_result(
@@ -297,6 +352,10 @@ class AgentRuntime:
 
         except MaxIterationsExceeded:
             raise
+        except RunCancelled:
+            # Already filled aborted tool messages, persisted as cancelled,
+            # and emitted run_ended inside _cancel_run.
+            raise
         except Exception as exc:
             self._handle_failure(
                 session_id,
@@ -306,6 +365,7 @@ class AgentRuntime:
                 tool_results,
                 user_id,
                 metadata,
+                iterations,
                 exc,
             )
             self._emit(
@@ -323,6 +383,7 @@ class AgentRuntime:
         session_id: str | None = None,
         user_id: str | None = None,
         metadata: dict[str, Any] | None = None,
+        cancel_event: threading.Event | None = None,
         **model_kwargs: Any,
     ) -> RunResult:
         """Async wrapper around :meth:`run`; safe for async tools and frameworks."""
@@ -333,6 +394,7 @@ class AgentRuntime:
             session_id=session_id,
             user_id=user_id,
             metadata=metadata,
+            cancel_event=cancel_event,
             **model_kwargs,
         )
 
@@ -550,22 +612,18 @@ class AgentRuntime:
         tool_results: list[ToolResult],
         user_id: str | None,
         metadata: dict[str, Any] | None,
+        iteration: int,
         exc: Exception,
     ) -> None:
-        # Keep the persisted conversation valid: every assistant tool call must
-        # be followed by a tool message, even when the run aborted mid-loop.
-        for call in pending_calls:
-            result = ToolResult(
-                tool_call_id=call.id,
-                name=call.name,
-                content=json.dumps({"error": f"run aborted: {exc}"}, ensure_ascii=False),
-                is_error=True,
-            )
-            tool_results.append(result)
-            message = tool_message(result)
-            context.append(message)
-            new_messages.append(message)
-
+        self._abort_pending_tool_calls(
+            session_id,
+            new_messages,
+            context,
+            pending_calls,
+            tool_results,
+            iteration,
+            reason=f"run aborted: {exc}",
+        )
         self._persist_best_effort(
             session_id,
             new_messages,
@@ -575,6 +633,90 @@ class AgentRuntime:
             error=f"{type(exc).__name__}: {exc}",
         )
 
+    def _cancel_run(
+        self,
+        *,
+        session_id: str,
+        new_messages: list[dict[str, Any]],
+        context: ContextManager,
+        pending_calls: list[ToolCall],
+        tool_results: list[ToolResult],
+        user_id: str | None,
+        metadata: dict[str, Any] | None,
+        iteration: int,
+        content: str | None,
+        usage: dict[str, int],
+    ) -> NoReturn:
+        """Finish a cancelled run: abort pending tools, persist, then raise."""
+
+        cancelled = RunCancelled(session_id, None, iteration)
+        self._abort_pending_tool_calls(
+            session_id,
+            new_messages,
+            context,
+            pending_calls,
+            tool_results,
+            iteration,
+            reason=f"run aborted: {cancelled}",
+        )
+        result = self._build_result(
+            session_id,
+            content,
+            "cancelled",
+            new_messages,
+            tool_results,
+            iteration,
+            usage,
+        )
+        cancelled.result = result
+        self._persist_best_effort(
+            session_id,
+            new_messages,
+            user_id,
+            metadata,
+            status="cancelled",
+            error=f"{type(cancelled).__name__}: {cancelled}",
+        )
+        self._emit(EventType.RUN_END, session_id, iteration, {"stop_reason": "cancelled"})
+        raise cancelled
+
+    def _abort_pending_tool_calls(
+        self,
+        session_id: str,
+        new_messages: list[dict[str, Any]],
+        context: ContextManager,
+        pending_calls: list[ToolCall],
+        tool_results: list[ToolResult],
+        iteration: int,
+        *,
+        reason: str,
+    ) -> None:
+        # Keep the persisted conversation valid: every assistant tool call must
+        # be followed by a tool message, even when the run aborted mid-loop.
+        for call in pending_calls:
+            result = ToolResult(
+                tool_call_id=call.id,
+                name=call.name,
+                content=json.dumps({"error": reason}, ensure_ascii=False),
+                is_error=True,
+            )
+            tool_results.append(result)
+            self._emit(
+                EventType.TOOL_RESULT,
+                session_id,
+                iteration,
+                {
+                    "tool_call_id": result.tool_call_id,
+                    "name": result.name,
+                    "content": result.content,
+                    "is_error": True,
+                    "status": "aborted",
+                },
+            )
+            message = tool_message(result)
+            context.append(message)
+            new_messages.append(message)
+
     def _emit(
         self,
         event_type: EventType,
@@ -582,12 +724,16 @@ class AgentRuntime:
         iteration: int,
         data: dict[str, Any],
     ) -> None:
+        # Sequence numbers are allocated for every event, even without a
+        # callback, and restart at 1 for each run.
+        self._event_seq += 1
         if self.on_event is None:
             return
         event = AgentEvent(
             type=event_type,
             session_id=session_id,
             iteration=iteration,
+            seq=self._event_seq,
             data=data,
         )
         try:

@@ -9,7 +9,7 @@ from typing import Any
 from ..exceptions import PersistenceError
 from .base import SessionRecord, derive_title
 
-_VALID_STATUSES = {"active", "completed", "failed"}
+_VALID_STATUSES = {"active", "completed", "failed", "cancelled"}
 
 
 class InMemorySessionStore:

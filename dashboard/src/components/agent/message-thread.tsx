@@ -14,6 +14,7 @@ interface MessageThreadProps {
   messages: ChatMessageView[];
   isLoading: boolean;
   error: string | null;
+  onRetry?: (message: ChatMessageView) => void;
 }
 
 function LoadingRows() {
@@ -31,6 +32,7 @@ export function MessageThread({
   messages,
   isLoading,
   error,
+  onRetry,
 }: MessageThreadProps) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
@@ -78,7 +80,11 @@ export function MessageThread({
           </div>
         ) : (
           messages.map((message) => (
-            <MessageBubble key={message.id} message={message} />
+            <MessageBubble
+              key={message.id}
+              message={message}
+              onRetry={onRetry}
+            />
           ))
         )}
 

@@ -54,6 +54,27 @@ class MaxIterationsExceeded(AgentError):
         super().__init__(f"Agent session {session_id!r} exceeded max_iterations{detail}")
 
 
+class RunCancelled(AgentError):
+    """Raised when ``cancel_event`` was set at a safe boundary.
+
+    The partial run is persisted with status ``cancelled`` and attached to the
+    exception as ``result`` so callers can inspect the messages and tool
+    results produced before the run stopped.
+    """
+
+    def __init__(
+        self,
+        session_id: str,
+        result: "RunResult | None" = None,
+        iteration: int = 0,
+    ) -> None:
+        self.session_id = session_id
+        self.result = result
+        self.iteration = iteration
+        detail = f" during iteration {iteration}" if iteration else ""
+        super().__init__(f"Agent session {session_id!r} was cancelled{detail}")
+
+
 class SessionStoreError(AgentError):
     """Raised when the session store cannot be used."""
 

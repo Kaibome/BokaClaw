@@ -16,7 +16,7 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
-import { useAgentChat } from "@/hooks/use-agent-chat";
+import { useAgentChat, type ChatMessageView } from "@/hooks/use-agent-chat";
 import type { Conversation } from "@/types/api";
 
 export default function AgentPage() {
@@ -28,6 +28,7 @@ export default function AgentPage() {
     isLoadingConversations,
     isLoadingMessages,
     isStreaming,
+    cancelRequested,
     error,
     send,
     stop,
@@ -49,6 +50,16 @@ export default function AgentPage() {
   const handleNewChat = () => {
     startNewChat();
     setMobileOpen(false);
+  };
+
+  const handleRetry = (message: ChatMessageView) => {
+    if (isStreaming) return;
+    const index = messages.findIndex((item) => item.id === message.id);
+    const previousUser = messages
+      .slice(0, index < 0 ? messages.length : index)
+      .reverse()
+      .find((item) => item.role === "user");
+    if (previousUser) void send(previousUser.content);
   };
 
   const list = (
@@ -114,13 +125,15 @@ export default function AgentPage() {
             messages={messages}
             isLoading={isLoadingConversations || isLoadingMessages}
             error={error}
+            onRetry={handleRetry}
           />
 
           <div className="shrink-0 border-t border-memBorder-primary p-3">
             <ChatComposer
-              onSend={(message) => void send(message)}
-              onStop={stop}
+              onSend={send}
+              onStop={() => void stop()}
               isStreaming={isStreaming}
+              cancelRequested={cancelRequested}
             />
           </div>
         </Card>

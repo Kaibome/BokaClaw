@@ -80,6 +80,51 @@ streamed. Providers that do not implement `stream_complete` fall back to a
 single delta containing `result.content`. Closing the generator before
 exhaustion abandons the turn without persisting it.
 
+## Cancellation
+
+`run()`, `stream()`, and `arun()` accept an optional `cancel_event`
+(`threading.Event`). Cancellation is cooperative: the runtime checks the event
+at safe boundaries and never interrupts a blocking model or tool call, nor the
+streaming chunk loop (a partially assembled assistant message would leave
+dangling tool calls).
+
+Checkpoints:
+
+1. before each ReAct iteration,
+2. after the model response returns and before its tool calls execute,
+3. before each tool call,
+4. after each tool call and before the next iteration.
+
+```python
+import threading
+
+from bokaclaw_agent import RunCancelled
+
+cancel = threading.Event()
+turn = runtime.stream("Explain pgvector.", session_id="user-42", cancel_event=cancel)
+
+cancel.set()   # from another thread
+
+try:
+    while True:
+        print(next(turn), end="", flush=True)
+except StopIteration as done:
+    result = done.value
+except RunCancelled as exc:
+    print(exc.session_id, exc.iteration)
+    print(exc.result.stop_reason)   # "cancelled"
+```
+
+On cancellation the runtime:
+
+1. fills every pending tool call with an aborted `tool` message,
+2. persists the session with status `cancelled` and a `RunCancelled: ...` error,
+3. emits `run_ended` with `{"stop_reason": "cancelled"}`,
+4. raises `RunCancelled`, whose `result` holds the partial `RunResult`.
+
+Closing a `stream()` generator early is not cancellation: it abandons the turn
+without persisting anything.
+
 ## Tools
 
 `@tool` derives a JSON Schema from type hints and the docstring:
@@ -142,6 +187,8 @@ During a run the context lives in memory. At the end, one transaction:
 
 On success the session status is `completed`. If the model fails, a tool raises in `raise` mode, or `max_iterations` is reached, the partial context is still written with status `failed` (and an `error` text), then the original exception is raised. Unanswered tool calls get a synthetic `{"error": "run aborted: ..."}` tool message so the stored conversation remains valid for a later resume.
 
+A run stopped through `cancel_event` is written with status `cancelled` after its pending tool calls are filled with aborted results. Existing readers should tolerate the new status in addition to `active`, `completed`, and `failed`.
+
 `AgentConfig.max_history_messages` limits how many recent messages are sent to the model on resume. It never changes what is persisted, and truncation only starts at a user turn or a completed assistant turn, so tool calls are never separated from their results.
 
 Use `InMemorySessionStore` when you do not want a database:
@@ -203,6 +250,8 @@ runtime = AgentRuntime(config, provider=provider, on_event=on_event)
 
 Events: `run_started`, `model_request`, `model_response`, `tool_call`, `tool_result`, `run_ended`, `error`. Callback exceptions are logged and never interrupt a run.
 
+Every `AgentEvent` carries a `seq` that starts at `1` for each run and increases monotonically (`run_started` is 1; `run_ended` or `error` is last). Sequence numbers are allocated by this SDK and are independent of any server-side event sequence.
+
 ## v1 limits
 
 - `stream()` forwards text from the final answer; tool-call rounds produce no text.
@@ -210,6 +259,7 @@ Events: `run_started`, `model_request`, `model_response`, `tool_call`, `tool_res
 - Tool calls returned in one model turn are executed sequentially, in order.
 - One active run per session is recommended. Concurrent writers are serialised by a row lock and `UNIQUE(session_id, seq)`, but turn ordering is not guaranteed.
 - Text content only; multimodal `content` parts are not supported.
+- Cancellation is cooperative: it takes effect at the next checkpoint, not in the middle of a model or tool call.
 
 ## Dashboard integration (HTTP contract)
 

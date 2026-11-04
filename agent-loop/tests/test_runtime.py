@@ -239,6 +239,130 @@ def test_events_are_emitted_in_order():
     assert all(event.session_id == "s1" for event in events)
 
 
+def test_event_seq_starts_at_one_and_restarts_for_each_run():
+    events = []
+    provider = FakeProvider(
+        [
+            ModelResponse(content="first", finish_reason="stop"),
+            ModelResponse(content="second", finish_reason="stop"),
+        ]
+    )
+    runtime = AgentRuntime(AgentConfig(), provider=provider, on_event=events.append)
+
+    runtime.run("hello", session_id="s1")
+    first_run_count = len(events)
+    runtime.run("again", session_id="s1")
+
+    first_run, second_run = events[:first_run_count], events[first_run_count:]
+    assert [event.seq for event in first_run] == list(range(1, len(first_run) + 1))
+    assert first_run[0].type == EventType.RUN_START
+    assert first_run[-1].type == EventType.RUN_END
+    assert [event.seq for event in second_run] == list(range(1, len(second_run) + 1))
+    assert second_run[0].type == EventType.RUN_START
+    assert second_run[-1].type == EventType.RUN_END
+
+
+def test_event_seq_is_monotonic_across_tool_calls_within_a_run():
+    events = []
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                tool_calls=[
+                    ToolCall(id="call_1", name="add", arguments={"a": 1, "b": 1}),
+                    ToolCall(id="call_2", name="add", arguments={"a": 2, "b": 2}),
+                ],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(content="done", finish_reason="stop"),
+        ]
+    )
+    runtime = AgentRuntime(AgentConfig(), provider=provider, tools=[add], on_event=events.append)
+
+    runtime.run("add twice", session_id="s1")
+
+    assert [event.seq for event in events] == list(range(1, len(events) + 1))
+    assert events[0].type == EventType.RUN_START
+    assert events[-1].type == EventType.RUN_END
+
+
+def test_tool_events_carry_lifecycle_metadata():
+    events = []
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="call_1",
+                        name="add",
+                        arguments={"a": 1, "b": 2},
+                        raw_arguments='{"a": 1, "b": 2}',
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(content="3", finish_reason="stop"),
+        ]
+    )
+    runtime = AgentRuntime(
+        AgentConfig(),
+        provider=provider,
+        tools=[add],
+        store=InMemorySessionStore(),
+        on_event=events.append,
+    )
+
+    runtime.run("1 + 2?", session_id="s1")
+
+    tool_events = [event for event in events if event.type in {EventType.TOOL_CALL, EventType.TOOL_RESULT}]
+    assert [event.type for event in tool_events] == [EventType.TOOL_CALL, EventType.TOOL_RESULT]
+
+    call, result = tool_events
+    assert call.iteration == 1
+    assert call.data == {
+        "tool_call_id": "call_1",
+        "name": "add",
+        "arguments": {"a": 1, "b": 2},
+        "raw_arguments": '{"a": 1, "b": 2}',
+        "arguments_error": None,
+        "status": "running",
+    }
+    assert result.iteration == 1
+    assert result.data["tool_call_id"] == "call_1"
+    assert result.data["content"] == "3"
+    assert result.data["is_error"] is False
+    assert result.data["status"] == "completed"
+
+
+def test_tool_failure_emits_an_aborted_result_event():
+    events = []
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                tool_calls=[ToolCall(id="call_1", name="boom", arguments={})],
+                finish_reason="tool_calls",
+            )
+        ]
+    )
+    runtime = AgentRuntime(
+        AgentConfig(tool_error_mode="raise"),
+        provider=provider,
+        tools=[boom],
+        store=InMemorySessionStore(),
+        on_event=events.append,
+    )
+
+    with pytest.raises(ToolExecutionError):
+        runtime.run("go", session_id="s1")
+
+    tool_events = [event for event in events if event.type in {EventType.TOOL_CALL, EventType.TOOL_RESULT}]
+    assert [event.type for event in tool_events] == [EventType.TOOL_CALL, EventType.TOOL_RESULT]
+    assert tool_events[0].data["status"] == "running"
+    assert tool_events[1].data["tool_call_id"] == "call_1"
+    assert tool_events[1].data["is_error"] is True
+    assert tool_events[1].data["status"] == "aborted"
+    assert "run aborted" in tool_events[1].data["content"]
+
+
 def test_event_callback_errors_do_not_break_the_run():
     def failing_callback(_event):
         raise RuntimeError("observer failed")

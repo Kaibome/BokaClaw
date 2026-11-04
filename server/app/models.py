@@ -1,7 +1,20 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import CheckConstraint, DateTime, Float, ForeignKey, Index, Integer, String, Text, text
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    DateTime,
+    Float,
+    ForeignKey,
+    Identity,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -94,6 +107,86 @@ class Conversation(Base):
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+
+RUN_STATUSES = ("queued", "running", "completed", "failed", "cancelled", "interrupted")
+TERMINAL_RUN_STATUSES = ("completed", "failed", "cancelled", "interrupted")
+RUN_EVENT_TYPES = ("message.delta", "tool.call", "tool.result", "message.completed", "error")
+
+
+class AgentRun(Base):
+    __tablename__ = "agent_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('queued', 'running', 'completed', 'failed', 'cancelled', 'interrupted')",
+            name="ck_agent_runs_status",
+        ),
+        Index(
+            "uq_agent_runs_active_conversation",
+            "conversation_id",
+            unique=True,
+            postgresql_where=text("status IN ('queued', 'running')"),
+        ),
+        Index("ix_agent_runs_created_by_created", "created_by", "created_at"),
+        Index("ix_agent_runs_status_heartbeat", "status", "heartbeat_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=_new_uuid)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("conversations.id", ondelete="CASCADE"))
+    created_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    user_message_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("conversation_messages.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # Pre-generated so recovery and reconnects reuse one id. No FK: the message
+    # row is only written at the terminal state.
+    assistant_message_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
+    # `request` is reserved by SQLAlchemy's declarative base, so map `request_payload`.
+    request_payload: Mapped[dict] = mapped_column(
+        "request",
+        JSONB,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+    )
+    client_run_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    agent_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="queued", server_default="queued")
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    partial_content: Mapped[str] = mapped_column(Text, default="", server_default="")
+    partial_metadata: Mapped[dict] = mapped_column(
+        JSONB,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+    )
+    last_seq: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    attempt: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    worker_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+
+class AgentRunEvent(Base):
+    __tablename__ = "agent_run_events"
+    __table_args__ = (
+        UniqueConstraint("run_id", "seq", name="uq_agent_run_events_run_seq"),
+        CheckConstraint(
+            "event_type IN ('message.delta', 'tool.call', 'tool.result', 'message.completed', 'error')",
+            name="ck_agent_run_events_type",
+        ),
+        Index("ix_agent_run_events_run_seq", "run_id", "seq"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(always=True), primary_key=True)
+    run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("agent_runs.id", ondelete="CASCADE"))
+    seq: Mapped[int] = mapped_column(BigInteger)
+    event_type: Mapped[str] = mapped_column(String(32))
+    payload: Mapped[dict] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
 class ConversationMessage(Base):

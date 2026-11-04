@@ -10,16 +10,24 @@ The SDK is optional at import time so the server can still start (and use
 """
 
 import asyncio
+import json
 import logging
 import os
 import sys
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Tuple
 
 from app.agent.dev_tools import build_dev_tools
-from app.agent.events import AgentCompleted, AgentDelta, AgentEvent, AgentLoopError
+from app.agent.events import (
+    AgentCompleted,
+    AgentDelta,
+    AgentEvent,
+    AgentLoopError,
+    AgentToolCall,
+    AgentToolResult,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -236,7 +244,92 @@ def _memory_tools(sdk, user_id: Optional[str]):
     return [sdk.tool(search_memories), sdk.tool(save_memory)]
 
 
-def build_runtime(sdk, config: LocalAgentConfig, payload: Dict[str, Any]):
+_TOOL_TERMINAL_STATUSES = {"completed", "failed", "aborted"}
+
+
+def _bridge_tool_event(event: Any, put: Callable[[str, Any], None]) -> None:
+    """Map one SDK event to an ``AgentToolCall`` / ``AgentToolResult``.
+
+    Runs on the SDK worker thread, so it only calls ``put``; the queue write is
+    hopped back to the event loop by ``stream_local_agent``.
+    """
+    event_type = getattr(getattr(event, "type", None), "value", getattr(event, "type", None))
+    if event_type not in {"tool_call", "tool_result"}:
+        return
+
+    data = getattr(event, "data", None) or {}
+    if not isinstance(data, dict):
+        return
+    tool_call_id = data.get("tool_call_id")
+    name = data.get("name")
+    if not isinstance(tool_call_id, str) or not tool_call_id:
+        return
+    if not isinstance(name, str) or not name:
+        return
+
+    iteration = data.get("iteration") or getattr(event, "iteration", 0)
+    try:
+        iteration = int(iteration)
+    except (TypeError, ValueError):
+        iteration = 0
+
+    if event_type == "tool_call":
+        arguments = data.get("arguments")
+        raw_arguments = data.get("raw_arguments")
+        arguments_error = data.get("arguments_error")
+        put(
+            "tool_call",
+            AgentToolCall(
+                tool_call_id=tool_call_id,
+                name=name,
+                iteration=iteration,
+                arguments=arguments if isinstance(arguments, dict) else {},
+                raw_arguments=raw_arguments if isinstance(raw_arguments, str) else None,
+                arguments_error=arguments_error if isinstance(arguments_error, str) else None,
+            ),
+        )
+        return
+
+    content = data.get("content")
+    if content is None:
+        content = ""
+    elif not isinstance(content, str):
+        try:
+            content = json.dumps(content, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            content = str(content)
+
+    status = data.get("status")
+    if status not in _TOOL_TERMINAL_STATUSES:
+        status = "failed" if bool(data.get("is_error")) else "completed"
+
+    duration_ms = data.get("duration_ms")
+    try:
+        duration_ms = int(duration_ms) if duration_ms is not None else None
+    except (TypeError, ValueError):
+        duration_ms = None
+
+    put(
+        "tool_result",
+        AgentToolResult(
+            tool_call_id=tool_call_id,
+            name=name,
+            content=content,
+            is_error=bool(data.get("is_error")),
+            iteration=iteration,
+            status=status,
+            duration_ms=duration_ms,
+        ),
+    )
+
+
+def build_runtime(
+    sdk,
+    config: LocalAgentConfig,
+    payload: Dict[str, Any],
+    *,
+    on_event: Optional[Callable[[Any], None]] = None,
+):
     model_config = sdk.ModelConfig(
         model=config.model,
         api_key=config.api_key,
@@ -253,7 +346,7 @@ def build_runtime(sdk, config: LocalAgentConfig, payload: Dict[str, Any]):
         model=model_config,
     )
     tools = [*_memory_tools(sdk, payload.get("user_id")), *build_dev_tools(sdk)]
-    return sdk.AgentRuntime(agent_config, tools=tools)
+    return sdk.AgentRuntime(agent_config, tools=tools, on_event=on_event)
 
 
 def _completion_metadata(payload: Dict[str, Any], result: Any) -> Dict[str, Any]:
@@ -269,12 +362,18 @@ def _completion_metadata(payload: Dict[str, Any], result: Any) -> Dict[str, Any]
     return metadata
 
 
-async def stream_local_agent(payload: Dict[str, Any]) -> AsyncIterator[AgentEvent]:
+async def stream_local_agent(
+    payload: Dict[str, Any],
+    *,
+    cancel_event: threading.Event | None = None,
+    max_seconds: float | None = None,
+) -> AsyncIterator[AgentEvent]:
     """Run one ReAct turn, streaming the SDK's text deltas as they arrive.
 
     The SDK is synchronous, so the turn runs in a worker thread and pushes
     deltas into an asyncio queue. Tool-call rounds produce no text; the final
-    answer is forwarded chunk by chunk.
+    answer is forwarded chunk by chunk. ``cancel_event`` lets a background run
+    stop at the next iteration boundary without waiting for the turn to end.
     """
     config = load_local_config()
     if config is None:
@@ -285,7 +384,6 @@ async def stream_local_agent(payload: Dict[str, Any]) -> AsyncIterator[AgentEven
 
     sdk = _load_sdk()
     messages = build_messages(payload)
-    runtime = build_runtime(sdk, config, payload)
     conversation_id = payload.get("conversation_id")
 
     loop = asyncio.get_running_loop()
@@ -298,34 +396,48 @@ async def stream_local_agent(payload: Dict[str, Any]) -> AsyncIterator[AgentEven
         except RuntimeError:  # pragma: no cover - the loop is already closed
             pass
 
+    def on_event(event: Any) -> None:
+        _bridge_tool_event(event, put)
+
+    runtime = build_runtime(sdk, config, payload, on_event=on_event)
+
     def worker() -> None:
         try:
-            turn = runtime.stream(
-                messages,
-                session_id=conversation_id,
-                user_id=payload.get("user_id"),
-            )
+            kwargs: Dict[str, Any] = {
+                "session_id": conversation_id,
+                "user_id": payload.get("user_id"),
+            }
+            if cancel_event is not None:
+                kwargs["cancel_event"] = cancel_event
+            turn = runtime.stream(messages, **kwargs)
             while not stop.is_set():
+                if cancel_event is not None and cancel_event.is_set():
+                    break
                 try:
                     delta = next(turn)
                 except StopIteration as finished:
                     result = finished.value
-                    if stop.is_set():
+                    if stop.is_set() or (cancel_event is not None and cancel_event.is_set()):
                         return
                     if not (getattr(result, "content", None) or "").strip():
                         put("error", AgentLoopError("agent_protocol_error", "Agent produced no content."))
                         return
                     put("completed", result)
                     return
-                if stop.is_set():
+                if stop.is_set() or (cancel_event is not None and cancel_event.is_set()):
                     break
                 put("delta", delta)
             turn.close()
+            if cancel_event is not None and cancel_event.is_set():
+                put("cancelled")
         except sdk.MaxIterationsExceeded:
             put("error", AgentLoopError("agent_upstream_error", "Agent exceeded the maximum number of steps."))
         except sdk.ConfigurationError as exc:
             put("error", AgentLoopError("agent_not_configured", str(exc)))
         except Exception as exc:
+            if type(exc).__name__ == "RunCancelled":
+                put("cancelled")
+                return
             logger.exception("Agent runtime failed for conversation %s", conversation_id)
             put("error", AgentLoopError("agent_upstream_error", f"Agent runtime failed: {exc}"))
         finally:
@@ -342,27 +454,42 @@ async def stream_local_agent(payload: Dict[str, Any]) -> AsyncIterator[AgentEven
     )
     thread.start()
 
-    deadline = loop.time() + config.max_seconds
+    deadline = loop.time() + (max_seconds if max_seconds is not None else config.max_seconds)
     try:
         while True:
+            if cancel_event is not None and cancel_event.is_set():
+                raise AgentLoopError("agent_cancelled", "Agent run was cancelled.")
             remaining = deadline - loop.time()
             if remaining <= 0:
                 raise AgentLoopError("agent_timeout", "Agent turn timed out.")
+            timeout = min(remaining, 0.5) if cancel_event is not None else remaining
             try:
-                kind, value = await asyncio.wait_for(queue.get(), timeout=remaining)
+                kind, value = await asyncio.wait_for(queue.get(), timeout=timeout)
             except asyncio.TimeoutError:
-                raise AgentLoopError("agent_timeout", "Agent turn timed out.") from None
+                if cancel_event is not None and cancel_event.is_set():
+                    raise AgentLoopError("agent_cancelled", "Agent run was cancelled.") from None
+                if loop.time() >= deadline:
+                    raise AgentLoopError("agent_timeout", "Agent turn timed out.") from None
+                continue
 
             if kind == "delta":
                 yield AgentDelta(value)
             elif kind == "completed":
                 yield AgentCompleted(metadata=_completion_metadata(payload, value))
+            elif kind == "tool_call":
+                yield value
+            elif kind == "tool_result":
+                yield value
             elif kind == "error":
                 raise value
+            elif kind == "cancelled":
+                raise AgentLoopError("agent_cancelled", "Agent run was cancelled.")
             elif kind == "end":
                 return
     finally:
         stop.set()
+        if cancel_event is not None:
+            cancel_event.set()
         try:
             runtime.close()
         except Exception:  # pragma: no cover - defensive

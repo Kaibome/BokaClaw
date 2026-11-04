@@ -19,7 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from ..exceptions import ConfigurationError, PersistenceError, SessionStoreError
 from .base import SessionRecord, derive_title
 
-_VALID_STATUSES = {"active", "completed", "failed"}
+_VALID_STATUSES = {"active", "completed", "failed", "cancelled"}
 _N_SESSION_COLUMNS = 9
 
 
@@ -129,7 +129,7 @@ class PostgresSessionStore:
                 title TEXT,
                 metadata JSONB NOT NULL DEFAULT '{{}}'::jsonb,
                 status TEXT NOT NULL DEFAULT 'active'
-                    CHECK (status IN ('active','completed','failed')),
+                    CHECK (status IN ('active','completed','failed','cancelled')),
                 error TEXT,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -161,6 +161,41 @@ class PostgresSessionStore:
             )
         """
 
+    def _ensure_status_check(self, cursor: Any) -> None:
+        """Upgrade a pre-existing ``status`` CHECK constraint to allow ``cancelled``.
+
+        Older tables created the constraint inline, so Postgres named it
+        automatically (usually ``{table}_status_check``). Look up the actual
+        name in ``pg_constraint`` instead of assuming it, and do nothing when
+        the constraint is absent or already accepts ``cancelled``.
+        """
+
+        cursor.execute(
+            """
+            SELECT con.conname, pg_get_constraintdef(con.oid)
+            FROM pg_constraint AS con
+            JOIN pg_class AS rel ON rel.oid = con.conrelid
+            JOIN pg_namespace AS ns ON ns.oid = rel.relnamespace
+            WHERE rel.relname = %s
+              AND ns.nspname = current_schema()
+              AND con.contype = 'c'
+            """,
+            (self.sessions_table,),
+        )
+        for name, definition in cursor.fetchall() or []:
+            if "status" not in definition or "active" not in definition:
+                continue
+            if "cancelled" in definition:
+                return
+            escaped_name = name.replace('"', '""')
+            quoted_name = f'"{escaped_name}"'
+            cursor.execute(f"ALTER TABLE {self.sessions_table} DROP CONSTRAINT {quoted_name}")
+            cursor.execute(
+                f"ALTER TABLE {self.sessions_table} ADD CONSTRAINT {quoted_name} "
+                "CHECK (status IN ('active','completed','failed','cancelled'))"
+            )
+            return
+
     def ensure_schema(self) -> None:
         """Create the two tables once per store instance."""
 
@@ -178,6 +213,7 @@ class PostgresSessionStore:
                     cursor.execute(self._sessions_ddl())
                     cursor.execute(self._sessions_index_ddl())
                     cursor.execute(self._messages_ddl())
+                    self._ensure_status_check(cursor)
             except Exception as exc:  # noqa: BLE001 - normalize driver errors
                 raise SessionStoreError(f"Could not ensure the agent session schema: {exc}") from exc
             self._schema_ready = True

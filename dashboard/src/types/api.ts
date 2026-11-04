@@ -36,6 +36,63 @@ export interface ApiRequestLog {
 export type ChatRole = "user" | "assistant" | "system" | "tool";
 export type MessageStatus = "completed" | "cancelled" | "failed";
 
+export type RunStatus =
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "interrupted";
+
+export type ConnectionState =
+  | "idle"
+  | "connecting"
+  | "open"
+  | "reconnecting"
+  | "closed";
+
+export interface ActiveRun {
+  id: string;
+  status: RunStatus;
+  last_seq: number;
+  assistant_message_id: string | null;
+  cancel_requested_at: string | null;
+  created_at: string;
+}
+
+export interface AgentRun {
+  id: string;
+  conversation_id: string;
+  status: RunStatus;
+  error_code: string | null;
+  error_detail: string | null;
+  last_seq: number;
+  partial_content: string;
+  assistant_message_id: string | null;
+  cancel_requested_at: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+export type ToolTraceStatus = "running" | "completed" | "failed" | "aborted";
+
+export interface ToolTraceEntry {
+  tool_call_id: string;
+  name: string;
+  iteration?: number;
+  status: ToolTraceStatus;
+  arguments?: Record<string, unknown> | null;
+  raw_arguments?: string | null;
+  arguments_error?: string | null;
+  content?: string;
+  is_error?: boolean;
+  duration_ms?: number | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  truncated?: boolean;
+}
+
 export interface Conversation {
   id: string;
   title: string;
@@ -57,12 +114,14 @@ export interface ChatMessage {
 
 export interface ConversationDetail extends Conversation {
   messages: ChatMessage[];
+  active_run?: ActiveRun | null;
 }
 
 export interface AgentInvokeResponse {
   conversation: Conversation;
   user_message: ChatMessage;
   message: ChatMessage;
+  run_id?: string;
 }
 
 export type EntityType = "user" | "agent" | "run";

@@ -39,4 +39,8 @@ export const AGENT_ENDPOINTS = {
   CONVERSATION: (conversationId: string) => `/conversations/${conversationId}`,
   MESSAGES: (conversationId: string) =>
     `/conversations/${conversationId}/messages`,
+  RUN: (runId: string) => `/agent/runs/${runId}`,
+  RUN_EVENTS: (runId: string, afterSeq = 0) =>
+    `/agent/runs/${runId}/events?after_seq=${afterSeq}`,
+  RUN_CANCEL: (runId: string) => `/agent/runs/${runId}/cancel`,
 } as const;

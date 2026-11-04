@@ -87,6 +87,13 @@ def _events(body: str) -> list[str]:
     return [line[len("event: ") :] for line in body.splitlines() if line.startswith("event: ")]
 
 
+@pytest.fixture(autouse=True)
+def _legacy_request_bound_path(monkeypatch):
+    """These tests cover the original request-bound route; background runs have
+    their own suite in test_agent_runs.py."""
+    monkeypatch.setenv("AGENT_RUN_BACKGROUND", "false")
+
+
 @pytest.fixture
 def client():
     app = FastAPI()
@@ -136,7 +143,7 @@ def local_agent(monkeypatch):
 
 
 def _local_events(*events):
-    async def _stream(_payload):
+    async def _stream(_payload, **_kwargs):
         for event in events:
             yield event
 
@@ -144,7 +151,7 @@ def _local_events(*events):
 
 
 def _local_failure(code, detail):
-    async def _stream(_payload):
+    async def _stream(_payload, **_kwargs):
         raise agent_loop.AgentLoopError(code, detail)
         yield  # pragma: no cover - makes this an async generator
 
