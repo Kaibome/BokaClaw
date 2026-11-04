@@ -7,6 +7,10 @@ export function getErrorMessage(
   if (axios.isAxiosError(err)) {
     const detail = err.response?.data?.detail;
     if (typeof detail === "string") return detail;
+    if (detail && typeof detail === "object" && !Array.isArray(detail)) {
+      const message = (detail as { message?: unknown }).message;
+      if (typeof message === "string") return message;
+    }
     if (Array.isArray(detail) && detail.length > 0) {
       const first = detail[0];
       if (typeof first === "string") return first;

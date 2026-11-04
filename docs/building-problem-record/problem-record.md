@@ -400,6 +400,39 @@
 
 ---
 
+## P-11 评测只能在命令行离线执行，Dashboard 无法触发、看不到历史
+
+- **状态**：已解决（2026-11-05 已实现并通过真实 run 验证）
+- **发现时间**：2026-11-04
+- **解决时间**：2026-11-05
+- **现象**：`agent_run_spans` 已经能还原完整轨迹，`tests/agent_eval/run.py` 也能跑 deepeval，但只能手工执行、结果只打印到终端；dashboard 没有入口，评测记录不落库，跑过什么、分数多少、花了多少钱都查不到。
+- **根因（事实）**：
+  1. `server/requirements.txt` 固定 `pydantic==2.10.4`，deepeval 4.3.3 要求 `pydantic>=2.11.7,<3`，deepeval 不能进 server 进程；
+  2. 没有队列、没有结果表，评测是纯离线脚本；
+  3. 前端没有 Eval 路由，也没有 golden 的管理来源。
+- **解决措施**：
+  - 独立 `bokaclaw-eval` 镜像/容器（`server/eval.Dockerfile` + `eval-requirements.txt`），与 server 的 pydantic 隔离；容器只拿 DB 凭据与显式 `EVAL_*`，不注入 `JWT_SECRET` / `ADMIN_API_KEY` / `OPENAI_API_KEY`，只读 rootfs + 非 root + 资源限制；
+  - 迁移 `010` 新增 `eval_goldens`（golden 存 DB）与 `eval_runs`（含固化 `golden_snapshot` + hash），部分唯一索引阻止同一 `(run_id, eval_case_id, use_llm_judge)` 并发重复入队；
+  - Postgres 当队列：`FOR UPDATE SKIP LOCKED` claim、心跳租约、stale recovery、`EVAL_MAX_ATTEMPTS` 超限失败、协作取消；
+  - `server/app/eval/*` 拆分 config / goldens / adapter / metrics / evaluator / cli / worker / healthcheck，离线 CLI 改成薄壳；
+  - `/evals` admin-only API（config、goldens、创建、列表、详情、取消）与结构化错误码；dashboard 新增 Eval 导航/页面（表单、轮询、指标结果、历史），Trace 页提供「Evaluate this run」深链。
+- **实施中确认的事实**：
+  1. deepeval 4.3.3 的 `ToolCorrectnessMetric.__init__` 会构造 judge 模型，即使评分本身是确定性的；因此必须放在 judge 开关之后，否则未勾选 judge 也会报 `OpenAI API key is not configured`；
+  2. 被跳过的指标不会出现在 `test_result.metrics_data`，且 `MetricData.name` 取自 `metric.__name__` 的人类可读标签（如 `Agent Loop Detection`），不是类名；
+  3. deepeval 会往当前目录写 `.deepeval/.temp_test_run_data.json`，只读 rootfs 下必须设 `DEEPEVAL_CACHE_FOLDER=/tmp/deepeval`；
+  4. `DisplayConfig` 关不掉 deepeval 结束横幅，CLI/worker 需要重定向 stdout/stderr；
+  5. SIGTERM 发生在评测中途时，不能按 `eval_timeout` 结算；应停止心跳、把行留给 stale recovery 重排。
+- **解决后效果**：
+  - 未勾选 judge：约 0.6s 完成，仅 `Agent Loop Detection`（1.0 pass），`token_cost=0.0`；
+  - 勾选 judge：约 10.4s，6 个指标（Agent Loop Detection / Answer Relevancy / Task Completion / Step Efficiency / Argument Correctness / Tool Correctness），记录 judge 模型与费用；
+  - 取消：queued/running 均可取消；running 在本轮结束后结算为 `cancelled / eval_cancelled`，保留部分指标、judge 模型与费用；
+  - 恢复：SIGTERM 中途退出后重启 worker，stale recovery `requeued=1`，`attempt=2` 重新执行并完成；`attempt` 达上限时 `failed / eval_lease_expired`；取消请求未被心跳看到时恢复为 `cancelled / eval_cancelled`；
+  - 负例：run 不存在 404、run 非终态 409、无 span 422、golden 不存在 404、case 不匹配 409、重复入队 409 且带已有 `eval_id`；
+  - `server/tests` 15 passed；dashboard `tsc`、Prettier、`next build` 通过（`/dashboard/eval` 5.12 kB）。
+- **可复用结论**：依赖冲突要用进程/镜像边界解决，而不是升级公共 pin；长任务的队列语义要同时覆盖「心跳丢失」「优雅停机」「取消请求」，并且**停机不等于超时**；评测结果只存结构化字段，UI 与 CLI 共用同一份契约。
+
+---
+
 ## 变更记录
 
 | 日期 | 变更 |
@@ -417,3 +450,4 @@
 | 2026-11-04 | P-08 跨 run 真实复测：同会话追问 0 次工具调用即可原样复述上一轮搜索标题/URL 与抓取重定向信息，新会话对照只答「上下文里没有原始记录」；同时发现回灌结果 2,000 字符上限会截掉表格，以及 P-07 对无关中文问题误注入 |
 | 2026-11-04 | 追加 P-10：新增 `agent_run_spans` 与中立 span 采集（agent/llm/tool），桥接层扩展为 `_bridge_event` 且不改变 SSE 契约；新增 deepeval 4.3.3 适配层与契约测试；真实 run / 取消 / 迁移往返验证通过，87 + 4 tests passed |
 | 2026-11-05 | P-10 的 Dashboard 可视化补全：Trace 页只列 `agent` 类型 run；Span Detail 内展开子 span，点击任一子 span 即以同一抽屉展示其完整 input/output/attributes，并提供「Back to {父 span}」返回父级；`tsc`、Prettier、`next build` 通过 |
+| 2026-11-05 | 追加 P-11：独立 `bokaclaw-eval` 容器 + `eval_goldens`/`eval_runs`（迁移 010）+ DB 队列 + `/evals` API + Dashboard Eval 页面/Trace 深链；真实 run 验证未勾选/勾选 judge、取消、stale recovery、attempt 超限与全部负例；server 15 tests passed，`next build` 通过 |

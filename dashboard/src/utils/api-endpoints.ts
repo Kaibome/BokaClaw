@@ -32,6 +32,14 @@ export const TRACE_ENDPOINTS = {
   BY_ID: (spanId: number) => `/traces/${spanId}`,
 } as const;
 
+export const EVAL_ENDPOINTS = {
+  BASE: "/evals",
+  CONFIG: "/evals/config",
+  GOLDENS: "/evals/goldens",
+  BY_ID: (evalId: string) => `/evals/${evalId}`,
+  CANCEL: (evalId: string) => `/evals/${evalId}/cancel`,
+} as const;
+
 export const ENTITY_ENDPOINTS = {
   BASE: "/entities",
   BY_ID: (type: string, id: string) =>

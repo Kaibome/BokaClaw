@@ -8,7 +8,7 @@ if [ "${1:-}" = "--remove" ]; then
   REMOVE=1
 fi
 
-CONTAINERS=${CONTAINERS:-"bokaclaw-dashboard bokaclaw-server bokaclaw-executor bokaclaw-postgres"}
+CONTAINERS=${CONTAINERS:-"bokaclaw-dashboard bokaclaw-server bokaclaw-eval bokaclaw-executor bokaclaw-postgres"}
 
 for name in $CONTAINERS; do
   if ! docker container inspect "$name" >/dev/null 2>&1; then

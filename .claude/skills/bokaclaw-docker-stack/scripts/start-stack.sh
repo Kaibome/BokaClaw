@@ -16,6 +16,7 @@ PG_CONTAINER=${PG_CONTAINER:-bokaclaw-postgres}
 SERVER_CONTAINER=${SERVER_CONTAINER:-bokaclaw-server}
 DASHBOARD_CONTAINER=${DASHBOARD_CONTAINER:-bokaclaw-dashboard}
 EXECUTOR_CONTAINER=${EXECUTOR_CONTAINER:-bokaclaw-executor}
+EVAL_CONTAINER=${EVAL_CONTAINER:-bokaclaw-eval}
 EXECUTOR_NETWORK=${EXECUTOR_NETWORK:-bokaclaw-exec}
 EXECUTOR_PORT=${EXECUTOR_PORT:-8099}
 EXECUTOR_MEMORY=${EXECUTOR_MEMORY:-1g}
@@ -23,6 +24,9 @@ EXECUTOR_CPUS=${EXECUTOR_CPUS:-2}
 EXECUTOR_PIDS_LIMIT=${EXECUTOR_PIDS_LIMIT:-256}
 SERVER_IMAGE=${SERVER_IMAGE:-bokaclaw-server:test}
 DASHBOARD_IMAGE=${DASHBOARD_IMAGE:-bokaclaw-dashboard:test}
+EVAL_IMAGE=${EVAL_IMAGE:-bokaclaw-eval:test}
+EVAL_MEMORY=${EVAL_MEMORY:-2g}
+EVAL_CPUS=${EVAL_CPUS:-2}
 PG_IMAGE=${PG_IMAGE:-pgvector/pgvector:pg17}
 PG_VOLUME=${PG_VOLUME:-mem0-local-pg}
 HISTORY_VOLUME=${HISTORY_VOLUME:-mem0-local-history}
@@ -73,6 +77,20 @@ AGENT_LOOP_CONNECT_TIMEOUT_SECONDS=5
 AGENT_LOOP_READ_TIMEOUT_SECONDS=120
 AGENT_LOOP_MAX_SECONDS=300
 AGENT_LOOP_HISTORY_MESSAGES=40
+
+# Online evaluation worker (bokaclaw-eval). The judge is opt-in per run; the
+# worker receives only DB credentials and these variables, never JWT_SECRET.
+EVAL_ENABLED=true
+EVAL_JUDGE_ENABLED=false
+EVAL_JUDGE_PROVIDER=deepseek
+EVAL_JUDGE_MODEL=deepseek-chat
+EVAL_JUDGE_API_KEY=
+EVAL_JUDGE_MAX_CHARS=20000
+EVAL_WORKER_ID=eval-1
+EVAL_LEASE_SECONDS=60
+EVAL_MAX_ATTEMPTS=3
+EVAL_MAX_RUN_SECONDS=900
+EVAL_RETENTION_DAYS=30
 EOF
 fi
 
@@ -104,6 +122,10 @@ docker image inspect "$SERVER_IMAGE" >/dev/null 2>&1 || {
 }
 docker image inspect "$DASHBOARD_IMAGE" >/dev/null 2>&1 || {
   echo "error: image $DASHBOARD_IMAGE not found; run bokaclaw-docker-stack/scripts/build-images.sh first." >&2
+  exit 1
+}
+docker image inspect "$EVAL_IMAGE" >/dev/null 2>&1 || {
+  echo "error: image $EVAL_IMAGE not found; run bokaclaw-docker-stack/scripts/build-images.sh first." >&2
   exit 1
 }
 docker image inspect "$PG_IMAGE" >/dev/null 2>&1 || docker pull "$PG_IMAGE"
@@ -223,6 +245,13 @@ else
     -e POSTGRES_HOST="$PG_CONTAINER" -e POSTGRES_PORT=5432 \
     -e AGENT_EXECUTOR_URL="http://${EXECUTOR_CONTAINER}:${EXECUTOR_PORT}" \
     -e AGENT_EXECUTOR_TOKEN="$AGENT_EXECUTOR_TOKEN" \
+    -e EVAL_ENABLED="${EVAL_ENABLED:-true}" \
+    -e EVAL_LEASE_SECONDS="${EVAL_LEASE_SECONDS:-60}" \
+    -e EVAL_MAX_ATTEMPTS="${EVAL_MAX_ATTEMPTS:-3}" \
+    -e EVAL_JUDGE_ENABLED="${EVAL_JUDGE_ENABLED:-false}" \
+    -e EVAL_JUDGE_PROVIDER="${EVAL_JUDGE_PROVIDER:-deepseek}" \
+    -e EVAL_JUDGE_MODEL="${EVAL_JUDGE_MODEL:-deepseek-chat}" \
+    -e EVAL_JUDGE_API_KEY="${EVAL_JUDGE_API_KEY:-}" \
     -e FASTEMBED_CACHE_PATH=/app/history/fastembed \
     --add-host host.docker.internal:host-gateway \
     -p "${API_PORT}:8000" \
@@ -235,6 +264,59 @@ if ! docker inspect -f '{{json .NetworkSettings.Networks}}' "$SERVER_CONTAINER" 
   grep -q "\"${EXECUTOR_NETWORK}\""; then
   log "connecting $SERVER_CONTAINER to $EXECUTOR_NETWORK"
   docker network connect "$EXECUTOR_NETWORK" "$SERVER_CONTAINER" >/dev/null
+fi
+
+# ---- Eval worker ------------------------------------------------------------
+# Least privilege: explicit DB credentials and EVAL_* only. Do not use
+# --env-file here, or the worker would inherit JWT_SECRET / ADMIN_API_KEY /
+# provider keys.
+if [ "${RECREATE:-0}" = "1" ] && docker container inspect "$EVAL_CONTAINER" >/dev/null 2>&1; then
+  log "recreating $EVAL_CONTAINER"
+  docker rm -f "$EVAL_CONTAINER" >/dev/null
+fi
+
+if docker container inspect "$EVAL_CONTAINER" >/dev/null 2>&1; then
+  docker start "$EVAL_CONTAINER" >/dev/null
+else
+  log "starting $EVAL_CONTAINER"
+  docker run -d --name "$EVAL_CONTAINER" --network "$NETWORK" --restart unless-stopped \
+    --read-only --tmpfs /tmp:rw,size=64m,mode=1777 --tmpfs /home/eval:rw,size=64m,mode=1777 \
+    --cap-drop ALL --security-opt no-new-privileges \
+    --pids-limit 256 --memory "$EVAL_MEMORY" --cpus "$EVAL_CPUS" \
+    --user 1000:1000 \
+    -e POSTGRES_HOST="$PG_CONTAINER" -e POSTGRES_PORT=5432 \
+    -e POSTGRES_USER="$POSTGRES_USER" -e POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
+    -e APP_DB_NAME="${APP_DB_NAME:-mem0_app}" \
+    -e EVAL_ENABLED="${EVAL_ENABLED:-true}" \
+    -e EVAL_WORKER_ID="${EVAL_WORKER_ID:-eval-1}" \
+    -e EVAL_WORKER_POLL_SECONDS="${EVAL_WORKER_POLL_SECONDS:-2}" \
+    -e EVAL_HEARTBEAT_SECONDS="${EVAL_HEARTBEAT_SECONDS:-10}" \
+    -e EVAL_LEASE_SECONDS="${EVAL_LEASE_SECONDS:-60}" \
+    -e EVAL_MAX_ATTEMPTS="${EVAL_MAX_ATTEMPTS:-3}" \
+    -e EVAL_MAX_RUN_SECONDS="${EVAL_MAX_RUN_SECONDS:-900}" \
+    -e EVAL_RETENTION_DAYS="${EVAL_RETENTION_DAYS:-30}" \
+    -e EVAL_JUDGE_ENABLED="${EVAL_JUDGE_ENABLED:-false}" \
+    -e EVAL_JUDGE_PROVIDER="${EVAL_JUDGE_PROVIDER:-deepseek}" \
+    -e EVAL_JUDGE_MODEL="${EVAL_JUDGE_MODEL:-deepseek-chat}" \
+    -e EVAL_JUDGE_API_KEY="${EVAL_JUDGE_API_KEY:-}" \
+    -e EVAL_JUDGE_MAX_CHARS="${EVAL_JUDGE_MAX_CHARS:-20000}" \
+    "$EVAL_IMAGE" >/dev/null
+fi
+
+log "waiting for $EVAL_CONTAINER"
+eval_ready=0
+for _ in $(seq 1 90); do
+  status=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$EVAL_CONTAINER" 2>/dev/null || true)
+  if [ "$status" = "healthy" ]; then
+    eval_ready=1
+    break
+  fi
+  sleep 2
+done
+if [ "$eval_ready" != "1" ]; then
+  echo "error: $EVAL_CONTAINER did not become healthy" >&2
+  docker logs --tail 40 "$EVAL_CONTAINER" >&2
+  exit 1
 fi
 
 # ---- Dashboard -------------------------------------------------------------
@@ -276,4 +358,5 @@ log "stack is ready"
 printf '    Dashboard: %s\n' "http://localhost:${DASHBOARD_PORT}"
 printf '    API:       %s\n' "$API_PUBLIC_URL"
 printf '    Postgres:  localhost:%s\n' "$PG_PORT"
+printf '    Eval:      %s (worker %s)\n' "$EVAL_CONTAINER" "${EVAL_WORKER_ID:-eval-1}"
 printf '    Workspace: %s -> %s\n' "$WORKSPACE_HOST" "$WORKSPACE_CONTAINER"

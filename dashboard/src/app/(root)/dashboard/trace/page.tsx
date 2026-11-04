@@ -1,8 +1,15 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { Suspense, useMemo, useRef, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { format, formatDistanceToNow } from "date-fns";
-import { ArrowLeft, ChevronDown, ChevronRight, RefreshCw } from "lucide-react";
+import {
+  ArrowLeft,
+  ChevronDown,
+  ChevronRight,
+  FlaskConical,
+  RefreshCw,
+} from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -85,10 +92,14 @@ const JsonBlock = ({
   </div>
 );
 
-export default function TracePage() {
+function TracePageInner() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [page, setPage] = useState(0);
-  const [runId, setRunId] = useState("");
+  const [runId, setRunId] = useState(
+    () => searchParams.get("run_id")?.trim() ?? "",
+  );
   const [status, setStatus] = useState<StatusFilter>("all");
   const [selectedSpan, setSelectedSpan] = useState<AgentRunSpanDetail | null>(
     null,
@@ -316,7 +327,7 @@ export default function TracePage() {
                 : "--",
           },
         ].map((card) => (
-          <Card key={card.label} className="border-memBorderPrimary">
+          <Card key={card.label} className="border-memBorder-primary">
             <CardContent className="p-5">
               <p className="text-xs text-onSurface-default-tertiary">
                 {card.label}
@@ -327,7 +338,7 @@ export default function TracePage() {
         ))}
       </div>
 
-      <Card className="border-memBorderPrimary">
+      <Card className="border-memBorder-primary">
         <CardContent className="flex flex-col gap-3 p-4 md:flex-row md:items-end">
           <div className="w-full space-y-1 md:max-w-xs">
             <Label htmlFor="trace-run">Run ID</Label>
@@ -367,7 +378,7 @@ export default function TracePage() {
       </Card>
 
       {error && (
-        <Card className="border-memBorderPrimary">
+        <Card className="border-memBorder-primary">
           <CardContent className="p-4 text-sm text-onSurface-danger-primary">
             {error}
           </CardContent>
@@ -384,7 +395,7 @@ export default function TracePage() {
         />
       ) : (
         <>
-          <Card className="border-memBorderPrimary overflow-hidden">
+          <Card className="border-memBorder-primary overflow-hidden">
             <DataTable
               data={filteredSpans.slice(
                 page * PAGE_SIZE,
@@ -551,6 +562,20 @@ export default function TracePage() {
                       variant="outline"
                       size="sm"
                       className="w-full justify-start gap-1.5"
+                      onClick={() =>
+                        router.push(
+                          `/dashboard/eval?run_id=${encodeURIComponent(selectedSpan.run_id)}`,
+                        )
+                      }
+                    >
+                      <FlaskConical className="size-4" />
+                      Evaluate this run
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="w-full justify-start gap-1.5"
                       onClick={() => void toggleChildSpans()}
                       disabled={childrenLoading}
                     >
@@ -585,7 +610,7 @@ export default function TracePage() {
                             No child spans were captured for this run.
                           </p>
                         ) : (
-                          <div className="divide-y divide-memBorderPrimary overflow-hidden rounded-md border border-memBorderPrimary">
+                          <div className="divide-y divide-memBorderPrimary overflow-hidden rounded-md border border-memBorder-primary">
                             {childSpans.map((child) => (
                               <button
                                 key={child.id}
@@ -650,5 +675,13 @@ export default function TracePage() {
         </SheetContent>
       </Sheet>
     </div>
+  );
+}
+
+export default function TracePage() {
+  return (
+    <Suspense fallback={null}>
+      <TracePageInner />
+    </Suspense>
   );
 }

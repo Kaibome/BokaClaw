@@ -29,6 +29,7 @@ from app.routers import api_keys as api_keys_router
 from app.routers import auth as auth_router
 from app.routers import conversations as conversations_router
 from app.routers import entities as entities_router
+from app.routers import evals as evals_router
 from app.routers import requests as requests_router
 from app.routers import traces as traces_router
 from app.schemas import MessageResponse
@@ -211,6 +212,7 @@ app.include_router(api_keys_router.router)
 app.include_router(entities_router.router)
 app.include_router(requests_router.router)
 app.include_router(traces_router.router)
+app.include_router(evals_router.router)
 app.include_router(conversations_router.router)
 app.include_router(agent_router.router)
 

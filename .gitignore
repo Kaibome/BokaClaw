@@ -190,8 +190,14 @@ notebooks/*.yaml
 # cache db
 *.db
 
-# local directories for testing
-eval/
+# local directories for testing (root only; dashboard/src/.../eval must stay tracked)
+/eval/
+# ...but keep the design docs under docs/eval tracked.
+!docs/eval/
+!docs/eval/**
+# Local deepeval source checkout and runtime cache; never vendored.
+/deepeval/
+.deepeval/
 qdrant_storage/
 .crossnote
 testing.ipynb

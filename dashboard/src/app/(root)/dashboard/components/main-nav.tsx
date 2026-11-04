@@ -7,6 +7,7 @@ import {
   Bot,
   ChartLine,
   ChevronDown,
+  FlaskConical,
   FolderInput,
   GalleryVerticalEnd,
   KeyRound,
@@ -82,6 +83,12 @@ export function MainNav({
                     url: "/dashboard/trace",
                     icon: Waypoints,
                     active: pathname === "/dashboard/trace",
+                  },
+                  {
+                    title: "Eval",
+                    url: "/dashboard/eval",
+                    icon: FlaskConical,
+                    active: pathname === "/dashboard/eval",
                   },
                   {
                     title: "Memories",

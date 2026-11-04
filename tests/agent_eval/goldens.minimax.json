@@ -1,0 +1,11 @@
+[
+  {
+    "eval_case_id": "minimax-pricing-golden-01",
+    "input": "查询 MiniMax 最新模型的价格，并给出官方定价页链接。",
+    "expected_output": "给出 MiniMax 最新模型（如 MiniMax-M3.1-Flash）的官方定价，包括每百万 tokens 的输入/输出价格，并附官方定价页链接。",
+    "expected_tools": [
+      { "name": "WebSearch" },
+      { "name": "WebFetch" }
+    ]
+  }
+]

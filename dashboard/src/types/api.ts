@@ -163,3 +163,65 @@ export interface Entity {
   created_at: string | null;
   updated_at: string | null;
 }
+
+export type EvalStatus =
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export interface EvalMetricResult {
+  name: string;
+  score: number | null;
+  threshold: number | null;
+  success: boolean | null;
+  reason: string | null;
+  evaluation_model: string | null;
+  evaluation_cost: number | null;
+  skipped: boolean;
+  error: string | null;
+}
+
+export interface EvalRunItem {
+  id: string;
+  run_id: string;
+  run_status: string;
+  eval_case_id: string;
+  status: EvalStatus;
+  use_llm_judge: boolean;
+  overall_success: boolean | null;
+  judge_model: string | null;
+  token_cost: number | null;
+  duration_ms: number | null;
+  error_code: string | null;
+  error_detail: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  cancel_requested_at: string | null;
+}
+
+export interface EvalRunDetail extends EvalRunItem {
+  golden_hash: string;
+  attempt: number;
+  warnings: string[];
+  metrics: EvalMetricResult[];
+}
+
+export interface EvalConfig {
+  enabled: boolean;
+  judge_enabled: boolean;
+  judge_provider: string;
+  judge_model: string;
+  golden_count: number;
+  max_attempts: number;
+  lease_seconds: number;
+}
+
+export interface EvalGolden {
+  eval_case_id: string;
+  input_preview: string;
+  expected_tools: string[];
+  updated_at: string;
+}

@@ -1,0 +1,5 @@
+# Eval worker image only. Kept separate from requirements.txt because deepeval
+# 4.3.3 requires pydantic>=2.11.7 while the server pins pydantic 2.10.4.
+deepeval==4.3.3
+sqlalchemy>=2.0,<3.0
+psycopg[binary]>=3.2.8,<4.0.0
