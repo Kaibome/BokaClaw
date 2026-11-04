@@ -158,6 +158,9 @@ def clean_agent_env(monkeypatch):
         "AGENT_CONTEXT_COMPRESSION",
         "AGENT_CONTEXT_DEBUG",
         "AGENT_TOOL_RESULT_MAX_CHARS",
+        "AGENT_FACT_LEDGER",
+        "AGENT_FACT_LEDGER_MAX_CHARS",
+        "AGENT_STEP_BUDGET_NOTICE",
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
         "DEEPSEEK_API_KEY",
@@ -302,6 +305,9 @@ def test_context_budgets_default_on_for_the_server(monkeypatch):
     assert config.context_compression == "summary"
     assert config.tool_result_max_chars == 16_000
     assert config.final_answer_on_max_iterations is True
+    assert config.fact_ledger is True
+    assert config.fact_ledger_max_chars == 2_500
+    assert config.step_budget_notice is True
 
 
 def test_context_budgets_can_be_overridden(monkeypatch):
@@ -320,6 +326,23 @@ def test_context_budgets_can_be_overridden(monkeypatch):
     assert config.context_keep_recent_tokens == 2000
     assert config.context_compression == "truncate"
     assert config.tool_result_max_chars == 1000
+
+
+def test_fact_ledger_and_step_notice_can_be_disabled(monkeypatch):
+    monkeypatch.setattr(agent_runtime, "_current_llm_config", lambda: {})
+    monkeypatch.setenv("AGENT_MODEL", "m")
+    monkeypatch.setenv("AGENT_API_KEY", "k")
+    monkeypatch.setenv("AGENT_FACT_LEDGER", "false")
+    monkeypatch.setenv("AGENT_FACT_LEDGER_MAX_CHARS", "100")
+    monkeypatch.setenv("AGENT_STEP_BUDGET_NOTICE", "off")
+
+    config = agent_runtime.load_local_config()
+
+    assert config is not None
+    assert config.fact_ledger is False
+    # The SDK requires at least 256 characters; the server clamps instead of failing the run.
+    assert config.fact_ledger_max_chars == 256
+    assert config.step_budget_notice is False
 
 
 def test_step_limit_final_answer_can_be_disabled(monkeypatch):
@@ -681,6 +704,9 @@ def test_build_runtime_forwards_context_settings():
         context_compression="truncate",
         tool_result_max_chars=1000,
         final_answer_on_max_iterations=False,
+        fact_ledger=False,
+        fact_ledger_max_chars=1200,
+        step_budget_notice=False,
     )
 
     agent_runtime.build_runtime(sdk, config, {"user_id": None, "message": "hi"})
@@ -691,6 +717,9 @@ def test_build_runtime_forwards_context_settings():
     assert kwargs["context_keep_recent_tokens"] == 2000
     assert kwargs["context_compression"] == "truncate"
     assert kwargs["tool_result_max_chars"] == 1000
+    assert kwargs["fact_ledger"] is False
+    assert kwargs["fact_ledger_max_chars"] == 1200
+    assert kwargs["step_budget_notice"] is False
 
 
 def test_context_debug_is_on_by_default(monkeypatch, caplog):

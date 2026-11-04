@@ -72,7 +72,7 @@
 
 ## P-04 模型在 ReAct 循环中不会主动收敛（当前主要瓶颈）
 
-- **状态**：未解决
+- **状态**：已解决（2026-11-04 实现 S1+S3+S5，同一问题两次复测均自然收敛；改动尚未提交）
 - **现象**：即使把 `AGENT_MAX_ITERATIONS` 从 10 提到 16，模型仍然**每一轮都发起新的搜索或抓取**，最后一轮仍在调工具，最终答案始终来自 P-03 的兜底路径，而不是模型自己判断「信息够了」。
 - **证据**：
 
@@ -83,16 +83,82 @@
 
   16 轮版本增加了 6 轮、47 秒，答案从 1413 字增至 2028 字（拿到了 OpenRouter 的真实报价），但**没有改变「依靠兜底收尾」这一事实**。
 
-- **根因假设**：
-  1. 系统提示只鼓励「查证」，没有给出「信息足够即停止」的判定条件；
-  2. 搜索结果重复率高（多组 query 返回同一批页面），模型不断换关键词试图验证，陷入低效循环；
-  3. 对失败抓取（404、客户端渲染空页、超时）没有负反馈，模型会反复尝试相邻 URL。
-- **下一步方向**（未实施）：
-  - 提示词中加入收敛条件（例如「已获得可直接回答的关键事实后停止调用工具」）；
-  - 运行时检测重复 URL / 重复查询，在工具结果里提示模型「该页面已抓取过」；
-  - 对连续失败给出汇总提示，引导模型基于已有信息作答；
-  - 评估是否需要「预算过半时提醒模型准备收尾」。
-- **解决后效果**：待补充。
+- **根因（事实与高置信推断分开标注）**：
+  1. **终止是隐式的**（事实）：循环只在模型「不返回任何 tool_calls」时自然结束。工具充足时，模型的默认倾向是「再查一次」，而不是主动宣布完成；我们没有显式的收尾动作或完成信号。
+  2. **事实被上下文压缩丢掉**（高置信估算，未取到日志证据）：16 轮 run 的工具结果合计 **127,199 字符 ≈ 50,880 tokens**（按仓库估算公式 `ascii*0.4 + 非ascii*1`），超过 `AGENT_CONTEXT_MAX_TOKENS=32000`，压缩器会把早期搜索结果和抓取正文折叠进摘要。模型在后续轮次看不到早前拿到的价格/型号，只能重新搜索、重新抓取。该 run 未开 `AGENT_CONTEXT_DEBUG`，所以没有 `context_compressed` 日志；估算值与 P-06 的观察一致。
+  3. **没有「无进展」检测**（事实）：7 次抓取失败（404 / 空页 / 超时）、多组查询返回同一批页面、重定向到列表页的 URL，都没有被识别为「没有新信息」，模型继续换关键词或换 slug。
+  4. **工具反馈不可行动**（事实）：`WebFetch` 404 只回 `request failed with HTTP 404`；被重定向到列表页的 URL 未标记；`WebSearch` 不标注「该结果前面已经抓过 / 结果与上次重复」。
+  5. **任务没有可判定的完成标准**（事实）：开放式研究问题（「哪个最适合」）不存在唯一权威答案，模型缺少「证据足够」的判定依据，倾向于无限逼近。
+
+- **外部调研（2026-11，避免闭门造车）**：
+
+  | 系统 / 来源 | 做法 | 关键细节 |
+  |---|---|---|
+  | LangChain `AgentExecutor` | `max_iterations` + `early_stopping_method="generate"` | 达到上限后追加一次「I now need to return a final answer…」的模型调用；`"force"` 只返回固定文案。与我们的 P-03 等价。已知缺陷：新版 RunnableAgent 不支持 `generate`（#16263），生成结果可能是 `Action:` 字符串（#16374） |
+  | OpenAI Agents SDK | `max_turns` + `error_handlers={"max_turns": ...}` | 正常终止 = 模型输出无 tool call 的 final output；`max_turns` 超限默认抛 `MaxTurnsExceeded`，可配置为返回受控终答；`reset_tool_choice` 默认在首次工具调用后清空强制选择，避免「被迫一直调工具」 |
+  | AutoGen AgentChat | 可组合终止条件 | `MaxMessageTermination`、`TextMentionTermination`、`TimeoutTermination`、`TokenUsageTermination` 用 `|` / `&` 组合，语义终止与硬上限并存 |
+  | LangChain `open_deep_research` | `ResearchComplete` 工具 + 硬上限 | `max_researcher_iterations=6`、`max_react_tool_calls=10`；满足「超迭代 / 无 tool call / 调用 ResearchComplete」任一即结束 |
+  | Jina `node-DeepResearch` | `answer` 动作 + 评估器 + Beast Mode | `answer` 需通过评估（`numEvalsRequired`）；预算耗尽仍无合格答案时进入 Beast Mode：禁用除 `answer` 外所有动作，强制生成 |
+  | OpenHands `StuckDetector` | 4 类卡死模式 + nudge | 同一 action-observation 重复 4 次、同一 action-error 重复 3 次、agent 独白 3 次、A/B 交替 6 轮即判定；较新版本先 nudge 警告再硬停 |
+  | PraisonAI `loop_detection` / `loopdetect`(Go) | 哈希指纹 + 分级 | 工具参数 canonical JSON → SHA-256；检测 `generic_repeat`、`no_progress`（参数+结果都相同）、`ping_pong`、全局熔断、压缩后守卫 |
+  | 论文《Judged Useless, Queried Anyway》(arXiv 2610.06191) | 连续无用结果后强制整合 | 智能体在 97–100% 的情况下能判断结果「无用」，却仍继续查询；**连续 5 次无用结果后强制执行一次整合/作答**，可跨模型修复该问题 |
+  | 论文《When Agents Do Not Stop》(arXiv 2607.01641) | 68 个真实无限循环案例 | 38.2% 属于「终止由模型控制」；结论：**上限必须覆盖真正重复的那条路径**，内层上限盖不住外层循环 |
+  | 论文 CaRT (arXiv 2510.08517) / ACL 2026 证据感知终止 | 训练/提示「何时信息足够」 | 仅靠提示词只能改变「何时停」，效果有限；显式的充分性/证据判据才是主杠杆 |
+  | Anthropic《Building effective agents》 | 显式停止条件 + 迭代上限 + 人工检查点 | 原话是「任务不会可靠地自行终止」，所以必须显式设限；提示词是 nudge，不是保证 |
+
+- **候选方案（按「成本/收益/风险」排序，均未实施）**：
+
+  | ID | 方案 | 成本 | 预期效果 | 风险 | 依据 |
+  |---|---|---|---|---|---|
+  | S1 | **证据账本（Fact Ledger）**：run 内维护一个紧凑的「已确认事实 + 来源 URL + 抓取状态」块（限 2–3k tokens），每轮随消息注入，压缩只压缩原始 tool 消息、不压缩账本 | 中 | 高：直接消除「压缩导致事实丢失 → 重查」 | 需要定义事实提取规则；账本质量决定上限 | 《When Agents Do Not Stop》建议的 Execution State 重注入；CaRT |
+  | S2 | **无进展/循环守卫**：对 `(tool, canonical args)` 与结果做哈希；精确重复直接返回缓存/提示；连续失败或无新信息 3 次 → nudge，5 次 → 强制终答；A/B 交替 6 轮 → 终止 | 中 | 高：命中本次 7 次失败与重复抓取的主要症状 | 阈值误伤合法轮询；变体参数（改写 query、换 slug）能绕过哈希 | OpenHands 阈值；PraisonAI / loopdetect；arXiv 2610.06191 的「5 次」 |
+  | S3 | **预算感知 + 渐进收尾**：每轮在模型视图注入 `Step X / N`；剩余 2 轮起提示「停止检索、开始综合、可标注缺口」；保留现有终答兜底 | 低 | 中：让模型在事实还在视图里时提前整合 | 输出前缀每轮变化，可能降低 prompt 缓存命中 | OpenAI Agents SDK 的 turn 机制；OpenRouter `strictFinalResponse`；sinan-agentic-core 的 `reminder_at` |
+  | S4 | **显式 `submit_answer` 工具**：模型调用该工具即结束循环，内容作为最终答案；可加「答案评估 → 不合格则退回重试」 | 中 | 中：显式动作比「什么都不返回」更容易被工具型模型触发 | 可能过早调用；社区有反向经验（sttp-ai 从 finish 工具改回「无 tool call 即终止」） | LangChain open_deep_research 的 `ResearchComplete`；Jina 的 `answer` + evaluator |
+  | S5 | **工具反馈可行动化**：404 提示「该 URL 不存在，改用 WebSearch」；重定向到列表页的 URL 标记为不可用；WebSearch 去重并标注「前面已抓取 / 与上次结果重复」 | 低 | 中：减少盲目换 slug/换关键词 | 只是引导，不能保证模型照做 | Anthropic「fix tool ergonomics」；P-06 的重定向观察 |
+  | S6 | **充分性评估器**：在预算过半或无进展时，用一次廉价模型调用判断「现有证据是否足以回答，缺什么」，足够则强制终答，不足则把缺口列表注入下一轮 | 中高 | 高：最接近「知道何时够了」 | 额外调用成本；评估器本身可能误判；需评测集验证 | CaRT；ACL 2026 证据感知终止；Jina evaluator |
+
+  **明确不建议**：
+  - 单纯提高 `max_iterations`：10 → 16 已实测，只是多跑 6 轮、多 47 秒，仍靠兜底收尾；
+  - 长期开启 `tool_choice="required"`：模型会被迫每轮调用工具，永远无法自然结束（OpenAI 社区已报告该问题）；
+  - 只改提示词：研究一致认为提示是 nudge 而非保证。
+
+- **推荐实施顺序**：
+  1. **S1 + S3 + S5**（一次提交）：证据账本解决事实丢失，预算感知让模型提前收尾，工具反馈减少无效尝试。三者都不改循环结构，风险最低。
+  2. **S2**：加入哈希指纹与分级处置（nudge → 强制终答），阈值先按 OpenHands 的 4/3/6 与论文的「连续 5 次无用结果」设置。
+  3. **S6**（可选）：如果前两步仍不能把「兜底终答率」降下来，再加充分性评估器。
+  4. **S4**（A/B）：作为对照组验证「显式 finish 工具」是否比隐式终止更稳。
+
+- **验收指标**（复测同一问题 + 3–5 个研究型问题）：
+  - `stop_reason != "max_iterations"` 的比例（目标：>80%）；
+  - 平均轮次、工具调用数、唯一 URL 数、重复调用数；
+  - 压缩触发次数与「压缩后重新抓取同一 URL」次数；
+  - 答案中「未能核实」比例与人工可接受度。
+
+- **解决措施（2026-11-04，实现第一批 S1 + S3 + S5）**：
+  - **S1 证据账本**：新增 `agent-loop/src/bokaclaw_agent/agent/ledger.py`。`ToolLedger` 按 `(工具名, canonical JSON 参数)` 去重，记录每次调用的参数、成功/失败、结果摘要（搜索前 3 条标题+URL、抓取字符数与正文片段、错误信息）和重复次数；上限 24 条 / 2,500 字符，超出时先丢最旧条目并标注「N earlier calls omitted」。账本在**上下文压缩之后**拼进模型视图，因此早前事实不会被摘要吞掉；重复调用只加计数，不展开。
+  - **S3 预算感知**：每轮在模型视图追加 `Step X of N`；剩余 1 轮提示「不要开启新研究，现在就答，并说明缺口；若缺一条关键事实，只允许最后一次工具调用」，剩余 0 轮提示「不要再调工具」。提示随账本合并为一条尾部 `user` 消息，前缀 `[Runtime context, not a new user request]`，**只存在于请求视图，不落库**；步数耗尽时的强制终答请求也带上账本。
+  - **S5 工具反馈可行动化**（`server/app/agent/dev_tools.py`）：
+    - `WebFetch` 的 HTTP ≥400 错误改为「页面不存在或不可用，请用 WebSearch 找当前 URL，不要猜」；
+    - 重定向改变路径时返回 `requested_url` + `note`（「可能已被重定向到列表页，详情页不存在，用 WebSearch 找」）；
+    - `WebSearch` 按 run 缓存完整查询（忽略大小写/空白），重复查询直接复用并标记 `cached: true` + 「不要重复运行」；
+    - 搜索结果若已被本轮其他查询返回过标 `previously_seen`，若已被抓取过标 `already_fetched`；全部结果都见过时给顶层提示「不要再次搜索，直接抓取或作答」。
+  - **配置**：SDK 默认关闭（`fact_ledger=False`、`step_budget_notice=False`）；server 默认开启：`AGENT_FACT_LEDGER=true`、`AGENT_FACT_LEDGER_MAX_CHARS=2500`、`AGENT_STEP_BUDGET_NOTICE=true`（`false`/`off` 可关闭）。文档同步 `agent-loop/README.md`、`server/README.md`、`server/.env.example`。
+  - **测试**：新增 `agent-loop/tests/test_ledger.py`（11 条）与运行时/压缩交互用例，`agent-loop` 全量 141 passed / 1 skipped；server 侧新增 WebSearch 去重、重定向、HTTP 错误、环境变量与 `build_runtime` 透传用例，`tests/test_agent_{runtime,router,runs,dev_tools}.py` 共 124 passed。
+
+- **解决后效果（同一问题、同一模型 `deepseek-flash`、同一镜像，仅代码不同）**：
+
+  | 版本 | run_id | 配置 | 耗时 | 工具调用 | 结束方式 | `finish_reason` |
+  |---|---|---|---|---|---|---|
+  | 改前 | `eec31c48` | 10 轮 | 75.2s | 20 | 兜底终答 | `max_iterations` |
+  | 改前 | `9736ad44` | 16 轮 | 122.2s | 30 | 兜底终答 | `max_iterations` |
+  | 改后 | `ff4c7f5c` | 10 轮 | 29s | 10 | 模型自然收尾 | `final` |
+  | 改后 | `e7e8f61b` | 16 轮 | 25s | 10 | 模型自然收尾 | `final` |
+  | 改后 | `0c475da4` | 16 轮 | 78s | 23 | 第 16 轮（最后一步提示后）自然收尾 | `final` |
+
+  - 两次「25–29 秒 / 10 次工具调用」的复测中，全部查询与 URL 无重复，模型在预算内主动作答；`0c475da4` 是更保守的一次采样：模型一直查到第 16 轮，但读到「最后一步」提示后停止调工具，仍未落入兜底路径。
+  - 两次短复测都没有触发上下文压缩（`context_compressed` 无日志），因此账本「防摘要丢事实」的作用由单元测试验证（压缩后账本仍在、且带 `(x2)` 计数），端到端样本尚未覆盖；`0c475da4` 的压缩日志显示压缩确实会发生（第 10–16 轮 before 32k→61k tokens，after 2k–19k）。
+  - 答案质量：10 轮版本给出 `qwen3.7-plus` 为主力、`qwen3.8-flash` 备选的结论与价格表；16 轮版本给出 `qwen3.8-flash` 为主力。两次结论不同，说明开放式问题的「正确答案」仍有模型采样差异，但都基于本轮抓到的可读来源，并标注了未核实项。
+- **仍未实施**：S2（哈希指纹 + 无进展/循环守卫）、S4（显式 `submit_answer` 工具）、S6（充分性评估器）。`0c475da4` 说明模型仍可能把预算用满才发现该收尾，S2 是下一步最值得做的护栏。
 
 ---
 
@@ -116,7 +182,7 @@
 
 ## P-06 同一问题反复抓取相同网页（WebFetch 无去重）
 
-- **状态**：部分缓解（commit `c3d3334`；单 run 精确 URL 去重已生效，线上效果待复测）
+- **状态**：已解决（commit `c3d3334` 精确 URL 去重 + 2026-11-04 的查询级去重与结果标注）
 - **场景**：用户连续 4 次提交同一问题「qwen系列模型最适合用于个人开放者的模型是哪个？综合考虑价格和编码能力」，涉及会话 `74a72c07-880c-4360-8b52-11a4c008d081` 与 `01211c7e-a140-4760-877d-37f8311131a7`。
 - **现象**：Agent 在单轮 ReAct 循环内、以及多次重试之间，反复调用 `WebFetch` 抓取相同页面；部分页面还以 HTML / `.md` / 英文站等不同形式重复读取。
 - **证据**（`agent_run_events` 按 `tool_call_id` 配对统计）：
@@ -158,13 +224,12 @@
   - 补充 3 个回归测试（单 run 复用、跨 run 隔离、失败不缓存），并更新 `server/README.md`。
 - **解决后效果**：
   - 单元测试确认：同一 URL 重复调用只产生 1 次网络请求，第二次返回 `cached: true`；两个 `build_dev_tools()` 实例各请求 1 次；连续两次 404 仍请求 2 次；隔离 checkout 中 `tests/test_agent_dev_tools.py` 37 passed；
-  - 线上同一问题的复测尚未进行，去重前后的 WebFetch 次数与耗时对比**待补充**；
+  - 线上同一问题的复测（2026-11-04，S1/S3/S5 上线后）：`ff4c7f5c`（10 轮上限，29s，10 次调用）与 `e7e8f61b`（16 轮上限，25s，10 次调用）中 5 次 WebFetch 的 URL 全部唯一，0 次重复；更保守的 `0c475da4`（78s，23 次调用）中也没有精确重复的 URL；
+  - `WebSearch` 现在同样按 run 去重：重复查询直接返回 `cached: true`；已被本轮其他查询返回过的结果标 `previously_seen`，已抓取过的标 `already_fetched`，全部见过时给顶层提示；
   - 需要说明：缓存只消除「完全相同 URL」的重复网络请求。若上下文压缩让模型看不到早前结果，模型仍可能再次调用同一 URL（此时命中缓存、不再发请求）；`.md` / 英文站变体、跨 run 重试仍会重新抓取。
 - **后续方向**：
-  - 用同一问题复测，统计去重前后 WebFetch 调用数、唯一 URL 数、耗时；
-  - 缓存命中时返回更明确的提示（例如「本 run 已抓取过该 URL，请复用早前结果」），或只返回短提示以节省上下文；
-  - 对重定向到列表页的 URL（`result.url != 请求 URL`）标记为不可用，避免模型继续换 slug；
-  - 结合 P-04 的收敛提示，减少「信息已足够仍继续抓取」的情况。
+  - `.md` / 英文站变体的归一化（同源同路径去扩展名）尚未实现；
+  - 对重定向到列表页的 URL 现在会返回 `note` 提示，但未做跨 slug 熔断。
 
 ---
 
@@ -174,3 +239,5 @@
 |---|---|
 | 2026-11-04 | 建立文件，录入 P-01 ~ P-05（P-01/P-02/P-03 已解决，P-04 未解决，P-05 部分缓解） |
 | 2026-11-04 | 追加 P-06（WebFetch 单 run URL 去重缓存，commit `c3d3334`）；标为部分缓解，线上效果待复测 |
+| 2026-11-04 | P-04 补充量化证据（16 轮工具结果 ≈50,880 tokens > 32,000 预算）、外部调研（LangChain / OpenAI Agents SDK / AutoGen / OpenHands / PraisonAI / 4 篇论文）与 6 个候选方案及推荐顺序 |
+| 2026-11-04 | 实现 P-04 的 S1（事实账本）+ S3（步数感知收尾）+ S5（可行动的工具反馈）；三次同题复测 `finish_reason=final`（10 轮 29s / 16 轮 25s，均 10 次工具调用），P-04 改为已解决，P-06 效果补测 |

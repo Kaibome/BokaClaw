@@ -36,6 +36,7 @@ from .context import (
     tool_message,
     truncate_text,
 )
+from .ledger import ToolLedger
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,10 @@ _STEP_LIMIT_NOTICE = (
     "Answer the user's question now using only the information already gathered above. "
     "If some facts could not be verified, say so explicitly instead of guessing."
 )
+
+# Added to the request view only (never persisted) so the model can tell the
+# runtime's own bookkeeping apart from the user's actual instruction.
+_RUNTIME_CONTEXT_PREFIX = "[Runtime context, not a new user request]"
 
 
 def _map_stop_reason(finish_reason: str | None) -> str:
@@ -215,6 +220,7 @@ class AgentRuntime:
             tool_result_max_chars=self.config.tool_result_max_chars,
         )
         compressor = None
+        ledger = ToolLedger() if self.config.fact_ledger else None
         new_messages: list[dict[str, Any]] = []
         tool_results: list[ToolResult] = []
         pending_calls: list[ToolCall] = []
@@ -277,6 +283,9 @@ class AgentRuntime:
                             iteration,
                             compressed.stats,
                         )
+                # Appended after compression so the ledger and the step notice
+                # are never summarized away. View-only: never persisted.
+                messages = self._with_runtime_context(messages, iteration, ledger)
                 self._emit(
                     EventType.MODEL_REQUEST,
                     session_id,
@@ -333,6 +342,8 @@ class AgentRuntime:
                     )
                     result = self.tools.invoke(call, error_mode=self.config.tool_error_mode)
                     tool_results.append(result)
+                    if ledger is not None:
+                        ledger.record(call, result)
                     # Events and the model view carry the capped copy; the
                     # persisted message and RunResult keep the full result.
                     view_content, truncated = truncate_text(
@@ -377,6 +388,7 @@ class AgentRuntime:
                             model_kwargs=model_kwargs,
                             stream=stream,
                             compressor=compressor,
+                            ledger=ledger,
                         )
                     except RunCancelled:
                         raise
@@ -527,11 +539,12 @@ class AgentRuntime:
         model_kwargs: dict[str, Any],
         stream: bool,
         compressor: ContextCompressor | None,
+        ledger: ToolLedger | None = None,
     ) -> Generator[str, None, ModelResponse]:
         """Ask for a final answer with tools disabled; returns the response.
 
-        The step-limit notice is appended to the request view only, so it is
-        never persisted as part of the conversation.
+        The ledger and the step-limit notice are appended to the request view
+        only, so they are never persisted as part of the conversation.
         """
 
         messages = context.build()
@@ -545,7 +558,13 @@ class AgentRuntime:
                     iteration,
                     compressed.stats,
                 )
-        messages = [*messages, {"role": "user", "content": _STEP_LIMIT_NOTICE}]
+        parts: list[str] = []
+        if ledger is not None:
+            rendered = ledger.render(self.config.fact_ledger_max_chars)
+            if rendered:
+                parts.append(rendered)
+        parts.append(_STEP_LIMIT_NOTICE)
+        messages = [*messages, {"role": "user", "content": "\n\n".join(parts)}]
         self._emit(
             EventType.MODEL_REQUEST,
             session_id,
@@ -563,6 +582,45 @@ class AgentRuntime:
             response = self._complete(messages, use_tools=False, **model_kwargs)
             self._merge_usage(usage, response.usage)
         return response
+
+    def _with_runtime_context(
+        self,
+        messages: list[dict[str, Any]],
+        iteration: int,
+        ledger: ToolLedger | None,
+    ) -> list[dict[str, Any]]:
+        """Append the step notice and fact ledger to the request view only."""
+
+        parts: list[str] = []
+        if self.config.step_budget_notice:
+            parts.append(self._step_budget_notice(iteration))
+        if ledger is not None:
+            rendered = ledger.render(self.config.fact_ledger_max_chars)
+            if rendered:
+                parts.append(rendered)
+        if not parts:
+            return messages
+        content = f"{_RUNTIME_CONTEXT_PREFIX}\n\n" + "\n\n".join(parts)
+        return [*messages, {"role": "user", "content": content}]
+
+    def _step_budget_notice(self, iteration: int) -> str:
+        total = self.config.max_iterations
+        remaining = max(0, total - iteration)
+        if remaining >= 2:
+            return (
+                f"Step {iteration} of {total}. Keep tool use purposeful: do not repeat an earlier "
+                "search or fetch. Answer once the gathered facts support a conclusion."
+            )
+        if remaining == 1:
+            return (
+                f"Step {iteration} of {total}, the last step. Do not start new research; answer now "
+                "from the facts above and state any gaps. If one missing fact is essential, make a "
+                "single final tool call whose result you will use in the final answer."
+            )
+        return (
+            f"Step {iteration} of {total}, the final step. Do not call more tools; answer now from "
+            "the facts above and state any gaps."
+        )
 
     def _request_options(self, use_tools: bool) -> dict[str, Any]:
         if not use_tools:

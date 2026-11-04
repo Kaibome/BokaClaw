@@ -366,7 +366,13 @@ def _fetch_url(
     if cache is not None:
         cached = cache.get(key)
         if cached is not None:
-            return {**cached, "cached": True}
+            note = "Already fetched earlier in this run; reuse this content instead of fetching it again."
+            existing = cached.get("note")
+            return {
+                **cached,
+                "cached": True,
+                "note": f"{existing} {note}" if existing else note,
+            }
 
     result = _fetch_url_uncached(config, url)
     if cache is not None:
@@ -391,7 +397,11 @@ def _fetch_url_uncached(config: DevToolConfig, url: str) -> Dict[str, Any]:
                         current = urljoin(current, location)
                         continue
                     if streamed.status_code >= 400:
-                        raise RuntimeError(f"request failed with HTTP {streamed.status_code}")
+                        raise RuntimeError(
+                            f"request to {current} failed with HTTP {streamed.status_code}; the page does "
+                            "not exist or is unavailable. Use WebSearch to find the current URL instead "
+                            "of guessing."
+                        )
 
                     chunks: List[bytes] = []
                     total = 0
@@ -419,16 +429,30 @@ def _fetch_url_uncached(config: DevToolConfig, url: str) -> Dict[str, Any]:
         text = _html_to_text(markup)
         problem = _page_problem(markup, text)
         if problem:
-            raise RuntimeError(f"request to {response.url} returned HTTP {response.status_code} but {problem}")
+            raise RuntimeError(
+                f"request to {response.url} returned HTTP {response.status_code} but {problem}. "
+                "Use WebSearch to find another source."
+            )
 
     text, truncated = _truncate(text, config.max_output_bytes)
-    return {
-        "url": str(response.url),
+    final_url = str(response.url)
+    result: Dict[str, Any] = {
+        "url": final_url,
         "status": response.status_code,
         "content_type": content_type or "unknown",
         "content": text,
         "truncated": truncated or len(body) >= config.web_max_bytes,
     }
+    if _normalize_fetch_url(final_url) != _normalize_fetch_url(url):
+        # A redirect that changes the path usually means the requested detail
+        # page no longer exists and the site fell back to an index page; say so
+        # instead of letting the model treat it as the requested content.
+        result["requested_url"] = url
+        result["note"] = (
+            f"The requested URL redirected to {final_url}. If that is a listing or home page, "
+            "the detail page may no longer exist; use WebSearch to find it."
+        )
+    return result
 
 
 def _parse_bing_rss(text: str, limit: int) -> List[Dict[str, str]]:
@@ -539,6 +563,62 @@ def _search_web(config: DevToolConfig, query: str, max_results: int) -> Dict[str
     if not results:
         response["note"] = "No results. Try different keywords, or fetch a known URL with WebFetch."
     return response
+
+
+def _normalize_query(query: str) -> str:
+    return re.sub(r"\s+", " ", (query or "").strip().lower())
+
+
+def _search_web_scoped(
+    config: DevToolConfig,
+    query: str,
+    max_results: int,
+    *,
+    cache: Optional[Dict[str, Dict[str, Any]]] = None,
+    seen_urls: Optional[Dict[str, str]] = None,
+    fetched: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Run a search and mark results this run has already seen.
+
+    ``cache``, ``seen_urls`` and ``fetched`` are scoped to one agent run by
+    ``build_dev_tools``. Repeating a query returns the earlier answer instead of
+    searching again, and results already returned by another query or already
+    fetched are annotated so the model can tell new evidence from repeats.
+    """
+    key = _normalize_query(query)
+    if cache is not None:
+        cached = cache.get(key)
+        if cached is not None:
+            note = "This exact search was already run in this run; reuse its results. Do not run it again."
+            existing = cached.get("note")
+            return {**cached, "cached": True, "note": f"{existing} {note}" if existing else note}
+
+    result = _search_web(config, query, max_results)
+    results = result.get("results") or []
+    if isinstance(results, list):
+        repeats = 0
+        for item in results:
+            if not isinstance(item, dict) or not str(item.get("url") or "").strip():
+                continue
+            normalized = _normalize_fetch_url(str(item["url"]))
+            if fetched and normalized in fetched:
+                item["already_fetched"] = True
+                repeats += 1
+            elif seen_urls is not None and normalized in seen_urls:
+                item["previously_seen"] = True
+                repeats += 1
+        if seen_urls is not None:
+            for item in results:
+                if isinstance(item, dict) and str(item.get("url") or "").strip():
+                    seen_urls.setdefault(_normalize_fetch_url(str(item["url"])), result["query"])
+        if results and repeats == len(results):
+            result["note"] = (
+                "Every result was already returned by an earlier search or fetch. Do not search again; "
+                "fetch one of these URLs or answer from the facts you already have."
+            )
+    if cache is not None:
+        cache[key] = result
+    return result
 
 
 class _Monitor:
@@ -992,6 +1072,10 @@ def build_dev_tools(sdk, config: Optional[DevToolConfig] = None):
     # Per-run dedup cache: a repeated WebFetch returns the earlier result
     # instead of hitting the network again.
     fetch_cache: Dict[str, Dict[str, Any]] = {}
+    # Repeated WebSearch queries reuse the earlier answer, and results already
+    # returned or fetched are annotated so the model stops re-researching.
+    search_cache: Dict[str, Dict[str, Any]] = {}
+    seen_urls: Dict[str, str] = {}
 
     def WebFetch(url: str) -> Dict[str, Any]:
         """Fetch a public URL and return its text content.
@@ -1007,13 +1091,22 @@ def build_dev_tools(sdk, config: Optional[DevToolConfig] = None):
     def WebSearch(query: str, max_results: int = DEFAULT_SEARCH_RESULTS) -> Dict[str, Any]:
         """Search the web and return result titles, URLs, and snippets.
 
-        Use it to discover pages, then pass a result URL to WebFetch.
+        Use it to discover pages, then pass a result URL to WebFetch. Repeating
+        a query within the same run returns the earlier results; results the run
+        has already seen carry ``previously_seen`` or ``already_fetched``.
 
         Args:
             query: Search keywords in natural language.
             max_results: Maximum number of results to return (1-10).
         """
-        return _search_web(cfg, query, max_results)
+        return _search_web_scoped(
+            cfg,
+            query,
+            max_results,
+            cache=search_cache,
+            seen_urls=seen_urls,
+            fetched=fetch_cache,
+        )
 
     def Monitor(
         action: Literal["start", "poll", "stop"],

@@ -702,3 +702,131 @@ def test_websearch_rejects_an_empty_query(tmp_path):
 
     with pytest.raises(ValueError, match="query must not be empty"):
         tools["WebSearch"]("   ")
+
+
+class _StatusPageHandler(_PageHandler):
+    status = 404
+
+    def do_GET(self):
+        self.send_response(type(self).status)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+
+class _RedirectPageHandler(_PageHandler):
+    def do_GET(self):
+        if self.path == "/old":
+            self.send_response(302)
+            self.send_header("Location", "/home")
+            self.end_headers()
+            return
+        super().do_GET()
+
+
+class _QuerySearxngHandler(_PageHandler):
+    """SearXNG stub whose results depend on the query."""
+
+    hits: list = []
+    result_url = None
+
+    def do_GET(self):
+        path, _, query = self.path.partition("?")
+        if path != "/search":
+            self.send_response(404)
+            self.end_headers()
+            return
+        type(self).hits.append(query)
+        params = dict(part.split("=", 1) for part in query.split("&") if "=" in part)
+        term = params.get("q", "").replace("+", " ")
+        if term == "first":
+            results = [{"title": "Pricing", "url": "https://example.com/pricing", "content": "price"}]
+        elif term == "same":
+            results = [{"title": "Pricing", "url": "https://example.com/pricing#frag", "content": "price"}]
+        else:
+            results = [{"title": "Other", "url": "https://example.com/other", "content": "other"}]
+        if type(self).result_url:
+            results = [{**item, "url": type(self).result_url} for item in results]
+        body = json.dumps({"results": results}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def test_webfetch_http_error_points_at_websearch(tmp_path):
+    tools = _tools(tmp_path, web_allow_private=True)
+
+    with _serve(_StatusPageHandler) as url:
+        with pytest.raises(RuntimeError, match="HTTP 404.*Use WebSearch"):
+            tools["WebFetch"](url)
+
+
+def test_webfetch_notes_path_redirects(tmp_path):
+    tools = _tools(tmp_path, web_allow_private=True)
+
+    with _serve(_RedirectPageHandler) as url:
+        result = tools["WebFetch"](url + "old")
+
+    assert result["url"].endswith("/home")
+    assert result["requested_url"].endswith("/old")
+    assert "redirected" in result["note"]
+
+
+def test_websearch_reuses_a_query_within_one_run(tmp_path):
+    _QuerySearxngHandler.hits = []
+    with _serve(_QuerySearxngHandler) as url:
+        tools = _tools(tmp_path, web_allow_private=True, web_search_url=url.rstrip("/"))
+        first = tools["WebSearch"]("first", max_results=5)
+        second = tools["WebSearch"]("  FIRST  ", max_results=3)
+
+    assert len(_QuerySearxngHandler.hits) == 1
+    assert first.get("cached") is None
+    assert second["cached"] is True
+    assert second["results"] == first["results"]
+    assert "Do not run it again" in second["note"]
+
+
+def test_websearch_cache_is_scoped_to_one_run(tmp_path):
+    _QuerySearxngHandler.hits = []
+    with _serve(_QuerySearxngHandler) as url:
+        for _ in range(2):
+            _tools(tmp_path, web_allow_private=True, web_search_url=url.rstrip("/"))["WebSearch"]("first")
+
+    assert len(_QuerySearxngHandler.hits) == 2
+
+
+def test_websearch_marks_results_returned_by_an_earlier_query(tmp_path):
+    _QuerySearxngHandler.hits = []
+    with _serve(_QuerySearxngHandler) as url:
+        tools = _tools(tmp_path, web_allow_private=True, web_search_url=url.rstrip("/"))
+        tools["WebSearch"]("first")
+        repeat = tools["WebSearch"]("same")
+
+    item = repeat["results"][0]
+    assert item["previously_seen"] is True
+    assert "Every result was already returned" in repeat["note"]
+
+
+def test_websearch_marks_results_already_fetched(tmp_path):
+    _QuerySearxngHandler.hits = []
+    _QuerySearxngHandler.result_url = None
+    with _serve(_QuerySearxngHandler) as url, _serve(_PageHandler) as page:
+        _QuerySearxngHandler.result_url = page
+        tools = _tools(tmp_path, web_allow_private=True, web_search_url=url.rstrip("/"))
+        tools["WebFetch"](page)
+        result = tools["WebSearch"]("first")
+        _QuerySearxngHandler.result_url = None
+
+    assert result["results"][0]["already_fetched"] is True
+
+
+def test_websearch_does_not_annotate_fresh_results(tmp_path):
+    _QuerySearxngHandler.hits = []
+    with _serve(_QuerySearxngHandler) as url:
+        tools = _tools(tmp_path, web_allow_private=True, web_search_url=url.rstrip("/"))
+        result = tools["WebSearch"]("other")
+
+    assert "previously_seen" not in result["results"][0]
+    assert "already_fetched" not in result["results"][0]
+    assert "note" not in result

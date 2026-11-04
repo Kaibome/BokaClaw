@@ -199,10 +199,11 @@ from bokaclaw_agent import InMemorySessionStore
 runtime = AgentRuntime(config, provider=provider, tools=[get_weather], store=InMemorySessionStore())
 ```
 
-## Context compression and tool-result limits
+## Context compression, fact ledger, and step notice
 
 Long tool-using runs can outgrow the model window one iteration at a time.
-Four optional settings bound the model view; all are off by default in the SDK:
+Optional settings bound the model view and keep the agent from looping; all are
+off by default in the SDK:
 
 | `AgentConfig` field | Default | Meaning |
 |---|---|---|
@@ -210,11 +211,16 @@ Four optional settings bound the model view; all are off by default in the SDK:
 | `context_keep_recent_tokens` | `None` | Tokens kept verbatim; defaults to half the budget. Must stay at least 256 tokens below `context_max_tokens` when both are set. |
 | `context_compression` | `"summary"` | `"summary"` folds old messages with one model call; `"truncate"` only drops them. |
 | `tool_result_max_chars` | `None` (off) | Maximum characters of one tool result in the model view. Minimum 256. |
+| `fact_ledger` | `False` | Keep a compact, deduplicated ledger of this run's tool calls and findings in the model view, appended after compression. |
+| `fact_ledger_max_chars` | `2500` | Maximum characters of the fact ledger. Minimum 256. |
+| `step_budget_notice` | `False` | Append `Step X of N` (with a wrap-up directive near the end) to each request view. |
 
 ```python
 config = AgentConfig(
     context_max_tokens=32_000,
     tool_result_max_chars=16_000,
+    fact_ledger=True,
+    step_budget_notice=True,
 )
 ```
 
@@ -239,9 +245,26 @@ store keep the full original content, so a later run can still work from it.
   `TOOL_RESULT` event carries `truncated` and `original_chars` alongside the
   view content, so observers can tell the difference.
 
-When the server runs the agent in-process, compression is on by default at
-32,000 tokens with 16,000-character tool results; see
-[Server configuration](#server-configuration) to change or disable it.
+**Fact ledger.** Even with compression, a long run can forget what it already
+found and search for it again. With `fact_ledger=True` the runtime records one
+compact line per distinct tool call (arguments, status, first results or a
+content excerpt, and a repeat count) and appends it to the request *after*
+compression, so early findings survive summarization. It is capped at
+`fact_ledger_max_chars`; the oldest entries are dropped first. Like the summary,
+it exists only in the request view.
+
+**Step budget notice.** With `step_budget_notice=True` each request gets a
+`Step X of N` line; the last two steps switch to a wrap-up instruction (answer
+now, or make at most one final call). This is view-only as well.
+
+Both blocks are appended as one trailing `user` message prefixed with
+`[Runtime context, not a new user request]`, after compression and before
+`MODEL_REQUEST`, so the emitted event shows exactly what the model received.
+
+When the server runs the agent in-process, compression and both loop controls
+are on by default at 32,000 tokens, 16,000-character tool results, a
+2,500-character ledger, and the step notice; see
+[Server configuration](#server-configuration) to change or disable them.
 
 ## Step limit
 
@@ -317,7 +340,7 @@ Every `AgentEvent` carries a `seq` that starts at `1` for each run and increases
 
 - `stream()` forwards text from the final answer; tool-call rounds produce no text.
 - No tokenizer dependency: the context budget uses a conservative character-based estimate over messages only (tool schemas are deducted separately).
-- Context compression is opt-in in the SDK (`context_max_tokens` / `tool_result_max_chars` are `None` by default); `max_history_messages` still provides message-count truncation on resume.
+- Context compression, the fact ledger, and the step notice are opt-in in the SDK (off by default); `max_history_messages` still provides message-count truncation on resume.
 - Tool calls returned in one model turn are executed sequentially, in order.
 - One active run per session is recommended. Concurrent writers are serialised by a row lock and `UNIQUE(session_id, seq)`, but turn ordering is not guaranteed.
 - Text content only; multimodal `content` parts are not supported.
@@ -434,6 +457,9 @@ closing the request cancels the upstream turn.
 | `AGENT_CONTEXT_KEEP_RECENT_TOKENS` | — | Recent tokens kept verbatim; empty uses half the budget. |
 | `AGENT_CONTEXT_COMPRESSION` | `summary` | `summary` or `truncate`; anything else falls back to `summary`. |
 | `AGENT_TOOL_RESULT_MAX_CHARS` | `16000` | In-process runtime tool-result cap; `0` / `off` disables it. |
+| `AGENT_FACT_LEDGER` | `true` | In-process runtime: keep a run-scoped fact ledger in the request view so early findings survive compression. |
+| `AGENT_FACT_LEDGER_MAX_CHARS` | `2500` | Fact ledger cap; values below 256 are raised to 256. |
+| `AGENT_STEP_BUDGET_NOTICE` | `true` | In-process runtime: append `Step X of N` and a wrap-up directive near the step limit. |
 | `AGENT_CONTEXT_DEBUG` | off | Log the resolved context settings once per turn and each `context_compressed` event at INFO. Diagnostics only; the event is never forwarded to clients. |
 
 The `AGENT_CONTEXT_*` / `AGENT_TOOL_RESULT_*` variables apply only when the

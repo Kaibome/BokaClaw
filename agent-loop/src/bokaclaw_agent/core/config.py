@@ -67,6 +67,26 @@ class AgentConfig(BaseModel):
             "persisted and returned in RunResult.tool_results. Disabled when None."
         ),
     )
+    fact_ledger: bool = Field(
+        default=False,
+        description=(
+            "Keep a compact run-scoped ledger of tool calls and findings in the model view. "
+            "It is appended after context compression, so early facts survive summarization; "
+            "nothing extra is persisted."
+        ),
+    )
+    fact_ledger_max_chars: int = Field(
+        default=2_500,
+        ge=256,
+        description="Maximum characters of the fact ledger injected into the model view.",
+    )
+    step_budget_notice: bool = Field(
+        default=False,
+        description=(
+            "Append the current step number and, near the end of the budget, a wrap-up "
+            "directive to the model view. The notice is never persisted."
+        ),
+    )
     model: ModelConfig | None = Field(
         default=None,
         description="Used to build the default provider; ignored when a provider is injected.",

@@ -571,3 +571,141 @@ def test_no_store_means_in_memory_only():
     assert result.session_id == "s1"
     assert runtime.get_session("s1") is None
     assert runtime.list_sessions() == []
+
+
+# ---- fact ledger and step budget notice -----------------------------------------
+
+
+def test_step_budget_notice_is_appended_to_the_view_only():
+    provider = FakeProvider([ModelResponse(content="done", finish_reason="stop")])
+    store = InMemorySessionStore()
+    runtime = AgentRuntime(
+        AgentConfig(max_iterations=5, step_budget_notice=True),
+        provider=provider,
+        store=store,
+    )
+
+    result = runtime.run("hi", session_id="s1")
+
+    request = provider.calls[0]["messages"]
+    assert request[:-1] == [{"role": "user", "content": "hi"}]
+    assert request[-1]["role"] == "user"
+    assert request[-1]["content"].startswith("[Runtime context, not a new user request]")
+    assert "Step 1 of 5" in request[-1]["content"]
+    # The notice never reaches the conversation or the store.
+    assert result.new_messages == [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "done"},
+    ]
+    assert store.load_messages("s1") == result.new_messages
+
+
+def test_step_budget_notice_escalates_near_the_budget():
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                tool_calls=[ToolCall(id=f"call_{index}", name="add", arguments={"a": index, "b": 1})],
+                finish_reason="tool_calls",
+            )
+            for index in range(2)
+        ]
+        + [ModelResponse(content="ok", finish_reason="stop")]
+    )
+    runtime = AgentRuntime(
+        AgentConfig(max_iterations=3, step_budget_notice=True),
+        provider=provider,
+        tools=[add],
+    )
+
+    runtime.run("count", session_id="s1")
+
+    assert "Step 1 of 3" in provider.calls[0]["messages"][-1]["content"]
+    assert "the last step" in provider.calls[1]["messages"][-1]["content"]
+    assert "the final step" in provider.calls[2]["messages"][-1]["content"]
+
+
+def test_step_budget_notice_is_off_by_default():
+    provider = FakeProvider([ModelResponse(content="done", finish_reason="stop")])
+    runtime = AgentRuntime(AgentConfig(), provider=provider)
+
+    runtime.run("hi", session_id="s1")
+
+    assert provider.calls[0]["messages"] == [{"role": "user", "content": "hi"}]
+
+
+def test_fact_ledger_lists_earlier_tool_results_in_the_next_request():
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                tool_calls=[ToolCall(id="call_1", name="add", arguments={"a": 1, "b": 2})],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(content="3", finish_reason="stop"),
+        ]
+    )
+    store = InMemorySessionStore()
+    runtime = AgentRuntime(AgentConfig(fact_ledger=True), provider=provider, tools=[add], store=store)
+
+    result = runtime.run("what is 1 + 2?", session_id="s1")
+
+    second_request = provider.calls[1]["messages"]
+    assert "## Research state (this run)" in second_request[-1]["content"]
+    assert "add" in second_request[-1]["content"]
+    assert "-> ok: 3" in second_request[-1]["content"]
+    # The ledger is a view, not a persisted message.
+    assert all("## Research state" not in str(message.get("content")) for message in store.load_messages("s1"))
+    assert result.content == "3"
+
+
+def test_fact_ledger_is_injected_after_context_compression():
+    events = []
+    provider = FakeProvider(
+        [
+            ModelResponse(tool_calls=[ToolCall(id="call_1", name="big")], finish_reason="tool_calls"),
+            ModelResponse(tool_calls=[ToolCall(id="call_2", name="big")], finish_reason="tool_calls"),
+            ModelResponse(content="done", finish_reason="stop"),
+        ]
+    )
+    runtime = AgentRuntime(
+        AgentConfig(fact_ledger=True, context_max_tokens=1024, context_compression="truncate"),
+        provider=provider,
+        tools=[big],
+        on_event=events.append,
+    )
+
+    runtime.run("read it", session_id="s1")
+
+    assert any(event.type == EventType.CONTEXT_COMPRESSED for event in events)
+    compressed_request = provider.calls[2]["messages"]
+    assert compressed_request[0]["role"] == "system"
+    assert "earlier messages were omitted" in compressed_request[0]["content"]
+    # The ledger is appended after compression, so it is never summarized away.
+    assert compressed_request[-1]["content"].startswith("[Runtime context, not a new user request]")
+    assert "## Research state (this run)" in compressed_request[-1]["content"]
+    assert "(x2)" in compressed_request[-1]["content"]
+    assert "-> ok:" in compressed_request[-1]["content"]
+
+
+def test_fact_ledger_reaches_the_forced_final_answer():
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                tool_calls=[ToolCall(id="call_1", name="add", arguments={"a": 1, "b": 2})],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(content="best effort", finish_reason="stop"),
+        ]
+    )
+    runtime = AgentRuntime(
+        AgentConfig(max_iterations=1, fact_ledger=True),
+        provider=provider,
+        tools=[add],
+    )
+
+    result = runtime.run("stuck", session_id="s1")
+
+    assert result.stop_reason == "max_iterations"
+    final_messages = provider.calls[1]["messages"]
+    assert "## Research state (this run)" in final_messages[-1]["content"]
+    assert "-> ok: 3" in final_messages[-1]["content"]
+    assert "maximum number of steps" in final_messages[-1]["content"]

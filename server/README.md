@@ -185,6 +185,9 @@ JSON response instead. Requests are rate limited to 30/minute per IP.
 | `AGENT_CONTEXT_KEEP_RECENT_TOKENS` | half the budget | Recent tokens kept verbatim by compression. |
 | `AGENT_CONTEXT_COMPRESSION` | `summary` | `summary` (model summary, truncation fallback) or `truncate` (drop only). |
 | `AGENT_TOOL_RESULT_MAX_CHARS` | `16000` | Per-tool-result cap in the model view; full content is still stored. `0` / `off` disables it. |
+| `AGENT_FACT_LEDGER` | `true` | Keep a run-scoped ledger of tool calls and findings in the model view so early facts survive compression. Set to `false` to disable. |
+| `AGENT_FACT_LEDGER_MAX_CHARS` | `2500` | Ledger cap; values below 256 are raised to 256. |
+| `AGENT_STEP_BUDGET_NOTICE` | `true` | Append `Step X of N` and a wrap-up directive near the step limit so the agent stops researching. Set to `false` to disable. |
 | `AGENT_CONTEXT_DEBUG` | on | Log the resolved model-view settings once per turn and each `context_compressed` decision at INFO. Diagnostics only; the event is never sent to the client. Set to `0` / `false` / `no` / `off` to silence. |
 | `AGENT_DEV_TOOLS` | `true` | Register the developer tool set. |
 | `AGENT_WORKSPACE_ROOT` | `/app/workspace` | File tools cannot escape this directory. Created on first use. |

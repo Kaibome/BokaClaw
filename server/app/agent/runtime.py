@@ -145,6 +145,9 @@ class LocalAgentConfig:
     context_keep_recent_tokens: Optional[int] = None
     context_compression: str = "summary"
     tool_result_max_chars: Optional[int] = None
+    fact_ledger: bool = True
+    fact_ledger_max_chars: int = 2_500
+    step_budget_notice: bool = True
 
 
 def _current_llm_config() -> Dict[str, Any]:
@@ -224,6 +227,9 @@ def load_local_config() -> Optional[LocalAgentConfig]:
         context_keep_recent_tokens=context_keep_recent_tokens,
         context_compression=_env_compression_mode("AGENT_CONTEXT_COMPRESSION"),
         tool_result_max_chars=_env_budget("AGENT_TOOL_RESULT_MAX_CHARS", 16_000),
+        fact_ledger=_env_flag("AGENT_FACT_LEDGER", True),
+        fact_ledger_max_chars=max(256, _env_int("AGENT_FACT_LEDGER_MAX_CHARS", 2_500)),
+        step_budget_notice=_env_flag("AGENT_STEP_BUDGET_NOTICE", True),
     )
 
 
@@ -433,16 +439,23 @@ def build_runtime(
         context_keep_recent_tokens=config.context_keep_recent_tokens,
         context_compression=config.context_compression,
         tool_result_max_chars=config.tool_result_max_chars,
+        fact_ledger=config.fact_ledger,
+        fact_ledger_max_chars=config.fact_ledger_max_chars,
+        step_budget_notice=config.step_budget_notice,
     )
     _context_debug(
         "agent context config: model=%s max_iterations=%s context_max_tokens=%s "
-        "context_keep_recent_tokens=%s context_compression=%s tool_result_max_chars=%s",
+        "context_keep_recent_tokens=%s context_compression=%s tool_result_max_chars=%s "
+        "fact_ledger=%s fact_ledger_max_chars=%s step_budget_notice=%s",
         config.model,
         config.max_iterations,
         config.context_max_tokens,
         config.context_keep_recent_tokens,
         config.context_compression,
         config.tool_result_max_chars,
+        config.fact_ledger,
+        config.fact_ledger_max_chars,
+        config.step_budget_notice,
     )
     tools = [*_memory_tools(sdk, payload.get("user_id")), *build_dev_tools(sdk)]
     return sdk.AgentRuntime(agent_config, tools=tools, on_event=on_event)
