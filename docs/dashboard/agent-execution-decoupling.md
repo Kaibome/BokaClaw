@@ -482,6 +482,9 @@ key 为 `bokaclaw.agent.run.v1:<conversationId>`。
 
 `MessageBubble` 在助手内容气泡下方渲染 `ToolTrace`（仅非用户消息且 `toolTrace` 非空）：
 
+- **默认只展示最新一条**（`entries[entries.length - 1]`），避免长工具链把回答挤出视野。
+- 条目多于一条时，列表上方显示下拉按钮 `Show all N tool calls`；点击后按到达顺序展开全部条目，按钮文案变为 `Show latest only`，箭头 `ChevronDown` 旋转 180°。
+- 展开状态是 `ToolTrace` 组件本地 `useState`，每条助手消息独立；流式过程中若用户未手动展开，新增工具调用仍只显示最新一条。
 - 每个 `tool_call_id` 一行，使用 `Collapsible`。
 - 收起时显示：状态图标、工具名、状态文案、耗时（`duration_ms`，如有）、展开箭头。
 - 状态文案：`Running` / `Completed` / `Failed` / `Aborted`。
@@ -491,8 +494,8 @@ key 为 `bokaclaw.agent.run.v1:<conversationId>`。
   - `ARGUMENTS`：`arguments` 格式化 JSON；为空时回退 `raw_arguments`；都没有时 `No arguments`。
   - `OUTPUT`：`content`；空且 running 时 `Waiting for result...`，否则 `No output`。
   - `truncated` 为 true 时显示 `Output truncated for display.`
-- 不做按 iteration 分组，不做运行中自动展开，不提供复制按钮。
-- 条目顺序是事件到达顺序，即 `tool.call` 的首次出现顺序。
+- 不做按 iteration 分组，不做运行中自动展开（默认折叠，只显示最新一条），不提供复制按钮。
+- 条目顺序是事件到达顺序，即 `tool.call` 的首次出现顺序；展开后从最早到最新排列。
 
 ### 9.2 状态标记
 
@@ -555,7 +558,7 @@ key 为 `bokaclaw.agent.run.v1:<conversationId>`。
 | 无 `offline` 监听 | 依赖 reader 报错/看门狗 | 可加离线提示 |
 | 页面未展示连接/运行状态 | `connection`/`runStatus`/`activeRunId` 未渲染 | 增加状态条 |
 | 无多标签协调 | 各标签独立订阅 | BroadcastChannel 同步本地状态 |
-| 工具轨迹无分组/自动展开/复制 | 逐条折叠 | 另开 UI 任务 |
+| 工具轨迹无分组/复制 | 默认折叠显示最新一条，可 `Show all` 展开全部；按 `tool_call_id` 排列 | 按 iteration 分组、复制按钮另开 UI 任务 |
 | `ActiveRun.assistant_message_id` 可空 | 无 id 时不插占位气泡，等 `message.delta` 创建 | 由服务端保证非空，或前端用 run id 生成临时 id |
 | `MessageStatus` 与 run 状态不完全对齐 | 消息只有 `completed/cancelled/failed`；`interrupted` 只存在于 run | 展示层用 `runStatus` |
 | 无测试运行器 | 验证靠 `pnpm typecheck` + `pnpm build` + 手工场景 | 引入组件/ hook 测试 |

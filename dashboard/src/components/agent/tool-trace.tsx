@@ -1,7 +1,13 @@
 "use client";
 
-import { useState } from "react";
-import { AlertCircle, Check, ChevronRight, Loader2 } from "lucide-react";
+import { useId, useState } from "react";
+import {
+  AlertCircle,
+  Check,
+  ChevronDown,
+  ChevronRight,
+  Loader2,
+} from "lucide-react";
 
 import {
   Collapsible,
@@ -114,11 +120,46 @@ function ToolTraceRow({ entry }: { entry: ToolTraceEntry }) {
 }
 
 export function ToolTrace({ entries }: { entries: ToolTraceEntry[] }) {
+  const [expanded, setExpanded] = useState(false);
+  const listId = useId();
+
+  if (entries.length === 0) {
+    return null;
+  }
+
+  // Collapsed, only the most recent call is visible; expansion reveals the
+  // whole turn in order. New entries keep the newest row in view while a run
+  // is streaming, so the trace stays useful without extra state.
+  const latest = entries[entries.length - 1];
+  const visible = expanded ? entries : [latest];
+
   return (
     <div className="flex w-full max-w-[85%] min-w-0 flex-col gap-1">
-      {entries.map((entry) => (
-        <ToolTraceRow key={entry.tool_call_id} entry={entry} />
-      ))}
+      {entries.length > 1 && (
+        <button
+          type="button"
+          onClick={() => setExpanded((value) => !value)}
+          aria-expanded={expanded}
+          aria-controls={listId}
+          className="flex items-center gap-1 self-start rounded px-1 py-0.5 typo-caption-sm text-onSurface-default-tertiary transition-colors hover:text-onSurface-default-primary"
+        >
+          <ChevronDown
+            className={cn(
+              "size-3 shrink-0 transition-transform",
+              expanded && "rotate-180",
+            )}
+          />
+          {expanded
+            ? "Show latest only"
+            : `Show all ${entries.length} tool calls`}
+        </button>
+      )}
+
+      <div id={listId} className="flex flex-col gap-1">
+        {visible.map((entry) => (
+          <ToolTraceRow key={entry.tool_call_id} entry={entry} />
+        ))}
+      </div>
     </div>
   );
 }

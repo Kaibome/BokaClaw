@@ -578,7 +578,7 @@ AGENT_LOOP_HISTORY_MESSAGES=40
 | `dashboard/src/components/agent/conversation-list.tsx` | New chat、会话列表、active/hover、重命名/删除菜单 |
 | `dashboard/src/components/agent/message-thread.tsx` | 消息列表、自动滚动、错误提示、首 token 前 loading |
 | `dashboard/src/components/agent/message-bubble.tsx` | user/assistant 气泡、状态 caption、流式光标；助手气泡下方渲染 `ToolTrace` |
-| `dashboard/src/components/agent/tool-trace.tsx` | 工具轨迹列表：按 `tool_call_id` 合并的调用/结果、折叠展开、状态与耗时 |
+| `dashboard/src/components/agent/tool-trace.tsx` | 工具轨迹列表：按 `tool_call_id` 合并的调用/结果；默认只显示最新一条，顶部 `Show all` 按钮展开全部；行内折叠展开、状态与耗时 |
 | `dashboard/src/components/agent/chat-composer.tsx` | 自适应高度输入框、发送/停止、Enter/Shift+Enter、IME 兼容 |
 | `dashboard/src/components/agent/agent-empty-state.tsx` | 未选会话 / 空会话状态 |
 | `dashboard/src/components/agent/rename-conversation-dialog.tsx` | 重命名弹窗 |
@@ -769,7 +769,7 @@ export class SseParser {
 - Enter 发送，Shift+Enter 换行；用 `event.nativeEvent.isComposing` 兼容中文输入法；
 - `maxLength={32000}`；
 - streaming 时发送按钮切换为 Stop（`Square` 图标）：已有 `run_id` 时调用 `POST /agent/runs/{id}/cancel` 并继续消费到 `error(agent_cancelled)` + `done`；仅在 `meta` 之前还没有 `run_id` 时才本地 abort 连接；
-- 工具轨迹：助手气泡下方渲染 `ToolTrace`，每行按 `tool_call_id` 展示工具名、状态（Running / Completed / Failed / Aborted）与耗时；展开后显示 ARGUMENTS / OUTPUT 与截断提示。
+- 工具轨迹：助手气泡下方渲染 `ToolTrace`，默认只展示最新一条工具调用；条目多于一条时顶部提供 `Show all N tool calls` 下拉按钮展开全部（再点变为 `Show latest only`）。每行按 `tool_call_id` 展示工具名、状态（Running / Completed / Failed / Aborted）与耗时；展开后显示 ARGUMENTS / OUTPUT 与截断提示。
 
 ### 7.6 状态机
 
@@ -948,7 +948,7 @@ AGENT_LOOP_URL=http://host.docker.internal:8890   # 或 compose 内的 http://ag
 
 - 不把 `agent-loop/` 作为独立服务部署（默认进程内运行），但保留 `/invoke` HTTP/SSE 契约作为远程扩展点；
 - 不引入 Markdown 渲染、代码高亮、文件上传、多模态（后续可加 `react-markdown` + `remark-gfm`）；
-- 不做工具轨迹的按迭代分组、运行中自动展开、复制按钮；当前只有按 `tool_call_id` 的折叠列表；
+- 不做工具轨迹的按迭代分组、运行中自动展开、复制按钮；当前默认折叠只显示最新一条，可手动 `Show all` 展开全部；
 - 不做跨重启续跑、步级 checkpoint、多副本执行或分布式队列；服务端重启时活跃 run 会被回收为终态；
 - 不做多用户/多租户权限模型；会话归属固定为登录用户；
 - 不新增全局状态管理；会话状态放在页面级 hook 中；
