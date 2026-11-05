@@ -7,12 +7,17 @@ FROM base AS deps
 ARG NPM_REGISTRY=https://registry.npmjs.org
 ENV COREPACK_NPM_REGISTRY=${NPM_REGISTRY}
 COPY package.json yarn.lock* package-lock.json* pnpm-lock.yaml* ./
-RUN \
-  if [ -f yarn.lock ]; then yarn --frozen-lockfile --network-timeout 600000; \
-  elif [ -f package-lock.json ]; then npm ci --registry="${NPM_REGISTRY}"; \
-  elif [ -f pnpm-lock.yaml ]; then corepack enable pnpm && pnpm i --registry="${NPM_REGISTRY}"; \
-  else npm install --registry="${NPM_REGISTRY}"; \
-  fi
+# Cache mounts keep downloaded packages between builds even when the deps layer
+# is invalidated (lockfile or base image change).
+RUN --mount=type=cache,target=/root/.npm \
+    --mount=type=cache,target=/usr/local/share/.cache/yarn \
+    --mount=type=cache,target=/root/.local/share/pnpm/store \
+    --mount=type=cache,target=/root/.cache/node/corepack \
+    if [ -f yarn.lock ]; then yarn --frozen-lockfile --network-timeout 600000; \
+    elif [ -f package-lock.json ]; then npm ci --registry="${NPM_REGISTRY}"; \
+    elif [ -f pnpm-lock.yaml ]; then corepack enable pnpm && pnpm i --registry="${NPM_REGISTRY}"; \
+    else npm install --registry="${NPM_REGISTRY}"; \
+    fi
 
 # Build
 FROM base AS builder
@@ -25,7 +30,9 @@ ENV NEXT_TELEMETRY_DISABLED=1
 ENV NEXT_PUBLIC_API_URL=NEXT_PUBLIC_API_URL
 ENV NEXT_PUBLIC_INSTANCE_NAME=NEXT_PUBLIC_INSTANCE_NAME
 
-RUN npm run build
+# Next's incremental build cache survives source changes; it is not part of the
+# runtime image (only .next/standalone and .next/static are copied below).
+RUN --mount=type=cache,target=/app/.next/cache npm run build
 
 # Production
 FROM base AS runner
