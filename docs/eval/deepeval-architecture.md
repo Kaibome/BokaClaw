@@ -244,7 +244,168 @@ strict_mode 且 score < threshold 时，score 置 0
 
 实践上应优先使用确定性指标：它们便宜、可复现，也不会把用户内容发给外部模型。
 
-## 7. BokaClaw 的落地方式
+## 7. 自定义指标
+
+DeepEval 官方支持自定义评测项，**不需要修改源码，也不需要注册**：实现一个符合
+`BaseMetric` 契约的类，把实例放进 `evaluate(metrics=[...])` 或 `assert_test()`
+即可。并发编排、缓存、报告和结果序列化都会像内置指标一样处理它。
+
+### 7.1 三条扩展路径
+
+| 方式 | 代码量 | 判定方式 | 适用场景 |
+| --- | --- | --- | --- |
+| `GEval` | 一个实例 | 自然语言 criteria + 评价步骤，LLM 判定 | 快速试一个新评价维度，不写类 |
+| `DAGMetric` | 建一个判定图 | 多节点有向无环图，LLM 逐节点判定 | 评价有明显步骤链：抽取 → 比对 → 结论 |
+| 继承 `BaseMetric` | 一个类 | 任意：确定性规则、LLM、或组合已有指标 | 规则可复现、团队自有指标、需要读 trace |
+
+前两种只是预置好的自定义指标；真正要写代码的只有第三种。
+
+### 7.2 指标契约
+
+```python
+from deepeval.metrics import BaseMetric
+from deepeval.test_case import LLMTestCase, SingleTurnParams
+
+
+class MyMetric(BaseMetric):
+    # 声明依赖哪些用例字段；缺字段时由 skip_on_missing_params 决定是否跳过
+    _required_params = [SingleTurnParams.INPUT, SingleTurnParams.ACTUAL_OUTPUT]
+
+    def __init__(self, threshold: float = 0.5):
+        self.threshold = threshold
+
+    def measure(self, test_case: LLMTestCase) -> float:
+        self.score = ...                       # 0~1，必须设置
+        self.reason = "..."                    # 可选，落库与报告会读取
+        self.success = self.is_successful()    # 基类实现：score >= threshold
+        return self.score
+
+    async def a_measure(self, test_case: LLMTestCase) -> float:
+        return self.measure(test_case)         # 无异步逻辑时直接回退
+
+    @property
+    def __name__(self) -> str:
+        return "My Metric"                     # 指标身份，落库与缓存都用它
+```
+
+必须遵守的只有几条：
+
+- `measure()` 与 `a_measure()` 都要实现；`async_mode=False` 时仍建议保留异步回退。
+- 必须设置 `self.score`；`self.success` 用基类的 `is_successful()`。
+- 抛异常前先写 `self.error = str(exc)` 再 `raise`。只有这样才能被
+  `ignore_errors=True` 记成失败，而不是打断整次评测。
+- `__name__` 是指标身份，必须唯一（见 7.6）。
+- 通过 `evaluate()` 调用时，`_required_params` 由 `prepare_measure()` 统一校验；
+  直接调用 `measure()`（例如单元测试）时要自己先检查字段。
+
+### 7.3 确定性指标示例
+
+“实际调用的工具必须都在 golden 的 expected_tools 里”：
+
+```python
+class ToolNameAllowlistMetric(BaseMetric):
+    _required_params = [
+        SingleTurnParams.TOOLS_CALLED,
+        SingleTurnParams.EXPECTED_TOOLS,
+    ]
+
+    def __init__(self, threshold: float = 1.0):
+        self.threshold = threshold
+
+    def measure(self, test_case: LLMTestCase) -> float:
+        expected = {tool.name for tool in test_case.expected_tools or []}
+        called = {tool.name for tool in test_case.tools_called or []}
+        extra = sorted(called - expected)
+        self.score = 0.0 if extra else 1.0
+        self.reason = (
+            f"Unexpected tools: {', '.join(extra)}"
+            if extra
+            else "Only expected tools were called."
+        )
+        self.success = self.is_successful()
+        return self.score
+
+    async def a_measure(self, test_case: LLMTestCase) -> float:
+        return self.measure(test_case)
+
+    @property
+    def __name__(self) -> str:
+        return "Tool Name Allowlist"
+```
+
+这类指标不调用外部模型、可复现、零成本，应与 `AgentLoopDetectionMetric`
+一样常开。
+
+### 7.4 LLM 判定的自定义指标
+
+优先用 `GEval`，用自然语言描述一个新维度：
+
+```python
+from deepeval.metrics import GEval
+from deepeval.test_case import SingleTurnParams
+
+GEval(
+    name="Answer Consistency",
+    criteria="回答是否与执行轨迹中的工具输出一致，不得编造工具未返回的事实。",
+    evaluation_params=[
+        SingleTurnParams.INPUT,
+        SingleTurnParams.ACTUAL_OUTPUT,
+        SingleTurnParams.CONTEXT,
+    ],
+    threshold=0.5,
+)
+```
+
+需要显式建模判定步骤时用 `DAGMetric`：
+
+```python
+from deepeval.metrics import DAGMetric, DeepAcyclicGraph
+```
+
+如果需要完全控制“抽取 → 判定 → 打分”的链路，可以在 `measure()` 里组合已有指标
+（例如同时实例化 `AnswerRelevancyMetric` 与 `FaithfulnessMetric` 再合成分数），
+或用 `deepeval.metrics.utils.initialize_model()` 取 judge 模型，用 Pydantic schema
+约束其结构化输出。
+
+### 7.5 接入方式
+
+自定义指标写在 `server/app/eval/custom_metrics.py`，然后在
+`server/app/eval/metrics.py:15` 的 `build_metrics()` 里追加：
+
+```python
+metrics: list[BaseMetric] = [AgentLoopDetectionMetric(threshold=1.0)]
+metrics.append(ToolNameAllowlistMetric(threshold=1.0))   # 确定性，常开
+if use_llm_judge:
+    metrics += [ ... 现有 judge 指标 ... ]
+    # GEval / 自定义 judge 指标放这里
+```
+
+`evaluator.py` 不需要改动：它只消费 `MetricData`，自定义指标产出的结构与内置
+指标完全一致。
+
+### 7.6 注意事项
+
+1. **缓存键不包含自定义参数。** `test_run/cache.py:453` 的
+   `create_metric_configuration()` 只取固定字段（`threshold`、
+   `evaluation_model`、`strict_mode`、`include_reason`、`n`、`criteria`、
+   `language`、`embeddings`、`evaluation_steps`、`evaluation_params`、
+   `assessment_questions`）。自定义的 `allowlist`、`rubric` 等不会进 key。
+   当前 `evaluate()` 的 `use_cache` 默认是 `False`，暂不受影响；**一旦开启缓存，
+   改自定义参数可能命中旧分数**。规避：把参数写进 `criteria` / `evaluation_steps`，
+   把参数编进 `__name__`，或关闭缓存。
+2. **`__name__` 撞名会拿到别人的缓存。** 缓存命中时比对的是
+   `cached.metric_data.name == metric.__name__`；两个自定义指标同名且配置字段相同
+   会互相串。给每个指标一个独特的人类可读名。
+3. **用 `SingleTurnParams`，不要用 `LLMTestCaseParams`。** 后者在 4.3.3 已弃用，
+   访问时会发 `DeprecationWarning`。
+4. **轨迹仍只能走私有字段。** 需要整棵 span 树时读 `test_case._trace_dict`
+   （`adapter.py` 就是这么写入的），属于升级 deepeval 时必须跑契约测试的依赖。
+5. **judge 类自定义指标必须放在 `use_llm_judge` 开关后面。** 它会外发 input、
+   output 与工具参数，应沿用 `EVAL_JUDGE_MAX_CHARS` 截断和“默认关闭”策略。
+6. **`measure()` 一定要 `return self.score`。** deepeval 同时使用返回值和
+   `self.score`，两者不一致会造成难查的偏差。
+
+## 8. BokaClaw 的落地方式
 
 评测是一条异步、隔离、可回放的链路：
 
@@ -270,7 +431,7 @@ strict_mode 且 score < threshold 时，score 置 0
                                                              Dashboard 轮询展示
 ```
 
-### 7.1 关键设计点
+### 8.1 关键设计点
 
 | 设计点 | 做法 | 原因 |
 | --- | --- | --- |
@@ -281,7 +442,7 @@ strict_mode 且 score < threshold 时，score 置 0
 | judge 开关 | `EVAL_JUDGE_ENABLED` + `EVAL_JUDGE_API_KEY` 双重开关 | 默认不把用户内容发给外部 judge |
 | 结果解释 | `server/app/eval/evaluator.py` 补齐被跳过指标的占位行 | deepeval 4.3.3 不返回跳过项，前端需要解释分数缺口 |
 
-### 7.2 指标选择
+### 8.2 指标选择
 
 `server/app/eval/metrics.py:15` 的 `build_metrics()`：
 
@@ -294,7 +455,7 @@ strict_mode 且 score < threshold 时，score 置 0
 - `ToolCorrectnessMetric(threshold=0.5)` 额外要求该用例同时有 `expected_tools`
   和 `tools_called`。
 
-### 7.3 评测执行
+### 8.3 评测执行
 
 `server/app/eval/evaluator.py:43` 的 `evaluate_run()`：
 
@@ -307,7 +468,7 @@ strict_mode 且 score < threshold 时，score 置 0
 6. 把 `MetricData` 转成落库行；对 deepeval 未返回的跳过指标补占位行。
 7. 总体成功定义为：所有非跳过指标都满足 `success is not False` 且无 `error`。
 
-### 7.4 文件索引
+### 8.4 文件索引
 
 | 职责 | 文件 |
 | --- | --- |
@@ -318,7 +479,7 @@ strict_mode 且 score < threshold 时，score 置 0
 | 开关与 judge 环境 | `server/app/eval/config.py` |
 | 运行时依赖 | `server/eval-requirements.txt` |
 
-## 8. 关键注意事项
+## 9. 关键注意事项
 
 1. **分数是 judge 的判断，不是客观真值。** 换 judge 模型或改 prompt 版本，分数可能
    变化。它适合做相对回归和趋势，不适合当绝对精度。
@@ -333,7 +494,7 @@ strict_mode 且 score < threshold 时，score 置 0
 6. **judge 会外发内容。** deepeval 的 LLM 指标会把 input、actual output、工具调用
    和 golden 的 expected output 发给 judge。默认关闭；开启后 UI 必须明示外发目标。
 
-## 9. 参考位置
+## 10. 参考位置
 
 | 主题 | 位置 |
 | --- | --- |
