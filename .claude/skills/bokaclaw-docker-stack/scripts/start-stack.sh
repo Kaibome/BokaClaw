@@ -78,6 +78,9 @@ AGENT_LOOP_READ_TIMEOUT_SECONDS=120
 AGENT_LOOP_MAX_SECONDS=300
 AGENT_LOOP_HISTORY_MESSAGES=40
 
+# Presentation tools (PptxBuild and friends); python-pptx is baked into the image.
+AGENT_OFFICE_TOOLS=true
+
 # Online evaluation worker (bokaclaw-eval). The judge is opt-in per run; the
 # worker receives only DB credentials and these variables, never JWT_SECRET.
 EVAL_ENABLED=true

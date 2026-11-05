@@ -433,6 +433,53 @@
 
 ---
 
+## P-12 生成 PPT 时模型在最后一轮手写 48KB OOXML（缺少文档/演示工具）
+
+- **状态**：已解决（真实 run `9ddf68d7` 复测：269s → 79s，24 → 14 次调用，Pptx 工具合计 311ms）
+- **发现时间**：2026-11-05
+- **解决时间**：2026-11-05
+- **场景**：run `88662f0c-ed05-4410-81fb-a20a5592eece`（会话 `0f659782-6bcb-4a6c-bd57-8f67a1f4d4af`），任务「根据工作目录下的 .md 生成 ppt，格式参考工作目录下的 pdf」。
+- **现象**：整轮 269.1s、16 轮 LLM、24 次工具调用，其中只有最后 2 次（`Write` + `Bash`）在真正产出 PPT；最终由模型一次性写出 48,528 字节的 `build_pptx.py`，用 `zipfile` 手拼 OOXML，单轮 LLM 耗时 138.9s。生成后没有任何版面校验，模型自己在答案里声明「未经渲染校验」。
+- **证据**（`agent_run_events` / `agent_run_spans`）：
+  - 工具构成：Bash 13 次、Read 9 次、Glob 1 次、Write 1 次；
+  - 9 次 Bash 属于「摸环境 / 逆向 PDF」：探测 `pdftotext`、`libreoffice`、`node`、`python-pptx`，以及反复用 pypdf 读页面盒尺寸、颜色、内容流；
+  - `Read` 把 `agent-span-evaluation.md` 读了 3 次、`qwen-model-selection.md` 读了 2 次；
+  - `pip install python-pptx` 失败原文：`Temporary failure in name resolution`；
+  - 最大单轮：`llm.turn.14` 138,881ms，产出 48,528 字节脚本；`Write` 事件 arguments 被标 `truncated: true`。
+- **根因**：
+  1. `Read` 对 PDF 只返回 `extract_text()`，页尺寸、字体、字号、颜色、文字块坐标全部丢失；任务是「格式参考 PDF」，模型只能自己写 pypdf 脚本逆向版式；
+  2. 镜像里没有 pptx 库，且 executor 是只读 rootfs + 无外网，运行时 `pip install` 必然失败；
+  3. 工具面没有「幻灯片」这一层抽象，模型只能用代码表达内容，导致单轮超大输出，且任何一处出错都要整体重写；
+  4. 运行环境是纯文本的（`Read` 对图片明确返回「像素对模型不可见」），模型没有可用的版面校验手段，只能按字宽估算。
+- **解决措施**（P0，`server/app/agent/office_tools.py`）：
+  - 新增 `PptxBuild(file_path, slides, title, theme, overwrite)`：模型只产出结构化 slide spec（`title` / `section` / `bullets` / `two_column` / `table` / `code` / `quote` / `end`），布局、换行、字号收缩、页码由服务端用 python-pptx 计算；
+  - 新增 `PptxUpdateSlide` / `PptxAddSlide` / `PptxDeleteSlide`：单页修改，改错不再重写整个文件；插入/删除后统一重排页码与章节序号；
+  - 分辨率 960×540 pt（16:9），主题色/字体可覆盖（`theme`），主题与标题写入 `<deck>.theme.json` 侧车文件，后续编辑保持同一视觉；
+  - 文本按字宽做 `fit_size` 估算，无法容纳时降字号并在返回的 `warnings[]` 里指名页码；
+  - `server/requirements.txt` 预装 `python-pptx>=1.0,<2.0`（不开放 executor 外网）；`DevToolConfig.office_tools` + `AGENT_OFFICE_TOOLS`（默认 true）控制注册，python-pptx 缺失时自动不注册。
+- **实施中确认的事实**：
+  1. python-pptx 的 core properties 有 255 字符上限，主题 JSON 不能塞进 `comments`，改用侧车文件；
+  2. 本地 stack 的 executor 与 server 共用同一个 `$SERVER_IMAGE`（`start-stack.sh:205`），requirements 改动同时覆盖两者，无需单独镜像；
+  3. macOS 上 `tempfile.mkdtemp()` 返回 `/var/...`，而 `Path.resolve()` 得到 `/private/var/...`，`_resolve` 会误判「outside the workspace」；测试与脚本需先 `resolve()`（生产 `/app/workspace` 不受影响）。
+- **解决后效果**：
+  - `tests/test_agent_office_tools.py` 19 passed：8 种 layout 渲染、页码/章节号重排、主题跨编辑保持、路径越界与覆盖保护、溢出告警、讲稿清理；
+  - `tests/test_agent_dev_tools.py` + `test_agent_executor.py` 65 passed，无回归；ruff check/format 通过；
+  - 用上一轮真实 `agent-span-evaluation.md` 做 smoke：9 页、40,708 字节，python-pptx 可回读，960×540，侧车正常。
+- **真实 run 复测**（run `9ddf68d7-dc8f-4ad8-a5a2-5f61aa8e6421`，同题：`agent-span-evaluation.md` + 参考 PDF）：
+  - 重建镜像（`build-images.sh server`，`python-pptx 1.0.2` 在 server 与 executor 中均可导入）→ `RECREATE=1 start-stack.sh`；
+  - 整轮 **79.5s**（原 269.1s，−70%），LLM 12 轮（原 16 轮），工具 **14 次**（原 24 次）：Bash 9、Read 2、`PptxBuild` 1、`PptxAddSlide` 1、`PptxUpdateSlide` 1；
+  - 三个 Pptx 调用合计 **311ms**（190 / 65 / 56），`tool` span 总耗时 9.1s（原 18.1s）；
+  - 最大单轮 `llm.turn.7` 32,623ms，内容是 15 页 slide spec 的 JSON（原 `llm.turn.14` 138,881ms，内容是 48KB OOXML 生成代码），**超大单轮消失**；
+  - 产物 `agent-span-evaluation-v2.pptx`：16 页、82,755 字节，python-pptx 回读确认 960×540 pt、**0 个越界形状**；主题侧车记录 `accent #1757C2` / `accent2 #00959D` / `Microsoft YaHei`，取自参考 PDF；
+  - 告警闭环生效：`PptxBuild` 返回 `warnings: ["slide 7: 14 table rows; text may overflow"]` → 模型下一轮用 `PptxAddSlide(index=8)` 把该表拆成两页 → 再用 `PptxUpdateSlide` 修版式，页数 15 → 16；
+  - 模型全程未再写 OOXML 生成脚本，只在最后用一次 Bash + python-pptx 读回文件做边界校验（7.8s）；`ls -R archive-old` 看到了上一轮的 `build_pptx.py`，但没有读取或复用它。
+- **仍未覆盖**（P1）：
+  - PDF 版式逆向仍占 5 次调用（探测渲染工具、`pip install pymupdf` 失败、两次 zlib 手工解内容流），`PdfInspect` / `DocumentStyle` 落地后这段可压到 1–2 次；
+  - `PptxBuild` 的 `arguments` 在事件日志中被标 `truncated: true`（15 页 spec 超过单事件 16KB 上限），工具本身收到完整参数并成功；若要用事件流离线回放这一轮，需要提高该事件的载荷上限或另存 spec。
+- **可复用结论**：给 Agent 的工具必须覆盖任务的**中间产物**，而不只是首尾（读文件、跑命令）。当目标格式需要刚性结构时，让模型输出内容和让工具负责排版，比让模型输出「生成器代码」更稳：输出小、可增量修复、失败可定位，也不会因为一次超长生成把整轮预算吃掉。
+
+---
+
 ## P-13 每次 Agent run 的模型 token 消耗无法统计
 
 - **状态**：已解决
@@ -474,6 +521,33 @@
 
 ---
 
+## P-15 研究记忆检索「看起来没触发」：无 span 不可见 + 相似度阈值口径漂移
+
+- **状态**：未解决（已完成分析，修复方案待确认）
+- **发现时间**：2026-11-05
+- **解决时间**：
+- **场景**：排查 run `bf25efa8-35dd-4262-b948-a532c5dbe64a`（问题「查下MiniMax最新发布的模型API调用价格」）为什么「没有触发记忆检索」。
+- **现象**：
+  1. Trace 里只有 `WebSearch` / `WebFetch` 两个工具事件，`agent_run_events` 里没有 `search_memories`，看起来记忆检索完全没有发生；
+  2. 但服务器日志有 `research memory injected user=c6b4238c-... chunk_chars=2750`，span `llm:2` 的 system prompt 从第 679 个字符起就是 `## Reusable research from earlier runs`（基础 prompt ≈675 字符 + 注入块 2750 字符），注入块里是两条历史结论（2026-11-04「帮我看下Minimax最新发布的模型定价是多少」、2026-11-05「查询 MiniMax 最新模型的价格，并给出官方定价页链接。」）；
+  3. 复核时用同一问题做向量探针，最高分只有 0.4169，低于默认 `AGENT_RESEARCH_MEMORY_MIN_SCORE=0.5`，与「09:01 时确实注入了」矛盾。
+- **根因**：
+  1. **不可见**：自动检索发生在 run 开始前（`server/app/agent/runtime.py:754-773` 的 `prior_research_block`），既不发 span 也不发 tool 事件；`search_memories` 工具是模型自主调用的另一条路径，本次未调用属正常（自动注入已覆盖，且注入块自身要求「facts may have changed, verify with WebSearch/WebFetch」，模型因此先去官网复核）。
+  2. **阈值口径漂移**：mem0 v1.1 的 `search()` 返回值里的 `score` 不是余弦相似度，而是混合分
+     `combined = (semantic + bm25 + entity_boost) / max_possible`，其中 `max_possible` 在候选池里**任意一条**记忆命中 BM25 时 = 2.0，否则 = 1.0（`mem0/utils/scoring.py::score_and_rank`）。`research_memory._fresh_entry` 直接拿这个 `score` 和固定 floor 0.5 比较，于是同一条记忆的相关度会随候选池组成变化而翻倍式变化。
+- **证据**：
+  - `explain=True` 探针（问题与 run 相同，user `c6b4238c`）：`3a0ac601` semantic=0.7398 / bm25=0 / final=0.3699；`81cf86b6` semantic=0.7390 / bm25=0 / final=0.3695；`4a15e086` semantic=0.8025 / bm25=0.0313 / final=0.4169，`max_possible_score=2.0`；
+  - `text_lemmatized` 关键字检索只命中 1 条：`4a15e086`（raw 0.1），即 `bm25_scores` 非空完全由这条新记忆造成；
+  - `4a15e086` 创建于 2026-11-05 09:01:48，正是本次 run 结束后的 `remember_research` 写入；09:01:38 检索时它还不存在 → `bm25_scores` 为空 → `max_possible=1.0` → 两条旧结论 final = semantic ≈ 0.74 ≥ 0.5 → 注入（2750 字符，与日志一致）；
+  - run 结束后新记忆落库，同一问题再做检索变成除以 2 → 0.37 < 0.5 → 同等相关的旧结论再也进不来（只有 `question_key` 精确命中的路径例外，该路径 `score_floor=None`）。
+- **影响**：改写题目（paraphrase）的召回会静默失效，且失效时机取决于「候选池里是否恰好有别的记忆命中关键字」，而不是记忆本身的相关度；精确重复提问仍可命中。此前 P-07 复测记录的「同一问题向量相似度 0.356 < 0.5 导致零注入」很可能也混入了这个分母效应。
+- **候选修复**（未实施）：
+  - 首选：`memory.search(..., explain=True)`，按 `score_details.semantic_score`（稳定余弦相似度）与 floor 比较；`score_details` 缺失时退回现有 `score` 比较；
+  - 备选：把 `min_score` 的语义改成「混合分阈值」，检索时按 mem0 的 `max_possible` 规则换算，但依赖 mem0 内部实现细节；
+  - 另需决定是否给自动检索补一个可观测事件/span，避免「注入了但 Trace 看不见」再次引发误判。
+
+---
+
 ## 变更记录
 
 | 日期 | 变更 |
@@ -496,5 +570,8 @@
 | 2026-11-05 | Agent 输入区的 Eval case 选择器已回退（组件删除）：评测触发统一放到 Eval 页面，普通 Agent 对话不再携带 `metadata.eval_case_id` |
 | 2026-11-05 | Eval 页面重排 `Run eval` 与 `Run case input`：Run ID 独占一行；下方两列各自带 Eval case 选择框（左列选择被打分的 case，右列选择用哪个 golden 的 input 新建 run），两个按钮同宽、水平对齐、底部对齐（左 `Run eval`、右 `Run case input`）。`Run case input` 流程：取 golden input → 新建会话 `POST /agent`（`metadata.eval_case_id`）→ 读 SSE `meta` 后断开 → 自动填 Run ID 并轮询 `GET /agent/runs/{id}`；run 未终态时两个按钮均禁用，右列显示状态与 Trace 深链；`tsc`、Prettier、`next build` 通过 |
 | 2026-11-05 | Eval 页面改为「一键跑 Agent + 评测」（取代上条双列布局）：删除 Run ID 输入框、第二个 case 选择框与独立 `Run case input` 按钮，只保留 Eval case、Use the LLM judge、Run eval；点击后先按 golden input 新建会话跑 Agent（`metadata.eval_case_id`），轮询到 `completed` 再 `POST /evals`，期间显示 `running agent`/`evaluating` 状态与 Trace 深链，非 completed 不入队评测；Trace 页按钮改为按 span `input.eval_case_id` 跳转并预填 case（无 tag 的 run 不显示）；真实用例验证 run `109f5042` 由页面创建、tag 正确、评测 PASS，`tsc`、Prettier、`next build` 通过 |
+| 2026-11-05 | 追加 P-12：按 run `88662f0c` 的轨迹诊断「最后一轮手写 48KB OOXML」，落地 P0——`server/app/agent/office_tools.py` 新增 `PptxBuild` / `PptxUpdateSlide` / `PptxAddSlide` / `PptxDeleteSlide`，结构化 slide spec + python-pptx 排版 + 溢出告警 + 主题侧车；`server/requirements.txt` 预装 python-pptx，`AGENT_OFFICE_TOOLS` 控制注册；新增 19 个测试，相关 84 passed，ruff 通过 |
+| 2026-11-05 | P-12 真实 run 复测（`9ddf68d7`）：重建 server/executor 镜像后同题重跑，整轮 269.1s → 79.5s、24 → 14 次调用、最大单轮 138.9s → 32.6s（内容从 OOXML 生成代码变为 slide spec JSON），三个 Pptx 调用合计 311ms；溢出告警触发 `PptxAddSlide` 拆表自纠正；产物 16 页、82,755 字节、0 个越界形状；P-12 改为已解决，PDF 版式逆向仍列 P1 |
 | 2026-11-05 | 追加 P-13：按 run 统计所有可归属模型调用（主循环 / 压缩 / mem0 LLM / embedding）的 input/output/total token，迁移 011 落库，`coverage` 区分 complete/partial/unknown/aggregate/unavailable；真实 run 与取消 run 验证通过，server 59 + 扩展 100 passed，agent-loop 161 passed，Dashboard 构建通过 |
 | 2026-11-05 | 追加 P-14：修复 `RunEventWriter` 缓冲未 flush 导致短回答 run 被误判 `agent_protocol_error`；`_run_worker` 在 `_completion_state()` 前 flush，回归测试转绿 |
+| 2026-11-05 | 追加 P-15：分析 run `bf25efa8` 「记忆检索未触发」——实际已注入（日志 + `llm:2` system prompt 第 679 字符起 2750 字符注入块），不可见因自动检索无 span/事件；同时定位阈值口径问题：mem0 混合分在有 BM25 命中时除以 2，`_fresh_entry` 拿混合分比固定 0.5 导致召回随候选池漂移；结论写入候选修复，代码未改 |

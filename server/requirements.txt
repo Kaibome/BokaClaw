@@ -33,3 +33,7 @@ httpx>=0.27,<1.0
 
 # Agent Read tool: extract text from PDFs. Pure Python, no system libraries.
 pypdf>=5.0,<7.0
+
+# Agent Pptx tools: build and patch decks from a slide spec. Pure Python, no
+# LibreOffice; the executor is offline and read-only, so this must be baked in.
+python-pptx>=1.0,<2.0

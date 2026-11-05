@@ -338,6 +338,8 @@ X-Request-ID: <rid>
 | `Glob` | 按文件名模式查找 | 同上 |
 | `Grep` | 正则搜索文件内容，支持 content/files/count 模式 | 同上 |
 | `WebFetch` | 抓取公网 URL 并提取文本，默认拒绝私网地址 | 同上 |
+| `PptxBuild` | 按结构化 slide spec 生成 `.pptx`；版式、换行、字号、页码由工具计算，返回 `warnings` | `AGENT_OFFICE_TOOLS=true` |
+| `PptxUpdateSlide` / `PptxAddSlide` / `PptxDeleteSlide` | 单页替换/插入/删除，自动重排页码与章节号 | 同上 |
 | `Bash` | 在 workspace 执行 `bash -lc` | `AGENT_TOOLS_ALLOW_SHELL=true` |
 | `PowerShell` | 执行 `pwsh -NoProfile -NonInteractive` | 同上 |
 | `Monitor` | 后台启动命令，按 start/poll/stop 读取增量输出 | 同上 |
@@ -573,6 +575,7 @@ AGENT_TOOL_TRACE_MAX_TOTAL_BYTES=65536
 AGENT_DEV_TOOLS=true
 AGENT_WORKSPACE_ROOT=/app/workspace
 AGENT_TOOLS_ALLOW_SHELL=false   # 开启后才有 Bash/PowerShell/Monitor
+AGENT_OFFICE_TOOLS=true         # Pptx 工具；镜像内预装 python-pptx
 AGENT_TOOL_TIMEOUT_SECONDS=120
 AGENT_TOOL_MAX_OUTPUT_BYTES=200000
 AGENT_TOOL_MAX_FILE_BYTES=2000000

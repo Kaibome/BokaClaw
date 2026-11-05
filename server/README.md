@@ -128,8 +128,13 @@ so `OPENAI_API_KEY` or `DEEPSEEK_API_KEY` is enough; set `AGENT_MODEL` /
 Two memory tools are exposed to the model, both scoped to the signed-in user's
 UUID: `search_memories` and `save_memory`. The Claude Code-style developer
 tools are also registered by default: `Read`, `Write`, `Edit`, `NotebookEdit`,
-`Glob`, `Grep`, `WebFetch`, and `WebSearch`. `Bash`, `PowerShell`, and `Monitor`
-are added only when `AGENT_TOOLS_ALLOW_SHELL=true`.
+`Glob`, `Grep`, `WebFetch`, `WebSearch`, and the presentation tools
+`PptxBuild`, `PptxUpdateSlide`, `PptxAddSlide`, and `PptxDeleteSlide`. The
+Pptx tools take a structured slide spec, so the model writes slide content and
+the server owns layout, wrapping, font sizing, and page numbers; changes are
+applied one slide at a time. `Bash`, `PowerShell`, and `Monitor` are added only
+when `AGENT_TOOLS_ALLOW_SHELL=true`. `AGENT_OFFICE_TOOLS=false` removes the
+Pptx tools; they are also skipped automatically when python-pptx is missing.
 
 `WebFetch` caches every successful page for the duration of one run: repeating a
 URL (ignoring the fragment) returns the earlier result with `"cached": true`
@@ -206,6 +211,7 @@ JSON response instead. Requests are rate limited to 30/minute per IP.
 | `AGENT_RESEARCH_MEMORY_MIN_SCORE` | `0.5` | Minimum similarity for a saved conclusion to be offered; clamped to 0–1. |
 | `AGENT_CONTEXT_DEBUG` | on | Log the resolved model-view settings once per turn and each `context_compressed` decision at INFO. Diagnostics only; the event is never sent to the client. Set to `0` / `false` / `no` / `off` to silence. |
 | `AGENT_DEV_TOOLS` | `true` | Register the developer tool set. |
+| `AGENT_OFFICE_TOOLS` | `true` | Register `PptxBuild` / `PptxUpdateSlide` / `PptxAddSlide` / `PptxDeleteSlide`; skipped when python-pptx is absent. |
 | `AGENT_WORKSPACE_ROOT` | `/app/workspace` | File tools cannot escape this directory. Created on first use. |
 | `AGENT_TOOLS_ALLOW_SHELL` | `false` | Register `Bash`, `PowerShell`, and `Monitor`. |
 | `AGENT_EXECUTOR_URL` | — | Base URL of the sandboxed executor; empty runs shell tools in-process. |

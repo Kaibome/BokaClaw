@@ -47,6 +47,7 @@ AGENT_LOOP_MAX_SECONDS=300
 AGENT_LOOP_HISTORY_MESSAGES=40
 AGENT_MAX_ITERATIONS=10
 AGENT_DEV_TOOLS=true
+AGENT_OFFICE_TOOLS=true      # PptxBuild / PptxAddSlide / PptxUpdateSlide / PptxDeleteSlide
 AGENT_WORKSPACE_ROOT=/app/workspace   # bind-mounted from WORKSPACE_HOST
 AGENT_TOOLS_ALLOW_SHELL=false
 AGENT_EXECUTOR_URL=http://bokaclaw-executor:8099   # appended by start-stack.sh

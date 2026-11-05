@@ -44,6 +44,10 @@ def _config(workspace: Path, **overrides) -> DevToolConfig:
         "web_timeout": 5.0,
         "web_max_bytes": 100_000,
         "web_allow_private": False,
+        # Presentation tools are covered in test_agent_office_tools.py; keep the
+        # core registration test deterministic regardless of python-pptx being
+        # installed in the test environment.
+        "office_tools": False,
     }
     values.update(overrides)
     return DevToolConfig(**values)

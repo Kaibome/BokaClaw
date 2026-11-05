@@ -104,6 +104,7 @@ class DevToolConfig:
     web_allow_private: bool
     web_search_url: str = ""
     executor: Optional[agent_executor.ExecutorConfig] = None
+    office_tools: bool = True
 
 
 def load_dev_tool_config() -> Optional[DevToolConfig]:
@@ -123,6 +124,7 @@ def load_dev_tool_config() -> Optional[DevToolConfig]:
         web_allow_private=_env_bool("AGENT_WEB_FETCH_ALLOW_PRIVATE", False),
         web_search_url=(os.environ.get("AGENT_WEB_SEARCH_URL") or "").strip(),
         executor=agent_executor.load_executor_config(),
+        office_tools=_env_bool("AGENT_OFFICE_TOOLS", True),
     )
 
 
@@ -1177,6 +1179,12 @@ def build_dev_tools(sdk, config: Optional[DevToolConfig] = None):
         sdk.tool(WebFetch, name="WebFetch"),
         sdk.tool(WebSearch, name="WebSearch"),
     ]
+
+    if cfg.office_tools:
+        # Imported lazily: office_tools imports this module for path confinement.
+        from app.agent.office_tools import build_office_tools
+
+        tools.extend(build_office_tools(sdk, cfg))
 
     if cfg.allow_shell:
         tools.extend(
