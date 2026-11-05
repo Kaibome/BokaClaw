@@ -451,3 +451,4 @@
 | 2026-11-04 | 追加 P-10：新增 `agent_run_spans` 与中立 span 采集（agent/llm/tool），桥接层扩展为 `_bridge_event` 且不改变 SSE 契约；新增 deepeval 4.3.3 适配层与契约测试；真实 run / 取消 / 迁移往返验证通过，87 + 4 tests passed |
 | 2026-11-05 | P-10 的 Dashboard 可视化补全：Trace 页只列 `agent` 类型 run；Span Detail 内展开子 span，点击任一子 span 即以同一抽屉展示其完整 input/output/attributes，并提供「Back to {父 span}」返回父级；`tsc`、Prettier、`next build` 通过 |
 | 2026-11-05 | 追加 P-11：独立 `bokaclaw-eval` 容器 + `eval_goldens`/`eval_runs`（迁移 010）+ DB 队列 + `/evals` API + Dashboard Eval 页面/Trace 深链；真实 run 验证未勾选/勾选 judge、取消、stale recovery、attempt 超限与全部负例；server 15 tests passed，`next build` 通过 |
+| 2026-11-05 | Trace 交互调整（取代上条子 span 同抽屉导航）：移除 Child spans 行内折叠图标；点击子 span 改为在 Dialog 中展示完整 input/output/attributes，父 span 抽屉保留，不再需要「Back to」；`tsc`、Prettier 通过 |

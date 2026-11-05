@@ -1,10 +1,9 @@
 "use client";
 
-import { Suspense, useMemo, useRef, useState } from "react";
+import { Suspense, useMemo, useRef, useState, type ReactNode } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { format, formatDistanceToNow } from "date-fns";
 import {
-  ArrowLeft,
   ChevronDown,
   ChevronRight,
   FlaskConical,
@@ -13,6 +12,13 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -92,6 +98,88 @@ const JsonBlock = ({
   </div>
 );
 
+const SpanDetailFields = ({
+  span,
+  children,
+}: {
+  span: AgentRunSpanDetail;
+  children?: ReactNode;
+}) => (
+  <div className="space-y-4">
+    <div className="grid grid-cols-2 gap-4">
+      <div className="space-y-1">
+        <Label className="text-xs text-onSurface-default-tertiary">Span</Label>
+        <p className="text-xs font-mono break-all">{span.span_id}</p>
+      </div>
+      <div className="space-y-1">
+        <Label className="text-xs text-onSurface-default-tertiary">
+          Parent
+        </Label>
+        <p className="text-xs font-mono break-all">
+          {span.parent_span_id ?? "—"}
+        </p>
+      </div>
+      <div className="space-y-1">
+        <Label className="text-xs text-onSurface-default-tertiary">Run</Label>
+        <p className="text-xs font-mono break-all">{span.run_id}</p>
+      </div>
+      <div className="space-y-1">
+        <Label className="text-xs text-onSurface-default-tertiary">Type</Label>
+        <Badge variant="outline" className={getTypeClassName(span.span_type)}>
+          {span.span_type}
+        </Badge>
+      </div>
+      <div className="space-y-1">
+        <Label className="text-xs text-onSurface-default-tertiary">
+          Status
+        </Label>
+        <Badge variant="outline" className={getStatusClassName(span.status)}>
+          {span.status}
+        </Badge>
+      </div>
+      <div className="space-y-1">
+        <Label className="text-xs text-onSurface-default-tertiary">
+          Iteration
+        </Label>
+        <p className="text-sm">{span.iteration ?? "—"}</p>
+      </div>
+      <div className="space-y-1">
+        <Label className="text-xs text-onSurface-default-tertiary">
+          Started
+        </Label>
+        <p className="text-sm">{format(new Date(span.started_at), "PPpp")}</p>
+      </div>
+      <div className="space-y-1">
+        <Label className="text-xs text-onSurface-default-tertiary">Ended</Label>
+        <p className="text-sm">
+          {span.ended_at ? format(new Date(span.ended_at), "PPpp") : "—"}
+        </p>
+      </div>
+      <div className="space-y-1">
+        <Label className="text-xs text-onSurface-default-tertiary">
+          Duration
+        </Label>
+        <p className="text-sm">{formatDuration(span.duration_ms)}</p>
+      </div>
+    </div>
+
+    {children}
+
+    {span.error && (
+      <div className="space-y-1">
+        <Label className="text-xs text-onSurface-danger-primary">Error</Label>
+        <pre className="max-h-40 overflow-auto rounded-md bg-surface-default-secondary p-3 text-xs font-mono whitespace-pre-wrap break-all text-onSurface-danger-primary">
+          {span.error}
+        </pre>
+      </div>
+    )}
+
+    <JsonBlock label="Input" value={span.input} />
+    <JsonBlock label="Output" value={span.output} />
+    <JsonBlock label="Attributes" value={span.attributes} />
+  </div>
+);
+
 function TracePageInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -110,8 +198,13 @@ function TracePageInner() {
   );
   const [childrenLoading, setChildrenLoading] = useState(false);
   const [childrenError, setChildrenError] = useState<string | null>(null);
-  const [spanHistory, setSpanHistory] = useState<AgentRunSpanDetail[]>([]);
+  const [childDetail, setChildDetail] = useState<AgentRunSpanDetail | null>(
+    null,
+  );
+  const [childDetailOpen, setChildDetailOpen] = useState(false);
+  const [childDetailLoading, setChildDetailLoading] = useState(false);
   const detailRequestRef = useRef(0);
+  const childDetailRequestRef = useRef(0);
 
   const {
     data: spans = [],
@@ -182,26 +275,37 @@ function TracePageInner() {
   };
 
   const openSpan = async (row: AgentRunSpanSummary) => {
-    setSpanHistory([]);
     setChildSpans(null);
     setChildrenError(null);
     await loadSpanDetail(row);
   };
 
   const openChildSpan = async (child: AgentRunSpanSummary) => {
-    if (selectedSpan && selectedSpan.id !== child.id) {
-      setSpanHistory((previous) => [...previous, selectedSpan]);
+    const requestId = ++childDetailRequestRef.current;
+    setChildDetail(null);
+    setChildDetailOpen(true);
+    setChildDetailLoading(true);
+    try {
+      const res = await api.get<AgentRunSpanDetail>(
+        TRACE_ENDPOINTS.BY_ID(child.id),
+      );
+      if (requestId === childDetailRequestRef.current) {
+        setChildDetail(res.data);
+      }
+    } catch (err) {
+      if (requestId === childDetailRequestRef.current) {
+        toast({
+          title: "Failed to load child span",
+          description: getErrorMessage(err),
+          variant: "destructive",
+        });
+        setChildDetailOpen(false);
+      }
+    } finally {
+      if (requestId === childDetailRequestRef.current) {
+        setChildDetailLoading(false);
+      }
     }
-    await loadSpanDetail(child);
-  };
-
-  const goBack = () => {
-    const previous = spanHistory[spanHistory.length - 1];
-    if (!previous) return;
-    detailRequestRef.current += 1;
-    setDetailLoading(false);
-    setSelectedSpan(previous);
-    setSpanHistory(spanHistory.slice(0, -1));
   };
 
   const toggleChildSpans = async () => {
@@ -271,7 +375,7 @@ function TracePageInner() {
     {
       key: "iteration" as keyof AgentRunSpanSummary,
       label: "Iter",
-      width: 60,
+      width: 80,
       align: "right" as const,
       render: (value: number | null) => (value === null ? "—" : value),
     },
@@ -442,7 +546,6 @@ function TracePageInner() {
           if (!open) {
             detailRequestRef.current += 1;
             setSelectedSpan(null);
-            setSpanHistory([]);
             setChildSpans(null);
             setChildrenError(null);
           }
@@ -455,224 +558,150 @@ function TracePageInner() {
               View span timing, payloads and attributes
             </SheetDescription>
           </SheetHeader>
-          {spanHistory.length > 0 && (
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              className="-ml-2 mt-2 w-fit gap-1.5"
-              onClick={goBack}
-            >
-              <ArrowLeft className="size-4" />
-              Back to {spanHistory[spanHistory.length - 1].span_id}
-            </Button>
-          )}
           {detailLoading ? (
             <p className="mt-6 text-sm text-onSurface-default-secondary">
               Loading span…
             </p>
           ) : (
             selectedSpan && (
-              <div className="mt-6 min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-1">
-                    <Label className="text-xs text-onSurface-default-tertiary">
-                      Span
-                    </Label>
-                    <p className="text-xs font-mono break-all">
-                      {selectedSpan.span_id}
-                    </p>
-                  </div>
-                  <div className="space-y-1">
-                    <Label className="text-xs text-onSurface-default-tertiary">
-                      Parent
-                    </Label>
-                    <p className="text-xs font-mono break-all">
-                      {selectedSpan.parent_span_id ?? "—"}
-                    </p>
-                  </div>
-                  <div className="space-y-1">
-                    <Label className="text-xs text-onSurface-default-tertiary">
-                      Run
-                    </Label>
-                    <p className="text-xs font-mono break-all">
-                      {selectedSpan.run_id}
-                    </p>
-                  </div>
-                  <div className="space-y-1">
-                    <Label className="text-xs text-onSurface-default-tertiary">
-                      Type
-                    </Label>
-                    <Badge
-                      variant="outline"
-                      className={getTypeClassName(selectedSpan.span_type)}
-                    >
-                      {selectedSpan.span_type}
-                    </Badge>
-                  </div>
-                  <div className="space-y-1">
-                    <Label className="text-xs text-onSurface-default-tertiary">
-                      Status
-                    </Label>
-                    <Badge
-                      variant="outline"
-                      className={getStatusClassName(selectedSpan.status)}
-                    >
-                      {selectedSpan.status}
-                    </Badge>
-                  </div>
-                  <div className="space-y-1">
-                    <Label className="text-xs text-onSurface-default-tertiary">
-                      Iteration
-                    </Label>
-                    <p className="text-sm">{selectedSpan.iteration ?? "—"}</p>
-                  </div>
-                  <div className="space-y-1">
-                    <Label className="text-xs text-onSurface-default-tertiary">
-                      Started
-                    </Label>
-                    <p className="text-sm">
-                      {format(new Date(selectedSpan.started_at), "PPpp")}
-                    </p>
-                  </div>
-                  <div className="space-y-1">
-                    <Label className="text-xs text-onSurface-default-tertiary">
-                      Ended
-                    </Label>
-                    <p className="text-sm">
-                      {selectedSpan.ended_at
-                        ? format(new Date(selectedSpan.ended_at), "PPpp")
-                        : "—"}
-                    </p>
-                  </div>
-                  <div className="space-y-1">
-                    <Label className="text-xs text-onSurface-default-tertiary">
-                      Duration
-                    </Label>
-                    <p className="text-sm">
-                      {formatDuration(selectedSpan.duration_ms)}
-                    </p>
-                  </div>
-                </div>
-
-                {selectedSpan.span_type === "agent" && (
-                  <div className="space-y-2">
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      className="w-full justify-start gap-1.5"
-                      onClick={() =>
-                        router.push(
-                          `/dashboard/eval?run_id=${encodeURIComponent(selectedSpan.run_id)}`,
-                        )
-                      }
-                    >
-                      <FlaskConical className="size-4" />
-                      Evaluate this run
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      className="w-full justify-start gap-1.5"
-                      onClick={() => void toggleChildSpans()}
-                      disabled={childrenLoading}
-                    >
-                      {childrenLoading ? (
-                        "Loading child spans…"
-                      ) : childSpans !== null ? (
-                        <>
-                          <ChevronDown className="size-4" />
-                          Hide child spans
-                        </>
-                      ) : (
-                        <>
-                          <ChevronRight className="size-4" />
-                          Show child spans
-                        </>
-                      )}
-                    </Button>
-
-                    {childrenError && (
-                      <p className="text-xs text-onSurface-danger-primary">
-                        {childrenError}
-                      </p>
-                    )}
-
-                    {childSpans !== null && (
-                      <div className="space-y-1">
-                        <Label className="text-xs text-onSurface-default-tertiary">
-                          Child spans ({childSpans.length})
-                        </Label>
-                        {childSpans.length === 0 ? (
-                          <p className="text-xs text-onSurface-default-tertiary">
-                            No child spans were captured for this run.
-                          </p>
+              <div className="mt-6 min-h-0 flex-1 overflow-y-auto pr-1">
+                <SpanDetailFields span={selectedSpan}>
+                  {selectedSpan.span_type === "agent" && (
+                    <div className="space-y-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="w-full justify-start gap-1.5"
+                        onClick={() =>
+                          router.push(
+                            `/dashboard/eval?run_id=${encodeURIComponent(selectedSpan.run_id)}`,
+                          )
+                        }
+                      >
+                        <FlaskConical className="size-4" />
+                        Evaluate this run
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="w-full justify-start gap-1.5"
+                        onClick={() => void toggleChildSpans()}
+                        disabled={childrenLoading}
+                      >
+                        {childrenLoading ? (
+                          "Loading child spans…"
+                        ) : childSpans !== null ? (
+                          <>
+                            <ChevronDown className="size-4" />
+                            Hide child spans
+                          </>
                         ) : (
-                          <div className="divide-y divide-memBorderPrimary overflow-hidden rounded-md border border-memBorder-primary">
-                            {childSpans.map((child) => (
-                              <button
-                                key={child.id}
-                                type="button"
-                                onClick={() => void openChildSpan(child)}
-                                className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left transition-colors hover:bg-surface-default-secondary"
-                              >
-                                <div className="flex min-w-0 items-center gap-2">
-                                  <Badge
-                                    variant="outline"
-                                    className={getTypeClassName(
-                                      child.span_type,
-                                    )}
-                                  >
-                                    {child.span_type}
-                                  </Badge>
-                                  <span
-                                    className="truncate font-mono text-xs"
-                                    title={child.name}
-                                  >
-                                    {child.name}
-                                  </span>
-                                </div>
-                                <div className="flex shrink-0 items-center gap-2">
-                                  <Badge
-                                    variant="outline"
-                                    className={getStatusClassName(child.status)}
-                                  >
-                                    {child.status}
-                                  </Badge>
-                                  <span className="w-16 text-right text-xs text-onSurface-default-tertiary">
-                                    {formatDuration(child.duration_ms)}
-                                  </span>
-                                </div>
-                              </button>
-                            ))}
-                          </div>
+                          <>
+                            <ChevronRight className="size-4" />
+                            Show child spans
+                          </>
                         )}
-                      </div>
-                    )}
-                  </div>
-                )}
+                      </Button>
 
-                {selectedSpan.error && (
-                  <div className="space-y-1">
-                    <Label className="text-xs text-onSurface-danger-primary">
-                      Error
-                    </Label>
-                    <pre className="max-h-40 overflow-auto rounded-md bg-surface-default-secondary p-3 text-xs font-mono whitespace-pre-wrap break-all text-onSurface-danger-primary">
-                      {selectedSpan.error}
-                    </pre>
-                  </div>
-                )}
+                      {childrenError && (
+                        <p className="text-xs text-onSurface-danger-primary">
+                          {childrenError}
+                        </p>
+                      )}
 
-                <JsonBlock label="Input" value={selectedSpan.input} />
-                <JsonBlock label="Output" value={selectedSpan.output} />
-                <JsonBlock label="Attributes" value={selectedSpan.attributes} />
+                      {childSpans !== null && (
+                        <div className="space-y-1">
+                          <Label className="text-xs text-onSurface-default-tertiary">
+                            Child spans ({childSpans.length})
+                          </Label>
+                          {childSpans.length === 0 ? (
+                            <p className="text-xs text-onSurface-default-tertiary">
+                              No child spans were captured for this run.
+                            </p>
+                          ) : (
+                            <div className="divide-y divide-memBorderPrimary overflow-hidden rounded-md border border-memBorder-primary">
+                              {childSpans.map((child) => (
+                                <button
+                                  key={child.id}
+                                  type="button"
+                                  onClick={() => void openChildSpan(child)}
+                                  className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left transition-colors hover:bg-surface-default-secondary"
+                                >
+                                  <div className="flex min-w-0 items-center gap-2">
+                                    <Badge
+                                      variant="outline"
+                                      className={`w-12 justify-center ${getTypeClassName(
+                                        child.span_type,
+                                      )}`}
+                                    >
+                                      {child.span_type}
+                                    </Badge>
+                                    <span
+                                      className="truncate font-mono text-xs"
+                                      title={child.name}
+                                    >
+                                      {child.name}
+                                    </span>
+                                  </div>
+                                  <div className="flex shrink-0 items-center gap-2">
+                                    <Badge
+                                      variant="outline"
+                                      className={getStatusClassName(
+                                        child.status,
+                                      )}
+                                    >
+                                      {child.status}
+                                    </Badge>
+                                    <span className="w-16 text-right text-xs text-onSurface-default-tertiary">
+                                      {formatDuration(child.duration_ms)}
+                                    </span>
+                                  </div>
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </SpanDetailFields>
               </div>
             )
           )}
         </SheetContent>
       </Sheet>
+
+      <Dialog
+        open={childDetailOpen}
+        onOpenChange={(open) => {
+          if (!open) {
+            childDetailRequestRef.current += 1;
+            setChildDetailOpen(false);
+            setChildDetail(null);
+            setChildDetailLoading(false);
+          }
+        }}
+      >
+        <DialogContent className="grid max-h-[85vh] max-w-2xl grid-rows-[auto_minmax(0,1fr)] overflow-hidden">
+          <DialogHeader>
+            <DialogTitle>Child span detail</DialogTitle>
+            <DialogDescription>
+              Timing, payloads and attributes for the selected child span.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="min-h-0 overflow-y-auto pr-1">
+            {childDetailLoading ? (
+              <p className="text-sm text-onSurface-default-secondary">
+                Loading span…
+              </p>
+            ) : childDetail ? (
+              <SpanDetailFields span={childDetail} />
+            ) : null}
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
