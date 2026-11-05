@@ -112,6 +112,13 @@ class AgentConfig(BaseModel):
         default=None,
         description="Used to build the default provider; ignored when a provider is injected.",
     )
+    compression_model: ModelConfig | None = Field(
+        default=None,
+        description=(
+            "Provider used for context-compression summaries. Defaults to the agent's own "
+            "provider when None. Ignored unless context compression is enabled."
+        ),
+    )
 
     @field_validator("tool_choice")
     @classmethod

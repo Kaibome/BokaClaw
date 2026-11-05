@@ -361,3 +361,44 @@ def test_compression_is_off_by_default_and_adds_no_calls_or_events():
 
     assert len(provider.calls) == 2
     assert all(event.type != EventType.CONTEXT_COMPRESSED for event in events)
+
+
+def test_runtime_summarizes_with_a_separate_provider():
+    main = FakeProvider(
+        [
+            ModelResponse(
+                tool_calls=[ToolCall(id="c1", name="medium", arguments={}, raw_arguments="{}")],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(
+                tool_calls=[ToolCall(id="c2", name="medium", arguments={}, raw_arguments="{}")],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(content="done", finish_reason="stop"),
+        ]
+    )
+    summarizer = FakeProvider([ModelResponse(content="S", usage={"total_tokens": 7})])
+    runtime = AgentRuntime(
+        AgentConfig(context_max_tokens=1024, context_keep_recent_tokens=200),
+        provider=main,
+        compression_provider=summarizer,
+        tools=[medium],
+    )
+
+    result = runtime.run("go", session_id="s1")
+
+    assert result.content == "done"
+    # Every main-model call carries tools; the summary is the only tool-free call.
+    assert len(main.calls) == 3
+    assert all(call["tools"] is not None for call in main.calls)
+    assert len(summarizer.calls) == 1
+    assert summarizer.calls[0]["tools"] is None
+    assert "S" in main.calls[2]["messages"][0]["content"]
+    assert result.usage.get("total_tokens") == 7
+
+
+def test_compression_provider_defaults_to_the_agent_provider():
+    provider = FakeProvider([])
+    runtime = AgentRuntime(AgentConfig(), provider=provider)
+
+    assert runtime._resolve_compression_provider() is provider

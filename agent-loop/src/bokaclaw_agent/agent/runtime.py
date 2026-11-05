@@ -111,6 +111,7 @@ class AgentRuntime:
         *,
         tools: Iterable[Tool | Callable[..., Any]] = (),
         provider: ModelProvider | None = None,
+        compression_provider: ModelProvider | None = None,
         store: SessionStore | None = None,
         on_event: Callable[[AgentEvent], Any] | None = None,
     ) -> None:
@@ -120,6 +121,9 @@ class AgentRuntime:
                 raise ConfigurationError("Pass provider=... or set AgentConfig.model when constructing AgentRuntime")
             provider = OpenAICompatibleProvider(config.model)
         self.provider = provider
+        # Built lazily on the first compression so a compression-only config
+        # never affects a run that does not compress.
+        self.compression_provider = compression_provider
         self.store = store
         self.on_event = on_event
         self.tools = ToolRegistry(tools)
@@ -129,6 +133,21 @@ class AgentRuntime:
         """Register a tool after construction and return it."""
 
         return self.tools.register(item)
+
+    def _resolve_compression_provider(self) -> ModelProvider:
+        """Return the provider used for context summaries.
+
+        An injected ``compression_provider`` wins, then ``config.compression_model``,
+        and finally the agent's own provider. The default provider is built only
+        when compression is actually needed.
+        """
+
+        if self.compression_provider is None:
+            if self.config.compression_model is not None:
+                self.compression_provider = OpenAICompatibleProvider(self.config.compression_model)
+            else:
+                self.compression_provider = self.provider
+        return self.compression_provider
 
     def run(
         self,
@@ -256,7 +275,7 @@ class AgentRuntime:
         pending_calls: list[ToolCall] = []
         usage: dict[str, int] = {}
         if self.config.context_max_tokens is not None:
-            compressor = ContextCompressor(self.config, self.provider, usage)
+            compressor = ContextCompressor(self.config, self._resolve_compression_provider(), usage)
         iterations = 0
         stop_reason = "final"
         content: str | None = None

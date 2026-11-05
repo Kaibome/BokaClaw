@@ -210,6 +210,7 @@ off by default in the SDK:
 | `context_max_tokens` | `None` (off) | Approximate token budget for one model request. When exceeded, older messages are folded into a rolling summary or dropped. |
 | `context_keep_recent_tokens` | `None` | Tokens kept verbatim; defaults to half the budget. Must stay at least 256 tokens below `context_max_tokens` when both are set. |
 | `context_compression` | `"summary"` | `"summary"` folds old messages with one model call; `"truncate"` only drops them. |
+| `compression_model` | `None` | Separate `ModelConfig` used only for summaries. Defaults to the agent's own provider; set it to a cheaper model or endpoint. |
 | `tool_result_max_chars` | `None` (off) | Maximum characters of one tool result in the model view. Minimum 256. |
 | `fact_ledger` | `False` | Keep a compact, deduplicated ledger of this run's tool calls and findings in the model view, appended after compression. |
 | `fact_ledger_max_chars` | `2500` | Maximum characters of the fact ledger. Minimum 256. |
@@ -225,8 +226,20 @@ config = AgentConfig(
     fact_ledger=True,
     step_budget_notice=True,
     progress_guard=True,
+    compression_model=ModelConfig(model="deepseek-chat"),  # cheaper summary calls
 )
 ```
+
+**A separate model for summaries.** Compression is the one model call whose
+input is a transcript and whose output is a short summary, so it does not need
+the model driving the ReAct loop. Set `compression_model` to a `ModelConfig`
+and every rolling summary goes to that provider instead; the main loop keeps
+`model`. The provider is built lazily on the first compression, so a run that
+never compress never opens the extra client. A provider error, an empty reply,
+or an unusable summary still falls back to truncation, exactly as before, and
+the tokens are reported in the same `context.compressed` usage stats.
+Alternatively, inject one directly with
+`AgentRuntime(..., compression_provider=my_provider)`.
 
 **Only the model view changes.** Compression and truncation run when the request
 is built, after history is loaded and before `MODEL_REQUEST` is emitted.
@@ -476,6 +489,9 @@ closing the request cancels the upstream turn.
 | `AGENT_CONTEXT_MAX_TOKENS` | `32000` | In-process runtime token budget; `0` / `off` disables compression. |
 | `AGENT_CONTEXT_KEEP_RECENT_TOKENS` | — | Recent tokens kept verbatim; empty uses half the budget. |
 | `AGENT_CONTEXT_COMPRESSION` | `summary` | `summary` or `truncate`; anything else falls back to `summary`. |
+| `AGENT_COMPRESSION_MODEL` | — | In-process runtime: model for context summaries; empty reuses `AGENT_MODEL`. |
+| `AGENT_COMPRESSION_API_KEY` | `AGENT_API_KEY` | API key for the compression endpoint. |
+| `AGENT_COMPRESSION_BASE_URL` | `AGENT_BASE_URL` | OpenAI-compatible base URL for the compression endpoint. |
 | `AGENT_TOOL_RESULT_MAX_CHARS` | `16000` | In-process runtime tool-result cap; `0` / `off` disables it. |
 | `AGENT_FACT_LEDGER` | `true` | In-process runtime: keep a run-scoped fact ledger in the request view so early findings survive compression. |
 | `AGENT_FACT_LEDGER_MAX_CHARS` | `2500` | Fact ledger cap; values below 256 are raised to 256. |

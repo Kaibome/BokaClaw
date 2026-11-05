@@ -154,6 +154,9 @@ def clean_agent_env(monkeypatch):
         "AGENT_MODEL",
         "AGENT_API_KEY",
         "AGENT_BASE_URL",
+        "AGENT_COMPRESSION_MODEL",
+        "AGENT_COMPRESSION_API_KEY",
+        "AGENT_COMPRESSION_BASE_URL",
         "AGENT_SYSTEM_PROMPT",
         "AGENT_TEMPERATURE",
         "AGENT_MAX_TOKENS",
@@ -413,6 +416,88 @@ def test_context_budgets_can_be_overridden(monkeypatch):
     assert config.context_keep_recent_tokens == 2000
     assert config.context_compression == "truncate"
     assert config.tool_result_max_chars == 1000
+
+
+def test_compression_model_defaults_to_the_agent_model(monkeypatch):
+    monkeypatch.setattr(agent_runtime, "_current_llm_config", lambda: {})
+    monkeypatch.setenv("AGENT_MODEL", "m")
+    monkeypatch.setenv("AGENT_API_KEY", "k")
+
+    config = agent_runtime.load_local_config()
+
+    assert config is not None
+    assert config.compression_model is None
+    assert config.compression_api_key is None
+    assert config.compression_base_url is None
+
+
+def test_compression_model_inherits_agent_credentials(monkeypatch):
+    monkeypatch.setattr(agent_runtime, "_current_llm_config", lambda: {})
+    monkeypatch.setenv("AGENT_MODEL", "m")
+    monkeypatch.setenv("AGENT_API_KEY", "k")
+    monkeypatch.setenv("AGENT_BASE_URL", "http://main.example/v1")
+    monkeypatch.setenv("AGENT_COMPRESSION_MODEL", "cheap")
+
+    config = agent_runtime.load_local_config()
+
+    assert config is not None
+    assert config.compression_model == "cheap"
+    assert config.compression_api_key == "k"
+    assert config.compression_base_url == "http://main.example/v1"
+
+
+def test_compression_model_accepts_its_own_endpoint(monkeypatch):
+    monkeypatch.setattr(agent_runtime, "_current_llm_config", lambda: {})
+    monkeypatch.setenv("AGENT_MODEL", "m")
+    monkeypatch.setenv("AGENT_API_KEY", "k")
+    monkeypatch.setenv("AGENT_COMPRESSION_MODEL", "cheap")
+    monkeypatch.setenv("AGENT_COMPRESSION_API_KEY", "ck")
+    monkeypatch.setenv("AGENT_COMPRESSION_BASE_URL", "http://cheap.example/v1")
+
+    config = agent_runtime.load_local_config()
+
+    assert config is not None
+    assert config.compression_api_key == "ck"
+    assert config.compression_base_url == "http://cheap.example/v1"
+
+
+def test_compression_endpoint_without_a_model_is_ignored(monkeypatch):
+    monkeypatch.setattr(agent_runtime, "_current_llm_config", lambda: {})
+    monkeypatch.setenv("AGENT_MODEL", "m")
+    monkeypatch.setenv("AGENT_API_KEY", "k")
+    monkeypatch.setenv("AGENT_COMPRESSION_API_KEY", "ck")
+    monkeypatch.setenv("AGENT_COMPRESSION_BASE_URL", "http://cheap.example/v1")
+
+    config = agent_runtime.load_local_config()
+
+    assert config is not None
+    assert config.compression_model is None
+    assert config.compression_api_key is None
+    assert config.compression_base_url is None
+
+
+def test_build_runtime_passes_a_separate_compression_model():
+    sdk = FakeSDK()
+    config = _config(
+        compression_model="cheap",
+        compression_api_key="cheap-key",
+        compression_base_url="http://cheap.example/v1",
+    )
+
+    runtime = agent_runtime.build_runtime(sdk, config, _payload())
+
+    compression = runtime.config.kwargs["compression_model"]
+    assert compression.kwargs["model"] == "cheap"
+    assert compression.kwargs["api_key"] == "cheap-key"
+    assert compression.kwargs["base_url"] == "http://cheap.example/v1"
+    assert "temperature" not in compression.kwargs
+    assert "max_tokens" not in compression.kwargs
+
+
+def test_build_runtime_omits_the_compression_model_when_unset():
+    runtime = agent_runtime.build_runtime(FakeSDK(), _config(), _payload())
+
+    assert runtime.config.kwargs["compression_model"] is None
 
 
 def test_fact_ledger_and_step_notice_can_be_disabled(monkeypatch):

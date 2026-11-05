@@ -166,6 +166,10 @@ class LocalAgentConfig:
     research_memory: bool = True
     research_memory_ttl_days: int = 30
     research_memory_min_score: float = 0.5
+    # Empty means "reuse the agent's own model" for context compression.
+    compression_model: Optional[str] = None
+    compression_api_key: Optional[str] = None
+    compression_base_url: Optional[str] = None
 
 
 def _current_llm_config() -> Dict[str, Any]:
@@ -211,6 +215,14 @@ def load_local_config() -> Optional[LocalAgentConfig]:
     model = explicit_model or llm_config.get("model")
     api_key = (os.getenv("AGENT_API_KEY") or "").strip() or provider_key
     base_url = (os.getenv("AGENT_BASE_URL") or "").strip() or provider_base
+
+    compression_model = (os.getenv("AGENT_COMPRESSION_MODEL") or "").strip() or None
+    compression_api_key = (os.getenv("AGENT_COMPRESSION_API_KEY") or "").strip() or None
+    compression_base_url = (os.getenv("AGENT_COMPRESSION_BASE_URL") or "").strip() or None
+    if compression_model is None:
+        # A key or URL alone must not switch compression to another endpoint.
+        compression_api_key = None
+        compression_base_url = None
 
     if not model:
         return None
@@ -259,6 +271,9 @@ def load_local_config() -> Optional[LocalAgentConfig]:
         research_memory=_env_flag("AGENT_RESEARCH_MEMORY", True),
         research_memory_ttl_days=max(1, _env_int("AGENT_RESEARCH_MEMORY_TTL_DAYS", 30)),
         research_memory_min_score=min(1.0, max(0.0, research_min_score)),
+        compression_model=compression_model,
+        compression_api_key=(compression_api_key or str(api_key)) if compression_model else None,
+        compression_base_url=(compression_base_url or base_url) if compression_model else None,
     )
 
 
@@ -679,12 +694,22 @@ def build_runtime(
         timeout=config.request_timeout,
         max_retries=config.max_retries,
     )
+    compression_model_config = None
+    if config.compression_model:
+        compression_model_config = sdk.ModelConfig(
+            model=config.compression_model,
+            api_key=config.compression_api_key or config.api_key,
+            base_url=config.compression_base_url or config.base_url,
+            timeout=config.request_timeout,
+            max_retries=config.max_retries,
+        )
     agent_config = sdk.AgentConfig(
         name="bokaclaw-agent",
         system_prompt=config.system_prompt,
         max_iterations=config.max_iterations,
         final_answer_on_max_iterations=config.final_answer_on_max_iterations,
         model=model_config,
+        compression_model=compression_model_config,
         context_max_tokens=config.context_max_tokens,
         context_keep_recent_tokens=config.context_keep_recent_tokens,
         context_compression=config.context_compression,
@@ -697,11 +722,12 @@ def build_runtime(
         progress_stop_after=config.progress_stop_after,
     )
     _context_debug(
-        "agent context config: model=%s max_iterations=%s context_max_tokens=%s "
+        "agent context config: model=%s compression_model=%s max_iterations=%s context_max_tokens=%s "
         "context_keep_recent_tokens=%s context_compression=%s tool_result_max_chars=%s "
         "fact_ledger=%s fact_ledger_max_chars=%s step_budget_notice=%s "
         "progress_guard=%s progress_nudge_after=%s progress_stop_after=%s",
         config.model,
+        config.compression_model or config.model,
         config.max_iterations,
         config.context_max_tokens,
         config.context_keep_recent_tokens,

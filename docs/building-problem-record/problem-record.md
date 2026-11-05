@@ -576,6 +576,28 @@
 
 ---
 
+## P-17 上下文压缩与主循环共用模型，压缩调用白付思考 token
+
+- **状态**：已解决
+- **发现时间**：2026-11-05
+- **解决时间**：2026-11-05
+- **场景**：run `da4d25f2` 共 118,842 tokens，其中压缩 4 次占 14,274 tokens（输入 11,480 / 输出 2,794），而压缩与主循环共用 `deepseek-flash`（默认 effort=high，输出含 reasoning tokens）；同时 SDK 没有为压缩指定第二个模型的入口。
+- **证据**：
+  - `agent_runs.usage_breakdown.sources.compression`：4 calls / 11,480 in / 2,794 out / 14,274 total；同 run `agent_loop` 为 8 calls / 104,568 total。
+  - 同一 key 直连官方接口：`deepseek-chat` 返回 `deepseek-flash` 且 `reasoning_tokens` 为 0（11 in / 1 out）；`deepseek-flash` 即使 `reasoning_effort=low` 仍产生 10 个 reasoning tokens（37 in / 12 out）。
+  - `GET /models` 只有 `deepseek-flash`（$0.15/$0.60 off-peak，$0.30/$1.20 peak）与 `deepseek-v4-pro`（约 4.4x 输入 / 3.3x 输出），flash 已是该账号最便宜的模型。
+  - 专门压缩模型调研：LLMLingua-2 / Provence / XProvence 属于 token 级抽取式裁剪，不是滚动摘要；2026 年跨语言审计（arXiv:2608.26175）显示英文监督的压缩器在中文上保留率接近零，不适合本项目的中英混合会话。
+- **根因**：`AgentRuntime._execute` 固定用 `ContextCompressor(self.config, self.provider, usage)`，`AgentConfig` 只有 `model` 一个 `ModelConfig`，无法把摘要调用路由到更便宜/非思考模型。
+- **解决措施**：
+  - SDK：`AgentConfig` 新增 `compression_model: ModelConfig | None`；`AgentRuntime` 新增 `compression_provider=` 注入参数，并在首次压缩时懒解析（显式注入 > `compression_model` > 主 provider），不压缩的 run 不会创建额外客户端；
+  - server：新增 `AGENT_COMPRESSION_MODEL` / `AGENT_COMPRESSION_API_KEY` / `AGENT_COMPRESSION_BASE_URL`，后两者为空时回退到主模型；`build_runtime` 构造第二个 `ModelConfig`；
+  - 配置：`.env` 设 `AGENT_COMPRESSION_MODEL=deepseek-chat`（同一 key、同一 base URL、非思考别名，按 flash 计费），无需新增凭证；
+  - 文档：agent-loop README、server README、`.env.example`。
+- **解决后效果**：压缩调用不再产生 reasoning tokens（实测 0 vs 10+），输出 token 预计下降；压缩用量仍归入 `usage_breakdown.sources.compression`，事件契约不变。验证：agent-loop 167 passed / 1 skipped，server `test_agent_runtime.py` 62 passed，ruff 通过；重建镜像并重启 server 后容器内 `load_local_config()` 返回 `compression_model=deepseek-chat`、key 继承主模型、base URL 正确。真实长对话的压缩费用对比待复测。
+- **可复用结论**：滚动摘要只需要「读 transcript、写短摘要」，不应与主循环共用思考模型；把摘要 provider 做成懒加载的第二配置，既能把压缩路由到便宜模型，又不会影响未触发压缩的 run。专门做 prompt 压缩的模型（LLMLingua-2 / Provence）做的是 token 裁剪而非摘要，且英文训练的抽取器对中文不可靠，不能直接替换摘要步骤。
+
+---
+
 ## 变更记录
 
 | 日期 | 变更 |
@@ -605,3 +627,4 @@
 | 2026-11-05 | 追加 P-15：分析 run `bf25efa8` 「记忆检索未触发」——实际已注入（日志 + `llm:2` system prompt 第 679 字符起 2750 字符注入块），不可见因自动检索无 span/事件；同时定位阈值口径问题：mem0 混合分在有 BM25 命中时除以 2，`_fresh_entry` 拿混合分比固定 0.5 导致召回随候选池漂移；结论写入候选修复，代码未改 |
 | 2026-11-05 | P-15 修复：检索改用 `explain=True` 的 `score_details.semantic_score` 比阈值（`combined_score` 仅展示），新增 `memory.recall` / `memory.save` 持久化事件与 `memory` span（迁移 012 扩展 CHECK 约束，Trace 页支持该类型）；真实 run `ed65c268` 验证两条 semantic≈0.72 / combined≈0.36 的结论正常注入、保存走 `updated`；server agent 相关 102 passed，迁移往返与 ruff/tsc 通过；P-15 改为已解决 |
 | 2026-11-05 | 追加 P-16：模型接口实际返回了缓存计数字段，但 provider `_parse_usage` 的 3-key 白名单在入口丢弃；拍平 DeepSeek/OpenAI 两种缓存口径与 `reasoning_tokens`，usage meter/`/traces`/Dashboard 增加命中率展示；真实 run `0d6e0f33` 命中率 66% |
+| 2026-11-05 | 追加 P-17：压缩摘要改用独立便宜的模型——`AgentConfig.compression_model` + `AgentRuntime(compression_provider=...)`，server 新增 `AGENT_COMPRESSION_MODEL/API_KEY/BASE_URL`；`.env` 配 `deepseek-chat`（非思考别名，实测 0 reasoning tokens）；agent-loop 167 passed，server agent runtime 62 passed，镜像重建并重启验证 |

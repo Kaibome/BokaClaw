@@ -125,6 +125,9 @@ Once logged in, the dashboard exposes:
 runtime reuses the LLM configured for mem0 (provider `openai` or `deepseek`),
 so `OPENAI_API_KEY` or `DEEPSEEK_API_KEY` is enough; set `AGENT_MODEL` /
 `AGENT_API_KEY` / `AGENT_BASE_URL` to use another OpenAI-compatible endpoint.
+Context-compression summaries can run on a separate, cheaper model through
+`AGENT_COMPRESSION_MODEL` (plus optional `AGENT_COMPRESSION_API_KEY` /
+`AGENT_COMPRESSION_BASE_URL`); the key and URL default to the agent's.
 Two memory tools are exposed to the model, both scoped to the signed-in user's
 UUID: `search_memories` and `save_memory`. The Claude Code-style developer
 tools are also registered by default: `Read`, `Write`, `Edit`, `NotebookEdit`,
@@ -199,6 +202,9 @@ JSON response instead. Requests are rate limited to 30/minute per IP.
 | `AGENT_CONTEXT_MAX_TOKENS` | `32000` | Token budget for the in-process runtime's model view; `0` / `off` disables compression. |
 | `AGENT_CONTEXT_KEEP_RECENT_TOKENS` | half the budget | Recent tokens kept verbatim by compression. |
 | `AGENT_CONTEXT_COMPRESSION` | `summary` | `summary` (model summary, truncation fallback) or `truncate` (drop only). |
+| `AGENT_COMPRESSION_MODEL` | `AGENT_MODEL` | Model used only for compression summaries. Empty reuses the agent model; point it at a cheaper model to cut summary cost. |
+| `AGENT_COMPRESSION_API_KEY` | `AGENT_API_KEY` | API key for the compression endpoint (falls back to the agent's key). |
+| `AGENT_COMPRESSION_BASE_URL` | `AGENT_BASE_URL` | OpenAI-compatible base URL for the compression endpoint (falls back to the agent's URL). |
 | `AGENT_TOOL_RESULT_MAX_CHARS` | `16000` | Per-tool-result cap in the model view; full content is still stored. `0` / `off` disables it. |
 | `AGENT_FACT_LEDGER` | `true` | Keep a run-scoped ledger of tool calls and findings in the model view so early facts survive compression. Set to `false` to disable. |
 | `AGENT_FACT_LEDGER_MAX_CHARS` | `2500` | Ledger cap; values below 256 are raised to 256. |
