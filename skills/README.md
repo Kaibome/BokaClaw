@@ -1,51 +1,55 @@
-# Mem0 Skills for AI Coding Assistants
+# 面向 AI 编程助手的 Mem0 技能
 
-Mem0 ships structured skill definitions for Claude Code, Codex, Cursor, OpenCode, OpenClaw, and any assistant that supports the [skills standard](https://github.com/anthropics/skills). Skills teach the assistant how to work with Mem0 — either by loading SDK knowledge into context, or by executing an end-to-end workflow on demand.
+Mem0 为 Claude Code、Codex、Cursor、OpenCode、OpenClaw 以及任何支持
+[skills 标准](https://github.com/anthropics/skills)的助手提供结构化的技能定义。
+技能会教助手如何使用 Mem0——既可以把 SDK 知识加载进上下文，也可以按需执行一套
+端到端工作流。
 
-## Two Categories
+## 两类技能
 
-### Reference skills — always on
+### 参考类技能 —— 常驻加载
 
-Installed once, loaded into context so the assistant writes correct Mem0 code. Use these for day-to-day development.
+安装一次后加载进上下文，让助手写出正确的 Mem0 代码。日常开发用这类技能。
 
-| Skill | Surface | Install |
+| 技能 | 覆盖范围 | 安装 |
 |-------|---------|---------|
-| [`mem0`](./mem0/) | Python + TypeScript SDKs (Platform + OSS), framework integrations | `npx skills add https://github.com/mem0ai/mem0 --skill mem0` |
-| [`mem0-cli`](./mem0-cli/) | Terminal workflows (`mem0` CLI, both Node and Python) | `npx skills add https://github.com/mem0ai/mem0 --skill mem0-cli` |
-| [`mem0-vercel-ai-sdk`](./mem0-vercel-ai-sdk/) | `@mem0/vercel-ai-provider` and `createMem0` | `npx skills add https://github.com/mem0ai/mem0 --skill mem0-vercel-ai-sdk` |
+| [`mem0`](./mem0/) | Python + TypeScript SDK（Platform + OSS）、框架集成 | `npx skills add https://github.com/mem0ai/mem0 --skill mem0` |
+| [`mem0-cli`](./mem0-cli/) | 终端工作流（`mem0` CLI，Node 和 Python 两个版本） | `npx skills add https://github.com/mem0ai/mem0 --skill mem0-cli` |
+| [`mem0-vercel-ai-sdk`](./mem0-vercel-ai-sdk/) | `@mem0/vercel-ai-provider` 和 `createMem0` | `npx skills add https://github.com/mem0ai/mem0 --skill mem0-vercel-ai-sdk` |
 
-### Pipeline skills — run on demand
+### 流水线技能 —— 按需运行
 
-Invoked as a slash command to execute a specific end-to-end workflow. These do real work: they create branches, write tests, run code.
+通过斜杠命令调用，执行特定的端到端工作流。这类技能会做实际工作：创建分支、编写
+测试、运行代码。
 
-| Skill | Trigger | Install |
+| 技能 | 触发方式 | 安装 |
 |-------|---------|---------|
-| [`mem0-integrate`](./mem0-integrate/) | `/mem0-integrate` — wire Mem0 into an existing repo via TDD | `npx skills add https://github.com/mem0ai/mem0 --skill mem0-integrate` |
-| [`mem0-test-integration`](./mem0-test-integration/) | `/mem0-test-integration` — verify what `/mem0-integrate` produced | `npx skills add https://github.com/mem0ai/mem0 --skill mem0-test-integration` |
-| [`mem0-oss-to-platform`](./mem0-oss-to-platform/) | `/mem0-oss-to-platform` — migrate a project from Mem0 OSS to the hosted Platform SDK | `npx skills add https://github.com/mem0ai/mem0 --skill mem0-oss-to-platform` |
+| [`mem0-integrate`](./mem0-integrate/) | `/mem0-integrate` —— 通过 TDD 把 Mem0 接入现有仓库 | `npx skills add https://github.com/mem0ai/mem0 --skill mem0-integrate` |
+| [`mem0-test-integration`](./mem0-test-integration/) | `/mem0-test-integration` —— 验证 `/mem0-integrate` 的产出 | `npx skills add https://github.com/mem0ai/mem0 --skill mem0-test-integration` |
+| [`mem0-oss-to-platform`](./mem0-oss-to-platform/) | `/mem0-oss-to-platform` —— 把项目从 Mem0 OSS 迁移到托管版 Platform SDK | `npx skills add https://github.com/mem0ai/mem0 --skill mem0-oss-to-platform` |
 
-The `mem0-integrate` and `mem0-test-integration` skills are designed to run in sequence on the same workspace:
+`mem0-integrate` 和 `mem0-test-integration` 设计为在同一工作区按顺序运行：
 
 ```
-/mem0-integrate          →  mem0-integrate/<slug> branch + .mem0-integration/ artifacts
-/mem0-test-integration   →  scorecard (compile + runtime verification, real API smoke test)
+/mem0-integrate          →  mem0-integrate/<slug> 分支 + .mem0-integration/ 产物
+/mem0-test-integration   →  评分卡（编译 + 运行时验证，真实 API 冒烟测试）
 ```
 
-## Choosing a Skill
+## 如何选择技能
 
-- **Writing Mem0 code in a new or existing project?** → `mem0`
-- **Using the terminal CLI?** → `mem0-cli`
-- **Building with `@ai-sdk/*`?** → `mem0-vercel-ai-sdk`
-- **Want the assistant to wire Mem0 into an existing repo for you?** → `mem0-integrate`, then `mem0-test-integration`
-- **Already using Mem0 OSS and want to move to the hosted Platform?** → `mem0-oss-to-platform`
+- **在新项目或现有项目里编写 Mem0 代码？** → `mem0`
+- **使用终端 CLI？** → `mem0-cli`
+- **使用 `@ai-sdk/*` 构建应用？** → `mem0-vercel-ai-sdk`
+- **想让助手帮你把 Mem0 接入现有仓库？** → `mem0-integrate`，然后 `mem0-test-integration`
+- **已经在用 Mem0 OSS，想迁移到托管版 Platform？** → `mem0-oss-to-platform`
 
-## Links
+## 相关链接
 
-- [Vibecoding with Mem0](https://docs.mem0.ai/vibecoding) — canonical landing page
-- [Claude Code integration](https://docs.mem0.ai/integrations/claude-code)
-- [Mem0 Platform Dashboard](https://app.mem0.ai)
-- [Mem0 Documentation](https://docs.mem0.ai)
+- [Vibecoding with Mem0](https://docs.mem0.ai/vibecoding) —— 官方入口页
+- [Claude Code 集成](https://docs.mem0.ai/integrations/claude-code)
+- [Mem0 Platform 控制台](https://app.mem0.ai)
+- [Mem0 文档](https://docs.mem0.ai)
 
-## License
+## 许可证
 
 Apache-2.0
