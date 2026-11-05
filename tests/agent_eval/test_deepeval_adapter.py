@@ -1,9 +1,9 @@
 """Contract tests for the span -> deepeval adapter.
 
-These tests need deepeval 4.3.3 installed in the evaluation environment (the
-``eval`` extra). They skip when deepeval is absent or the installed version
-differs from the pin, because the adapter deliberately fails loudly in that
-case.
+These tests need deepeval installed from the in-repo source (the ``eval`` hatch
+environment, see ``hatch run eval:test``). They skip when deepeval is absent or
+the installed version differs from the pin, because the adapter deliberately
+fails loudly in that case.
 """
 
 from __future__ import annotations

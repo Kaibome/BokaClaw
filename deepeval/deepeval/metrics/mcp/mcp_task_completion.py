@@ -1,0 +1,335 @@
+import asyncio
+from typing import Optional, Union, List, Type
+
+from deepeval.metrics import BaseConversationalMetric
+from deepeval.models import DeepEvalBaseLLM, DeepEvalBaseSystemOneModel
+from deepeval.metrics.utils import (
+    prepare_measure,
+    construct_verbose_logs,
+    get_unit_interactions,
+    initialize_model,
+    initialize_system_one_model,
+    a_generate_with_schema_and_extract,
+    generate_with_schema_and_extract,
+    SystemOneEvalSpec,
+    SystemOneScoreSpec,
+    format_decision_reason,
+    parse_questions,
+    run_system_one_eval,
+    a_run_system_one_eval,
+    system_one_score,
+    a_system_one_score,
+)
+from deepeval.config.eval_mode import EvalModeName, resolve_eval_mode
+from deepeval.metrics.indicator import metric_progress_indicator
+from deepeval.test_case import ConversationalTestCase, MultiTurnParams
+from deepeval.utils import get_or_create_event_loop, prettify_list
+from deepeval.metrics.mcp.utils import (
+    task_steps_taken_text,
+    turn_mcp_interaction_text,
+)
+from deepeval.metrics.mcp.schema import Task, TaskScore, Reason
+from deepeval.templates import make_template_class
+
+
+MCPTaskCompletionTemplate = make_template_class("MCPTaskCompletionMetric")
+
+TASK_COMPLETION_LEVELS = [
+    "Not completed",
+    "Partly completed",
+    "Mostly completed",
+    "Fully completed",
+]
+
+
+class MCPTaskCompletionMetric(BaseConversationalMetric):
+    _required_test_case_params = [
+        MultiTurnParams.ROLE,
+        MultiTurnParams.CONTENT,
+    ]
+    _requires_mcp_servers = True
+
+    def __init__(
+        self,
+        threshold: Optional[float] = 0.5,
+        model: Optional[Union[str, DeepEvalBaseLLM]] = None,
+        system_one_model: Optional[
+            Union[str, DeepEvalBaseSystemOneModel]
+        ] = None,
+        eval_mode: Optional[EvalModeName] = None,
+        include_reason: bool = True,
+        async_mode: bool = True,
+        strict_mode: bool = False,
+        verbose_mode: bool = False,
+        flaky: bool = False,
+        evaluation_template: Type[
+            MCPTaskCompletionTemplate
+        ] = MCPTaskCompletionTemplate,
+    ):
+        self.threshold = 1 if strict_mode else threshold
+        self.eval_mode = resolve_eval_mode(eval_mode)
+        self.model, self.using_native_model = initialize_model(
+            model, self.eval_mode
+        )
+        self.system_one_model = initialize_system_one_model(
+            system_one_model, self.eval_mode
+        )
+        self.evaluation_model = (
+            self.model or self.system_one_model
+        ).get_model_name()
+        self.include_reason = include_reason
+        self.async_mode = async_mode
+        self.strict_mode = strict_mode
+        self.verbose_mode = verbose_mode
+        self.flaky = flaky
+        self.evaluation_template = evaluation_template
+
+    def measure(
+        self,
+        test_case: ConversationalTestCase,
+        _show_indicator: bool = True,
+        _in_component: bool = False,
+    ):
+        prepare_measure(self, test_case)
+        with metric_progress_indicator(
+            self, _show_indicator=_show_indicator, _in_component=_in_component
+        ):
+            if self.async_mode:
+                loop = get_or_create_event_loop()
+                loop.run_until_complete(
+                    self.a_measure(
+                        test_case,
+                        _show_indicator=False,
+                        _in_component=_in_component,
+                    )
+                )
+            else:
+                if run_system_one_eval(self, test_case):
+                    return self.score
+
+                self.unit_interactions = get_unit_interactions(test_case.turns)
+                self.tasks = self._get_tasks(self.unit_interactions)
+                self.task_scores = [
+                    self._get_task_score(task, multimodal=test_case.multimodal)
+                    for task in self.tasks
+                ]
+                self.score = self._calculate_score(self.task_scores)
+                self.reason = self._generate_reason(self.task_scores)
+                self.scores_reasons_list = [
+                    (task_score.score, task_score.reason)
+                    for task_score in self.task_scores
+                ]
+                self.success = self.is_successful()
+                self.verbose_logs = construct_verbose_logs(
+                    self,
+                    steps=[
+                        f"Tasks:\n{prettify_list(self.tasks)}",
+                        f"Individual Scores & Reasons:\n{self.scores_reasons_list}",
+                        f"Score: {self.score}",
+                    ],
+                )
+            return self.score
+
+    async def a_measure(
+        self,
+        test_case: ConversationalTestCase,
+        _show_indicator: bool = True,
+        _in_component: bool = False,
+    ):
+        prepare_measure(self, test_case)
+        with metric_progress_indicator(
+            self,
+            async_mode=True,
+            _show_indicator=_show_indicator,
+            _in_component=_in_component,
+        ):
+            if await a_run_system_one_eval(self, test_case):
+                return self.score
+
+            self.unit_interactions = get_unit_interactions(test_case.turns)
+            self.tasks = self._get_tasks(self.unit_interactions)
+            self.task_scores = await asyncio.gather(
+                *[
+                    self._a_get_task_score(
+                        task, multimodal=test_case.multimodal
+                    )
+                    for task in self.tasks
+                ]
+            )
+            self.scores_reasons_list = [
+                (task_score.score, task_score.reason)
+                for task_score in self.task_scores
+            ]
+            self.score = self._calculate_score(self.task_scores)
+            self.reason = self._generate_reason(self.task_scores)
+            self.success = self.is_successful()
+            self.verbose_logs = construct_verbose_logs(
+                self,
+                steps=[
+                    f"Tasks:\n{prettify_list(self.tasks)}",
+                    f"Individual Scores & Reasons:\n{prettify_list(self.scores_reasons_list)}",
+                    f"Score: {self.score}",
+                ],
+            )
+
+        return self.score
+
+    def _generate_reason(self, task_scores: List[TaskScore]) -> Optional[str]:
+        if not self.include_reason:
+            return None
+
+        reasons = []
+        for task_score in task_scores:
+            reasons.append(task_score.reason)
+
+        prompt = self._get_prompt(
+            "generate_final_reason",
+            final_score=self.score,
+            success=self.success,
+            reasons=reasons,
+        )
+        return generate_with_schema_and_extract(
+            metric=self,
+            prompt=prompt,
+            schema_cls=Reason,
+            extract_schema=lambda s: s.reason,
+            extract_json=lambda data: data["reason"],
+        )
+
+    async def _a_generate_reason(
+        self, task_scores: List[TaskScore]
+    ) -> Optional[str]:
+        if not self.include_reason:
+            return None
+
+        reasons = []
+        for task_score in task_scores:
+            reasons.append(task_score.reason)
+
+        prompt = self._get_prompt(
+            "generate_final_reason",
+            final_score=self.score,
+            success=self.success,
+            reasons=reasons,
+        )
+
+        return await a_generate_with_schema_and_extract(
+            metric=self,
+            prompt=prompt,
+            schema_cls=Reason,
+            extract_schema=lambda s: s.reason,
+            extract_json=lambda data: data["reason"],
+        )
+
+    def _get_task_score(self, task: Task, *, multimodal: bool) -> TaskScore:
+        value = system_one_score(
+            self, self._system_one_score_spec(task, multimodal)
+        )
+        if value is not None:
+            return TaskScore(
+                score=value,
+                reason=format_decision_reason(self, "task completion", value),
+            )
+        prompt = self._get_prompt(
+            "get_task_completion_score",
+            task=task,
+            steps_taken=task_steps_taken_text(task),
+            multimodal=multimodal,
+        )
+        return generate_with_schema_and_extract(
+            metric=self,
+            prompt=prompt,
+            schema_cls=TaskScore,
+            extract_schema=lambda s: s,
+            extract_json=lambda data: TaskScore(**data),
+        )
+
+    async def _a_get_task_score(
+        self, task: Task, *, multimodal: bool
+    ) -> TaskScore:
+        value = await a_system_one_score(
+            self, self._system_one_score_spec(task, multimodal)
+        )
+        if value is not None:
+            return TaskScore(
+                score=value,
+                reason=format_decision_reason(self, "task completion", value),
+            )
+        prompt = self._get_prompt(
+            "get_task_completion_score",
+            task=task,
+            steps_taken=task_steps_taken_text(task),
+            multimodal=multimodal,
+        )
+        return await a_generate_with_schema_and_extract(
+            metric=self,
+            prompt=prompt,
+            schema_cls=TaskScore,
+            extract_schema=lambda s: s,
+            extract_json=lambda data: TaskScore(**data),
+        )
+
+    def _system_one_score_spec(
+        self, task: Task, multimodal: bool
+    ) -> Optional[SystemOneScoreSpec]:
+        if multimodal:
+            return None
+        return SystemOneScoreSpec(
+            instructions=self._get_prompt("_experimental_system_one_score"),
+            levels=TASK_COMPLETION_LEVELS,
+            state={"task": task.task, "steps_taken": task.steps_taken},
+        )
+
+    def _system_one_eval_spec(
+        self, test_case: ConversationalTestCase
+    ) -> Optional[SystemOneEvalSpec]:
+        """`system_one` eval mode: the whole conversation as one Jev request,
+        each turn carrying its `role`, `content` and the MCP primitives it
+        called; see EXPERIMENTAL.md."""
+        if test_case.multimodal:
+            return None
+        return SystemOneEvalSpec(
+            evaluation_params=[
+                MultiTurnParams.ROLE,
+                MultiTurnParams.CONTENT,
+                MultiTurnParams.MCP_TOOLS,
+                MultiTurnParams.MCP_RESOURCES,
+                MultiTurnParams.MCP_PROMPTS,
+                MultiTurnParams.TOOLS_CALLED,
+            ],
+            questions=parse_questions(
+                self._get_prompt("_experimental_system_one_questions")
+            ),
+        )
+
+    def _get_tasks(self, unit_interactions: List) -> List[Task]:
+        tasks = []
+        for unit_interaction in unit_interactions:
+            if len(unit_interaction) <= 2:
+                continue
+            user_messages = ""
+            for turn in unit_interaction:
+                if turn.role == "user":
+                    user_messages += turn.content + "\n"
+                else:
+                    break
+            new_task = Task(task=user_messages, steps_taken=[])
+            for turn in unit_interaction[1:]:
+                if turn._mcp_interaction:
+                    new_task.steps_taken.append(turn_mcp_interaction_text(turn))
+                else:
+                    new_task.steps_taken.append(
+                        "Agent's response to user: \n" + turn.content
+                    )
+            tasks.append(new_task)
+        return tasks
+
+    def _calculate_score(self, scores: List[TaskScore]) -> float:
+        score_divisor = len(scores) if len(scores) > 0 else 1
+        total_score = sum(score.score for score in scores)
+        score = total_score / score_divisor
+        return 0 if self.strict_mode and score < self.threshold else score
+
+    @property
+    def __name__(self):
+        return "MCP Task Completion"

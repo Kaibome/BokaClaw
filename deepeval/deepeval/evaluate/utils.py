@@ -1,0 +1,745 @@
+from typing import TYPE_CHECKING, Optional, List, Union
+import os
+import time
+
+from deepeval.utils import format_turn
+from deepeval.test_run.test_run import TestRunResultDisplay
+from deepeval.dataset import Golden
+from deepeval.metrics import (
+    ArenaGEval,
+    BaseMetric,
+    BaseConversationalMetric,
+)
+from deepeval.test_case import (
+    LLMTestCase,
+    ConversationalTestCase,
+)
+from deepeval.test_run import (
+    LLMApiTestCase,
+    ConversationalApiTestCase,
+    MetricData,
+    Classification,
+)
+from deepeval.evaluate.types import TestResult
+
+if TYPE_CHECKING:
+    from deepeval.classifiers.base_classifier import BaseClassifier
+from deepeval.tracing.api import (
+    BaseApiSpan,
+    ExpectationKind,
+    ExpectationVerdict,
+    ExpectationsData,
+    TraceApi,
+    TraceSpanApiStatus,
+)
+from deepeval.evaluate.expectations import _ExpectationEvaluator
+from deepeval.tracing.tracing import BaseSpan, Trace
+from deepeval.tracing.types import TraceSpanStatus
+from deepeval.tracing.utils import (
+    perf_counter_to_datetime,
+    to_zod_compatible_iso,
+)
+
+
+def _is_metric_successful(metric_data: MetricData) -> bool:
+    """
+    Robustly determine success for a metric row.
+
+    Rationale:
+    - If the metric recorded an error, treat as failure.
+    - Be defensive: custom rows may not be MetricData at runtime.
+    """
+    if getattr(metric_data, "error", None):
+        return False
+
+    s = getattr(metric_data, "success", None)
+    if isinstance(s, bool):
+        return s
+    if s is None:
+        return False
+    if isinstance(s, (int, float)):
+        return bool(s)
+    if isinstance(s, str):
+        return s.strip().lower() in {"true", "t", "1", "yes", "y"}
+    return False
+
+
+def create_expectations_data(
+    metric: _ExpectationEvaluator, metric_data: MetricData
+) -> ExpectationsData:
+    conditions = [
+        (ExpectationKind.MUST, condition)
+        for condition in metric.expectations.must
+    ] + [
+        (ExpectationKind.MUST_NOT, condition)
+        for condition in metric.expectations.must_not
+    ]
+    return ExpectationsData(
+        success=metric_data.success,
+        score=metric_data.score,
+        reason=metric_data.reason,
+        verdicts=[
+            ExpectationVerdict(
+                kind=kind,
+                condition=condition,
+                status=verdict.status,
+                reason=verdict.reason,
+                evidence=verdict.evidence,
+            )
+            for (kind, condition), verdict in zip(
+                conditions, metric.verdicts or []
+            )
+        ],
+        evaluationModel=metric_data.evaluation_model,
+        evaluationCost=metric_data.evaluation_cost,
+        error=metric_data.error,
+    )
+
+
+def create_metric_data(metric: BaseMetric) -> MetricData:
+    if metric.error is not None:
+        metric_data = MetricData(
+            name=metric.__name__,
+            threshold=metric.threshold,
+            score=None,
+            reason=None,
+            success=metric.is_successful(),
+            strictMode=metric.strict_mode,
+            flaky=metric.flaky,
+            evaluationModel=metric.evaluation_model,
+            error=metric.error,
+            evaluationCost=metric.evaluation_cost,
+            inputTokenCount=metric.input_tokens,
+            outputTokenCount=metric.output_tokens,
+            verboseLogs=metric.verbose_logs,
+        )
+    else:
+        metric_data = MetricData(
+            name=metric.__name__,
+            score=metric.score,
+            threshold=metric.threshold,
+            reason=metric.reason,
+            success=metric.is_successful(),
+            strictMode=metric.strict_mode,
+            flaky=metric.flaky,
+            evaluationModel=metric.evaluation_model,
+            error=None,
+            evaluationCost=metric.evaluation_cost,
+            inputTokenCount=metric.input_tokens,
+            outputTokenCount=metric.output_tokens,
+            verboseLogs=metric.verbose_logs,
+        )
+    if isinstance(metric, _ExpectationEvaluator):
+        metric_data.expectations_data = create_expectations_data(
+            metric, metric_data
+        )
+    return metric_data
+
+
+def create_classification(
+    classifier: "BaseClassifier", expected_label: Optional[str]
+) -> Classification:
+    """Classifier counterpart of ``create_metric_data``. ``expected_label``
+    comes from ``test_case.expected_labels[classifier.name]`` and decides
+    whether the classification carries a verdict at all."""
+    return Classification(
+        name=classifier.__name__,
+        label=None if classifier.error is not None else classifier.label,
+        expectedLabel=expected_label,
+        success=classifier.is_successful(expected_label),
+        reason=None if classifier.error is not None else classifier.reason,
+        evaluationModel=classifier.evaluation_model,
+        error=classifier.error,
+        evaluationCost=classifier.evaluation_cost,
+        inputTokenCount=classifier.input_tokens,
+        outputTokenCount=classifier.output_tokens,
+    )
+
+
+def create_arena_metric_data(metric: ArenaGEval, contestant: str) -> MetricData:
+    if metric.error is not None:
+        return MetricData(
+            name=metric.__name__,
+            threshold=1,
+            score=None,
+            reason=None,
+            success=False,
+            strictMode=True,
+            evaluationModel=metric.evaluation_model,
+            error=metric.error,
+            evaluationCost=metric.evaluation_cost,
+            inputTokenCount=metric.input_tokens,
+            outputTokenCount=metric.output_tokens,
+            verboseLogs=metric.verbose_logs,
+        )
+    else:
+        return MetricData(
+            name=metric.__name__,
+            score=1 if contestant == metric.winner else 0,
+            threshold=1,
+            reason=metric.reason,
+            success=metric.is_successful(),
+            strictMode=True,
+            evaluationModel=metric.evaluation_model,
+            error=None,
+            evaluationCost=metric.evaluation_cost,
+            inputTokenCount=metric.input_tokens,
+            outputTokenCount=metric.output_tokens,
+            verboseLogs=metric.verbose_logs,
+        )
+
+
+def _local_success(
+    api_test_case: Union[LLMApiTestCase, ConversationalApiTestCase],
+    classifications: Optional[List[Classification]],
+) -> Optional[bool]:
+    """Case verdict as seen locally (console, `assert_test`).
+
+    Classifications are never attached to `api_test_case`, whose `success` is
+    uploaded to Confident AI. Here they are folded in the same way metrics
+    are: a failed classification fails the case, one without a verdict leaves
+    it untouched. API test cases default to `success=True` before any metric
+    runs, so with no metric data the starting point is "no verdict".
+    """
+    if not classifications:
+        return api_test_case.success
+
+    success = api_test_case.success
+    if not api_test_case.metrics_data:
+        success = None
+
+    for classification in classifications:
+        if classification.success is False:
+            return False
+        if classification.success is True and success is None:
+            success = True
+    return success
+
+
+def create_test_result(
+    api_test_case: Union[LLMApiTestCase, ConversationalApiTestCase],
+    classifications: Optional[List[Classification]] = None,
+) -> TestResult:
+    name = api_test_case.name
+    index = api_test_case.order
+    success = _local_success(api_test_case, classifications)
+    classifications = classifications or None
+
+    if isinstance(api_test_case, ConversationalApiTestCase):
+        return TestResult(
+            name=name,
+            success=success,
+            metrics_data=api_test_case.metrics_data,
+            classifications=classifications,
+            expectations=api_test_case.expectations,
+            conversational=True,
+            index=index,
+            metadata=api_test_case.metadata,
+            turns=api_test_case.turns,
+        )
+    else:
+        multimodal = api_test_case.images_mapping
+        if multimodal:
+            return TestResult(
+                name=name,
+                success=success,
+                metrics_data=api_test_case.metrics_data,
+                classifications=classifications,
+                expectations=api_test_case.expectations,
+                input=api_test_case.input,
+                actual_output=api_test_case.actual_output,
+                conversational=False,
+                index=index,
+                multimodal=True,
+                metadata=api_test_case.metadata,
+            )
+        else:
+            return TestResult(
+                name=name,
+                success=success,
+                metrics_data=api_test_case.metrics_data,
+                classifications=classifications,
+                expectations=api_test_case.expectations,
+                input=api_test_case.input,
+                actual_output=api_test_case.actual_output,
+                expected_output=api_test_case.expected_output,
+                context=api_test_case.context,
+                retrieval_context=api_test_case.retrieval_context,
+                conversational=False,
+                index=index,
+                multimodal=False,
+                metadata=api_test_case.metadata,
+            )
+
+
+def create_api_trace(trace: Trace, golden: Golden) -> TraceApi:
+    # Fall back to the golden's input when the trace didn't capture a
+    # meaningful one of its own. This concern lives here at the
+    # evaluation/rendering boundary, NOT in the tracer: `@observe`
+    # faithfully records whatever kwargs were passed (including `{}` for
+    # positional-only calls), and we shouldn't rewrite general tracing
+    # behavior to paper over an evaluation-specific rendering/dedupe
+    # problem. The truthiness check cleanly covers the "absent" cases
+    # (`None`, `{}`, `""`) that would otherwise show as garbage in the
+    # trace-level Metrics Summary and break `filter_duplicate_results`.
+    #
+    # Span lists start empty and are populated by the eval-iterator's
+    # DFS walker (``_a_execute_span_test_case`` / its sync twin), which
+    # categorizes each visited span by isinstance and appends to the
+    # matching ``trace_api.*_spans`` list. We DON'T pre-populate from
+    # ``trace.root_spans`` here because the walker is also responsible
+    # for attaching per-span metric data, error flags, and trace dicts —
+    # doing it twice (here + walker) would either double-emit or require
+    # the walker to dedupe.
+    #
+    # Trace-level fields (``name``, ``tags``, ``thread_id``, ``user_id``,
+    # ``metadata``, ``environment``) are forwarded from the trace so that
+    # OTel-based integrations whose users configured them via instrumentation
+    # settings or ``update_current_trace(...)`` see them on the dashboard.
+    # The non-eval REST path (``trace_manager.create_trace_api``) already
+    # forwards these; mirror its shape here so the eval-iterator path
+    # doesn't silently drop them.
+    #
+    # ``metadata`` sources from ``trace.metadata`` (user-configured
+    # at instrument time or via ``update_current_trace(...)``). It does
+    # NOT source from ``golden.additional_metadata`` here — that field
+    # already populates ``LLMTestCase.metadata`` at every callsite that
+    # builds a test case from a golden, which is the correct home for
+    # per-row evaluation context. Conflating the two layers (test-case
+    # metadata vs trace metadata) silently overwrote whatever the user
+    # configured on the trace, which is the opposite of what we want:
+    # the user owns trace metadata, the golden owns test-case metadata,
+    # both flow to their respective surfaces.
+    return TraceApi(
+        uuid=trace.uuid,
+        baseSpans=[],
+        agentSpans=[],
+        llmSpans=[],
+        retrieverSpans=[],
+        toolSpans=[],
+        startTime=(
+            to_zod_compatible_iso(perf_counter_to_datetime(trace.start_time))
+            if trace.start_time
+            else None
+        ),
+        endTime=(
+            to_zod_compatible_iso(perf_counter_to_datetime(trace.end_time))
+            if trace.end_time
+            else None
+        ),
+        input=trace.input or golden.input,
+        output=trace.output,
+        expected_output=trace.expected_output,
+        context=trace.context,
+        retrieval_context=(
+            [
+                rc.context if hasattr(rc, "context") else rc
+                for rc in trace.retrieval_context
+            ]
+            if trace.retrieval_context
+            else None
+        ),
+        tools_called=trace.tools_called,
+        expected_tools=trace.expected_tools,
+        metadata=trace.metadata,
+        name=trace.name,
+        tags=trace.tags,
+        threadId=trace.thread_id,
+        userId=trace.user_id,
+        environment=trace.environment,
+        status=(
+            TraceSpanApiStatus.SUCCESS
+            if trace.status == TraceSpanStatus.SUCCESS
+            else TraceSpanApiStatus.ERRORED
+        ),
+    )
+
+
+def validate_expectation_coverage(test_cases):
+    """Every case needs a condition when no other evaluator is supplied."""
+    if not test_cases:
+        raise ValueError(
+            "Provide at least one test case with non-empty expectations "
+            "when evaluating without metrics or classifiers."
+        )
+    missing_count = sum(
+        not getattr(case, "expectations", None) for case in test_cases
+    )
+    if missing_count:
+        subject = "test case is" if missing_count == 1 else "test cases are"
+        raise ValueError(
+            f"{missing_count} {subject} missing expectations. "
+            "Fill in non-empty expectations for these test cases and/or "
+            "provide at least one metric and/or classifier."
+        )
+
+
+def validate_assert_test_inputs(
+    golden: Optional[Golden] = None,
+    test_case: Optional[Union[LLMTestCase, ConversationalTestCase]] = None,
+    metrics: Optional[List] = None,
+    classifiers: Optional[List] = None,
+):
+    # Trace-scoped shape: `assert_test(golden[, metrics])` inside a plugin-wrapped test.
+    if golden and not test_case:
+        if metrics is not None and not all(
+            isinstance(m, BaseMetric) for m in metrics
+        ):
+            raise ValueError(
+                "All 'metrics' must be instances of 'BaseMetric' when using "
+                "`assert_test(golden=..., metrics=...)`."
+            )
+        if classifiers:
+            raise ValueError(
+                "'classifiers' are not supported with `assert_test(golden=...)` yet; "
+                "pass a 'test_case' instead."
+            )
+        return
+
+    has_expectations = bool(getattr(test_case, "expectations", None))
+    if test_case and not metrics and not classifiers:
+        validate_expectation_coverage([test_case])
+
+    if test_case and (metrics or classifiers or has_expectations):
+        if metrics:
+            if (isinstance(test_case, LLMTestCase)) and not all(
+                isinstance(metric, BaseMetric) for metric in metrics
+            ):
+                raise ValueError(
+                    "All 'metrics' for an 'LLMTestCase' must be instances of 'BaseMetric' only."
+                )
+            if isinstance(test_case, ConversationalTestCase) and not all(
+                isinstance(metric, BaseConversationalMetric)
+                for metric in metrics
+            ):
+                raise ValueError(
+                    "All 'metrics' for an 'ConversationalTestCase' must be instances of 'BaseConversationalMetric' only."
+                )
+        return
+
+    raise ValueError(
+        "You must provide either ('golden' [+ 'metrics']) from inside a "
+        "`deepeval test run` test, or a 'test_case' with expectations, "
+        "'metrics', or 'classifiers'."
+    )
+
+
+def validate_evaluate_inputs(
+    test_cases: Optional[
+        Union[List[LLMTestCase], List[ConversationalTestCase]]
+    ] = None,
+    metrics: Optional[
+        Union[
+            List[BaseMetric],
+            List[BaseConversationalMetric],
+        ]
+    ] = None,
+    metric_collection: Optional[str] = None,
+    classifiers: Optional[List] = None,
+):
+    has_expectations = any(
+        getattr(case, "expectations", None) for case in test_cases or []
+    )
+    if metric_collection is not None and has_expectations:
+        raise ValueError(
+            "Case expectations require local evaluation; metric_collection is not supported yet."
+        )
+    if not metric_collection and not metrics and not classifiers:
+        validate_expectation_coverage(test_cases)
+    if metric_collection is not None and metrics is not None:
+        raise ValueError(
+            "You cannot provide both 'metric_collection' and 'metrics'."
+        )
+    if metric_collection is not None and classifiers:
+        raise ValueError(
+            "You cannot provide both 'metric_collection' and 'classifiers'."
+        )
+
+    if test_cases and metrics:
+        for test_case in test_cases:
+            for metric in metrics:
+                if (isinstance(test_case, LLMTestCase)) and not isinstance(
+                    metric, BaseMetric
+                ):
+                    raise ValueError(
+                        f"Metric {metric.__name__} is not a valid metric for LLMTestCase."
+                    )
+                if isinstance(
+                    test_case, ConversationalTestCase
+                ) and not isinstance(metric, BaseConversationalMetric):
+                    print(type(metric))
+                    raise ValueError(
+                        f"Metric {metric.__name__} is not a valid metric for ConversationalTestCase."
+                    )
+
+
+def print_test_result(test_result: TestResult, display: TestRunResultDisplay):
+    if test_result.metrics_data is None and not test_result.classifications:
+        return
+
+    if (
+        display == TestRunResultDisplay.PASSING.value
+        and test_result.success is False
+    ):
+        return
+    elif display == TestRunResultDisplay.FAILING.value and test_result.success:
+        return
+
+    print("")
+    print("=" * 70 + "\n")
+
+    if test_result.metrics_data:
+        print("Metrics Summary\n")
+
+        for metric_data in test_result.metrics_data:
+            successful = _is_metric_successful(metric_data)
+
+            if not successful:
+                print(
+                    f"  - ❌ {metric_data.name} (score: {metric_data.score}, threshold: {metric_data.threshold}, strict: {metric_data.strict_mode}, evaluation model: {metric_data.evaluation_model}, reason: {metric_data.reason}, error: {metric_data.error})"
+                )
+            else:
+                print(
+                    f"  - ✅ {metric_data.name} (score: {metric_data.score}, threshold: {metric_data.threshold}, strict: {metric_data.strict_mode}, evaluation model: {metric_data.evaluation_model}, reason: {metric_data.reason}, error: {metric_data.error})"
+                )
+
+    if test_result.classifications:
+        if test_result.metrics_data:
+            print("")
+        print("Classifiers Summary\n")
+
+        for classification in test_result.classifications:
+            if classification.error:
+                icon = "⚠️"
+            elif classification.success is None:
+                icon = "➖"
+            elif classification.success:
+                icon = "✅"
+            else:
+                icon = "❌"
+            print(
+                f"  - {icon} {classification.name} (label: {classification.label}, expected: {classification.expected_label}, evaluation model: {classification.evaluation_model}, reason: {classification.reason}, error: {classification.error})"
+            )
+
+    print("")
+    if test_result.multimodal:
+        print("For multimodal test case:\n")
+        print(f"  - input: {test_result.input}")
+        print(f"  - actual output: {test_result.actual_output}")
+
+    elif test_result.conversational:
+        print("For conversational test case:\n")
+        if test_result.turns:
+            print("  Turns:")
+            turns = sorted(test_result.turns, key=lambda t: t.order)
+            for t in turns:
+                print(format_turn(t))
+        else:
+            print("  - No turns recorded in this test case.")
+
+    else:
+        print("For test case:\n")
+        print(f"  - input: {test_result.input}")
+        print(f"  - actual output: {test_result.actual_output}")
+        print(f"  - expected output: {test_result.expected_output}")
+        print(f"  - context: {test_result.context}")
+        print(f"  - retrieval context: {test_result.retrieval_context}")
+
+
+def write_test_result_to_file(
+    test_result: TestResult, display: TestRunResultDisplay, output_dir: str
+):
+
+    def get_log_id(output_dir: str):
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        log_path = os.path.join(output_dir, f"test_run_{ts}.log")
+        return log_path
+
+    def aggregate_metric_pass_rates_to_file(test_results: List[TestResult]):
+        metric_counts = {}
+        metric_successes = {}
+
+        for result in test_results:
+            if result.metrics_data:
+                for metric_data in result.metrics_data:
+                    metric_name = metric_data.name
+                    if metric_name not in metric_counts:
+                        metric_counts[metric_name] = 0
+                        metric_successes[metric_name] = 0
+                    metric_counts[metric_name] += 1
+                    if metric_data.success:
+                        metric_successes[metric_name] += 1
+
+        metric_pass_rates = {
+            metric: (metric_successes[metric] / metric_counts[metric])
+            for metric in metric_counts
+        }
+        with open(out_file, "a", encoding="utf-8") as file:
+            file.write("\n" + "=" * 70 + "\n")
+            file.write("Overall Metric Pass Rates\n")
+            for metric, pass_rate in metric_pass_rates.items():
+                file.write(f"{metric}: {pass_rate:.2%} pass rate")
+            file.write("\n" + "=" * 70 + "\n")
+
+    # Determine output Directory
+    out_dir = output_dir or os.getcwd()
+    os.makedirs(out_dir, exist_ok=True)
+    # Generate log id
+    out_file = get_log_id(out_dir)
+
+    if test_result.metrics_data is None:
+        return
+
+    if (
+        display == TestRunResultDisplay.PASSING.value
+        and test_result.success is False
+    ):
+        return
+    elif display == TestRunResultDisplay.FAILING.value and test_result.success:
+        return
+
+    with open(out_file, "a", encoding="utf-8") as file:
+        file.write("\n" + "=" * 70 + "\n\n")
+        file.write("Metrics Summary\n\n")
+
+        for metric_data in test_result.metrics_data:
+            successful = _is_metric_successful(metric_data)
+
+            if not successful:
+                file.write(
+                    f"  - ❌ {metric_data.name} (score: {metric_data.score}, threshold: {metric_data.threshold}, "
+                    f"strict: {metric_data.strict_mode}, evaluation model: {metric_data.evaluation_model}, "
+                    f"reason: {metric_data.reason}, error: {metric_data.error})\n"
+                )
+            else:
+                file.write(
+                    f"  - ✅ {metric_data.name} (score: {metric_data.score}, threshold: {metric_data.threshold}, "
+                    f"strict: {metric_data.strict_mode}, evaluation model: {metric_data.evaluation_model}, "
+                    f"reason: {metric_data.reason}, error: {metric_data.error})\n"
+                )
+
+        file.write("\n")
+        if test_result.multimodal:
+            file.write("For multimodal test case:\n\n")
+            file.write(f"  - input: {test_result.input}\n")
+            file.write(f"  - actual output: {test_result.actual_output}\n")
+        elif test_result.conversational:
+            file.write("For conversational test case:\n\n")
+            if test_result.turns:
+                file.write("  Turns:\n")
+                turns = sorted(test_result.turns, key=lambda t: t.order)
+                for t in turns:
+                    file.write(format_turn(t) + "\n")
+            else:
+                file.write("  - No turns recorded in this test case.\n")
+        else:
+            file.write("For test case:\n\n")
+            file.write(f"  - input: {test_result.input}\n")
+            file.write(f"  - actual output: {test_result.actual_output}\n")
+            file.write(f"  - expected output: {test_result.expected_output}\n")
+            file.write(f"  - context: {test_result.context}\n")
+            file.write(
+                f"  - retrieval context: {test_result.retrieval_context}\n"
+            )
+
+    aggregate_metric_pass_rates_to_file(
+        [test_result] if not isinstance(test_result, list) else test_result
+    )
+
+
+def aggregate_metric_pass_rates(test_results: List[TestResult]) -> dict:
+    if not test_results:
+        return {}
+
+    metric_counts = {}
+    metric_successes = {}
+
+    for result in test_results:
+        if result.metrics_data:
+            for metric_data in result.metrics_data:
+                metric_name = metric_data.name
+                if metric_name not in metric_counts:
+                    metric_counts[metric_name] = 0
+                    metric_successes[metric_name] = 0
+                metric_counts[metric_name] += 1
+                if metric_data.success:
+                    metric_successes[metric_name] += 1
+
+    metric_pass_rates = {
+        metric: (metric_successes[metric] / metric_counts[metric])
+        for metric in metric_counts
+    }
+
+    print("\n" + "=" * 70 + "\n")
+    print("Overall Metric Pass Rates\n")
+    for metric, pass_rate in metric_pass_rates.items():
+        print(f"{metric}: {pass_rate:.2%} pass rate")
+    print("\n" + "=" * 70 + "\n")
+
+    return metric_pass_rates
+
+
+def count_metrics_in_trace(trace: Trace) -> int:
+    def count_metrics_recursive(span: BaseSpan) -> int:
+        count = len(span.metrics) if span.metrics else 0
+        for child in span.children:
+            count += count_metrics_recursive(child)
+        return count
+
+    return sum(count_metrics_recursive(span) for span in trace.root_spans)
+
+
+def count_total_metrics_for_trace(trace: Trace) -> int:
+    """Span subtree metrics + trace-level metrics."""
+    return count_metrics_in_trace(trace=trace) + len(trace.metrics or [])
+
+
+def count_metrics_in_span_subtree(span: BaseSpan) -> int:
+    total = len(span.metrics or [])
+    for c in span.children or []:
+        total += count_metrics_in_span_subtree(c)
+    return total
+
+
+def extract_trace_test_results(trace_api: TraceApi) -> List[TestResult]:
+    test_results: List[TestResult] = []
+    # Do not emit trace-level ``trace_api.metrics_data`` as its own ``TestResult``.
+    # The golden ``api_test_case`` path already records those rows via
+    # ``update_metric_data``; emitting them again here was the root cause of an
+    # extra dashboard panel (wrong ``name`` / ``success`` vs the main case).
+    # extract base span results
+    for span in trace_api.base_spans:
+        test_results.extend(extract_span_test_results(span))
+    # extract agent span results
+    for span in trace_api.agent_spans:
+        test_results.extend(extract_span_test_results(span))
+    # extract llm span results
+    for span in trace_api.llm_spans:
+        test_results.extend(extract_span_test_results(span))
+    # extract retriever span results
+    for span in trace_api.retriever_spans:
+        test_results.extend(extract_span_test_results(span))
+    # extract tool span results
+    for span in trace_api.tool_spans:
+        test_results.extend(extract_span_test_results(span))
+
+    return test_results
+
+
+def extract_span_test_results(span_api: BaseApiSpan) -> List[TestResult]:
+    test_results: List[TestResult] = []
+    if span_api.metrics_data:
+        test_results.append(
+            TestResult(
+                name=span_api.name,
+                success=span_api.status == TraceSpanApiStatus.SUCCESS,
+                metrics_data=span_api.metrics_data,
+                input=span_api.input,
+                actual_output=span_api.output,
+                expected_output=span_api.expected_output,
+                context=span_api.context,
+                retrieval_context=span_api.retrieval_context,
+                conversational=False,
+            )
+        )
+    return test_results

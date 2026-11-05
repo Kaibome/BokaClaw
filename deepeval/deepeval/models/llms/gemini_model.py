@@ -1,0 +1,535 @@
+import json
+from pydantic import BaseModel, SecretStr
+from typing import TYPE_CHECKING, Optional, Dict, List, Union, Tuple
+
+from deepeval.errors import DeepEvalError
+from deepeval.test_case import Audio, MLLMImage
+from deepeval.config.settings import get_settings
+from deepeval.models.utils import (
+    EvaluationCost,
+    require_secret_api_key,
+    token_cost,
+)
+from deepeval.models.retry_policy import (
+    create_retry_decorator,
+)
+from deepeval.utils import require_dependency
+from deepeval.models.base_model import DeepEvalBaseLLM
+from deepeval.models.llms.multimodal import (
+    audio_format,
+    decode_image,
+    fetch_remote_image,
+    multimodal_parts,
+)
+from deepeval.constants import ProviderSlug as PS
+from deepeval.models.llms.constants import (
+    GEMINI_MODELS_DATA,
+    DEFAULT_GEMINI_MODEL,
+)
+
+if TYPE_CHECKING:
+    from google.genai import Client
+
+# consistent retry rules
+retry_gemini = create_retry_decorator(PS.GOOGLE)
+
+
+class GeminiModel(DeepEvalBaseLLM):
+    """Class that implements Google Gemini models for text-based evaluation.
+
+    This class provides integration with Google's Gemini models through the Google GenAI SDK,
+    supporting text-only inputs for evaluation tasks.
+    To use Gemini API, set api_key attribute only.
+    To use Vertex AI API, set project and location attributes.
+
+    Attributes:
+        model: Name of the Gemini model to use
+        api_key: Google API key for authentication
+        project: Google Cloud project ID
+        location: Google Cloud location
+
+    Example:
+        ```python
+        from deepeval.models import GeminiModel
+
+        # Initialize the model
+        model = GeminiModel(
+            model="gemini-3.6-flash",
+            api_key="your-api-key"
+        )
+
+        # Generate text
+        response = model.generate("What is the capital of France?")
+        ```
+    """
+
+    def __init__(
+        self,
+        model: Optional[str] = None,
+        api_key: Optional[str] = None,
+        temperature: Optional[float] = None,
+        project: Optional[str] = None,
+        location: Optional[str] = None,
+        service_account_key: Optional[Union[str, Dict[str, str]]] = None,
+        use_vertexai: Optional[bool] = None,
+        generation_kwargs: Optional[Dict] = None,
+        cost_per_input_token: Optional[float] = None,
+        cost_per_output_token: Optional[float] = None,
+        **kwargs,
+    ):
+
+        settings = get_settings()
+
+        model = model or settings.GEMINI_MODEL_NAME or DEFAULT_GEMINI_MODEL
+        self.model_data = GEMINI_MODELS_DATA.get(model)
+
+        cost_per_input_token = (
+            cost_per_input_token
+            if cost_per_input_token is not None
+            else settings.GEMINI_COST_PER_INPUT_TOKEN
+        )
+        cost_per_output_token = (
+            cost_per_output_token
+            if cost_per_output_token is not None
+            else settings.GEMINI_COST_PER_OUTPUT_TOKEN
+        )
+
+        # Get API key from settings if not provided
+        if api_key is not None:
+            # keep it secret, keep it safe from serializings, logging and aolike
+            self.api_key: Optional[SecretStr] = SecretStr(api_key)
+        else:
+            self.api_key = settings.GOOGLE_API_KEY
+
+        self._temperature_configured = True
+        if temperature is not None:
+            temperature = float(temperature)
+        elif settings.TEMPERATURE is not None:
+            temperature = settings.TEMPERATURE
+        elif self.model_data.supports_temperature is False:
+            # Nothing configured: leave Google's default (1.0) in place.
+            self._temperature_configured = False
+            temperature = 1.0
+        else:
+            temperature = 0.0
+
+        self.project = project or settings.GOOGLE_CLOUD_PROJECT
+        location = (
+            location if location is not None else settings.GOOGLE_CLOUD_LOCATION
+        )
+        self.location = str(location).strip() if location is not None else None
+        self.use_vertexai = (
+            use_vertexai
+            if use_vertexai is not None
+            else settings.GOOGLE_GENAI_USE_VERTEXAI
+        )
+
+        self.service_account_key: Optional[SecretStr] = None
+        if service_account_key is None:
+            self.service_account_key = settings.GOOGLE_SERVICE_ACCOUNT_KEY
+        elif isinstance(service_account_key, dict):
+            self.service_account_key = SecretStr(
+                json.dumps(service_account_key)
+            )
+        else:
+            str_value = str(service_account_key).strip()
+            self.service_account_key = (
+                SecretStr(str_value) if str_value else None
+            )
+
+        if temperature < 0:
+            raise DeepEvalError("Temperature must be >= 0.")
+
+        self.temperature = temperature
+
+        # Raw kwargs destined for the underlying Client
+        self.kwargs = kwargs
+        self.kwargs.pop("temperature", None)
+
+        self.generation_kwargs = dict(generation_kwargs or {})
+        self.generation_kwargs.pop("temperature", None)
+
+        self.model_data.input_price = (
+            cost_per_input_token
+            if cost_per_input_token is not None
+            else self.model_data.input_price
+        )
+        self.model_data.output_price = (
+            cost_per_output_token
+            if cost_per_output_token is not None
+            else self.model_data.output_price
+        )
+
+        self._module = self._require_module()
+        # Configure default model generation settings
+        self.model_safety_settings = [
+            self._module.types.SafetySetting(
+                category=self._module.types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+                threshold=self._module.types.HarmBlockThreshold.BLOCK_NONE,
+            ),
+            self._module.types.SafetySetting(
+                category=self._module.types.HarmCategory.HARM_CATEGORY_HARASSMENT,
+                threshold=self._module.types.HarmBlockThreshold.BLOCK_NONE,
+            ),
+            self._module.types.SafetySetting(
+                category=self._module.types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+                threshold=self._module.types.HarmBlockThreshold.BLOCK_NONE,
+            ),
+            self._module.types.SafetySetting(
+                category=self._module.types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+                threshold=self._module.types.HarmBlockThreshold.BLOCK_NONE,
+            ),
+        ]
+
+        super().__init__(model)
+
+    def should_use_vertexai(self) -> bool:
+        """Checks if the model should use Vertex AI for generation.
+
+        This is determined first by the value of `GOOGLE_GENAI_USE_VERTEXAI`
+        environment variable. If not set, it checks for the presence of the
+        project and location.
+
+        Returns:
+            True if the model should use Vertex AI, False otherwise
+        """
+        if self.use_vertexai is not None:
+            return self.use_vertexai
+        if self.project and self.location:
+            return True
+        else:
+            return False
+
+    @retry_gemini
+    def _prompt_contents(
+        self, prompt: str, audio: Optional[List[Audio]] = None
+    ) -> Union[str, List]:
+        parts = multimodal_parts(prompt, audio)
+        if parts is None:
+            return prompt
+
+        content = []
+        for element in parts:
+            if isinstance(element, str):
+                content.append(element)
+            elif isinstance(element, MLLMImage):
+                # Gemini doesn't support direct external URLs
+                # Must convert all images to bytes
+                if element.url and not element.local:
+                    image_data, mime_type = fetch_remote_image(element)
+                else:
+                    image_data = decode_image(element)
+                    mime_type = element.mimeType or "image/jpeg"
+
+                # Create Part from bytes
+                image_part = self._module.types.Part.from_bytes(
+                    data=image_data, mime_type=mime_type
+                )
+                content.append(image_part)
+            elif isinstance(element, Audio):
+                # Inline bytes; remote clips are downloaded first
+                content.append(
+                    self._module.types.Part.from_bytes(
+                        data=element.get_bytes(),
+                        mime_type=f"audio/{audio_format(element)}",
+                    )
+                )
+            else:
+                raise DeepEvalError(f"Invalid input type: {type(element)}")
+
+        return content
+
+    ###############################################
+    # Generate functions
+    ###############################################
+
+    @retry_gemini
+    def generate(
+        self,
+        prompt: str,
+        schema: Optional[BaseModel] = None,
+        audio: Optional[List[Audio]] = None,
+    ) -> Tuple[Union[str, BaseModel], float]:
+        """Generates text from a prompt.
+
+        Args:
+            prompt: Text prompt
+            schema: Optional Pydantic model for structured output
+            audio: Optional audio clips sent after the prompt
+
+        Returns:
+            Generated text response or structured output as Pydantic model
+        """
+        client = self.load_model()
+
+        contents = self._prompt_contents(prompt, audio)
+
+        if schema is not None:
+            response = client.models.generate_content(
+                model=self.name,
+                contents=contents,
+                config=self._module.types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=schema,
+                    safety_settings=self.model_safety_settings,
+                    **self._temperature_kwargs(),
+                    **self.generation_kwargs,
+                ),
+            )
+            return response.parsed, self._token_cost(response)
+        else:
+            response = client.models.generate_content(
+                model=self.name,
+                contents=contents,
+                config=self._module.types.GenerateContentConfig(
+                    safety_settings=self.model_safety_settings,
+                    **self._temperature_kwargs(),
+                    **self.generation_kwargs,
+                ),
+            )
+            return response.text, self._token_cost(response)
+
+    @retry_gemini
+    async def a_generate(
+        self,
+        prompt: str,
+        schema: Optional[BaseModel] = None,
+        audio: Optional[List[Audio]] = None,
+    ) -> Tuple[Union[str, BaseModel], float]:
+        """Asynchronously generates text from a prompt.
+
+        Args:
+            prompt: Text prompt
+            schema: Optional Pydantic model for structured output
+            audio: Optional audio clips sent after the prompt
+
+        Returns:
+            Generated text response or structured output as Pydantic model
+        """
+        client = self.load_model()
+
+        contents = self._prompt_contents(prompt, audio)
+
+        if schema is not None:
+            response = await client.aio.models.generate_content(
+                model=self.name,
+                contents=contents,
+                config=self._module.types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=schema,
+                    safety_settings=self.model_safety_settings,
+                    **self._temperature_kwargs(),
+                    **self.generation_kwargs,
+                ),
+            )
+            return response.parsed, self._token_cost(response)
+        else:
+            response = await client.aio.models.generate_content(
+                model=self.name,
+                contents=contents,
+                config=self._module.types.GenerateContentConfig(
+                    safety_settings=self.model_safety_settings,
+                    **self._temperature_kwargs(),
+                    **self.generation_kwargs,
+                ),
+            )
+            return response.text, self._token_cost(response)
+
+    ###############################################
+    # Utilities
+    ###############################################
+
+    def _temperature_kwargs(self) -> Dict:
+        # Google warns that temperatures below the default 1.0 make Gemini 3
+        # models loop or reason worse, so they get the default unless a
+        # temperature was explicitly configured.
+        if not self._temperature_configured:
+            return {}
+        return {"temperature": self.temperature}
+
+    def calculate_cost(
+        self, input_tokens: int, output_tokens: int, audio_input_tokens: int = 0
+    ) -> Optional[EvaluationCost]:
+        return token_cost(
+            self.model_data, input_tokens, output_tokens, audio_input_tokens
+        )
+
+    def _token_cost(self, response) -> EvaluationCost:
+        usage = getattr(response, "usage_metadata", None)
+        input_tokens = getattr(usage, "prompt_token_count", None)
+        output_tokens = getattr(usage, "candidates_token_count", None)
+        # Thinking tokens are billed at the output rate but reported separately.
+        thoughts_tokens = getattr(usage, "thoughts_token_count", None)
+        if isinstance(thoughts_tokens, int) and thoughts_tokens > 0:
+            output_tokens = (output_tokens or 0) + thoughts_tokens
+        modality_details = getattr(usage, "prompt_tokens_details", None)
+        audio_input_tokens = sum(
+            detail.token_count or 0
+            for detail in (
+                modality_details if isinstance(modality_details, list) else []
+            )
+            if detail.modality == "AUDIO"
+        )
+        if input_tokens is not None and output_tokens is not None:
+            cost = self.calculate_cost(
+                input_tokens, output_tokens, audio_input_tokens
+            )
+            if cost is not None:
+                return cost
+        return EvaluationCost(None, input_tokens, output_tokens)
+
+    #########################
+    # Capabilities          #
+    #########################
+
+    def supports_log_probs(self) -> Union[bool, None]:
+        return self.model_data.supports_log_probs
+
+    def supports_temperature(self) -> Union[bool, None]:
+        return self.model_data.supports_temperature
+
+    def supports_multimodal(self) -> Union[bool, None]:
+        return self.model_data.supports_multimodal
+
+    def supports_audio(self) -> Union[bool, None]:
+        return self.model_data.supports_audio
+
+    def supports_structured_outputs(self) -> Union[bool, None]:
+        """
+        OpenAI models that natively enforce typed structured outputs.
+         Used by generate(...) when a schema is provided.
+        """
+        return self.model_data.supports_structured_outputs
+
+    def supports_json_mode(self) -> Union[bool, None]:
+        """
+        OpenAI models that enforce JSON mode
+        """
+        return self.model_data.supports_json
+
+    #########
+    # Model #
+    #########
+
+    def load_model(self):
+        """Creates a client.
+        With Gen AI SDK, model is set at inference time, so there is no
+        model to load and initialize.
+        This method name is kept for compatibility with other LLMs.
+
+        Returns:
+            A GenerativeModel instance configured for evaluation.
+        """
+        return self._build_client()
+
+    def _require_service_account(self):
+        return require_dependency(
+            "google.oauth2.service_account",
+            provider_label="GeminiModel",
+            install_hint="Install it with `pip install google-auth`.",
+        )
+
+    def _require_user_credentials(self):
+        return require_dependency(
+            "google.oauth2.credentials",
+            provider_label="GeminiModel",
+            install_hint="Install it with `pip install google-auth`.",
+        )
+
+    def _require_module(self):
+        return require_dependency(
+            "google.genai",
+            provider_label="GeminiModel",
+            install_hint="Install it with `pip install google-genai`.",
+        )
+
+    def _client_kwargs(self, **override_kwargs) -> Dict:
+        """Merge ctor kwargs with any overrides passed at load_model time."""
+        client_kwargs = dict(self.kwargs or {})
+        if override_kwargs:
+            client_kwargs.update(override_kwargs)
+        return client_kwargs
+
+    def _build_client(self) -> "Client":
+        client_kwargs = self._client_kwargs(**self.kwargs)
+
+        if self.should_use_vertexai():
+            if not self.project or not self.location:
+                raise DeepEvalError(
+                    "When using Vertex AI API, both project and location are required. "
+                    "Either provide them as arguments or set GOOGLE_CLOUD_PROJECT and "
+                    "GOOGLE_CLOUD_LOCATION in your DeepEval configuration."
+                )
+
+            # if no service account key is provided, allow the SDK
+            # to resolve Application Default Credentials automatically.
+            credentials = None
+            if self.service_account_key is not None:
+                service_account_key_json = require_secret_api_key(
+                    self.service_account_key,
+                    provider_label="Google Gemini",
+                    env_var_name="GOOGLE_SERVICE_ACCOUNT_KEY",
+                    param_hint="`service_account_key` to GeminiModel(...)",
+                )
+
+                try:
+                    service_account_key = json.loads(service_account_key_json)
+                except Exception as e:
+                    raise DeepEvalError(
+                        "GOOGLE_SERVICE_ACCOUNT_KEY must be valid JSON for a Google credential."
+                    ) from e
+
+                if not isinstance(service_account_key, dict):
+                    raise DeepEvalError(
+                        "GOOGLE_SERVICE_ACCOUNT_KEY must decode to a JSON object."
+                    )
+
+                credential_type = service_account_key.get("type")
+                if credential_type == "service_account":
+                    service_account = self._require_service_account()
+                    credentials = (
+                        service_account.Credentials.from_service_account_info(
+                            service_account_key,
+                            scopes=[
+                                "https://www.googleapis.com/auth/cloud-platform"
+                            ],
+                        )
+                    )
+                elif credential_type == "authorized_user":
+                    user_credentials = self._require_user_credentials()
+                    credentials = (
+                        user_credentials.Credentials.from_authorized_user_info(
+                            service_account_key,
+                            scopes=[
+                                "https://www.googleapis.com/auth/cloud-platform"
+                            ],
+                        )
+                    )
+                else:
+                    raise DeepEvalError(
+                        "GOOGLE_SERVICE_ACCOUNT_KEY must be a service account key "
+                        '(type "service_account") or user credentials '
+                        '(type "authorized_user").'
+                    )
+
+            client = self._module.Client(
+                vertexai=True,
+                project=self.project,
+                location=self.location,
+                credentials=credentials,
+                **client_kwargs,
+            )
+        else:
+            api_key = require_secret_api_key(
+                self.api_key,
+                provider_label="Google Gemini",
+                env_var_name="GOOGLE_API_KEY",
+                param_hint="`api_key` to GeminiModel(...)",
+            )
+
+            client = self._module.Client(api_key=api_key, **client_kwargs)
+
+        return client
+
+    def get_model_name(self):
+        return f"{self.name} (Gemini)"

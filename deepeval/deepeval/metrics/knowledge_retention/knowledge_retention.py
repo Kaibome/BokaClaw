@@ -1,0 +1,362 @@
+from typing import Optional, Union, List, Type
+
+from deepeval.test_case import ConversationalTestCase, Turn, MultiTurnParams
+from deepeval.metrics import BaseConversationalMetric
+from deepeval.metrics.base_metric import Verdict, YES_NO
+from deepeval.metrics.utils import (
+    prepare_measure,
+    generate_qag_verdict,
+    a_generate_qag_verdict,
+    score_qag_verdicts,
+    construct_verbose_logs,
+    initialize_model,
+    initialize_system_one_model,
+    convert_turn_to_dict,
+    a_generate_with_schema_and_extract,
+    generate_with_schema_and_extract,
+    SystemOneBinarySpec,
+    SystemOneEvalSpec,
+    parse_questions,
+    run_system_one_eval,
+    a_run_system_one_eval,
+)
+from deepeval.config.eval_mode import EvalModeName, resolve_eval_mode
+from deepeval.models import DeepEvalBaseLLM, DeepEvalBaseSystemOneModel
+from deepeval.metrics.indicator import metric_progress_indicator
+from deepeval.metrics.knowledge_retention.schema import (
+    Knowledge,
+    KnowledgeRetentionVerdict,
+    KnowledgeRetentionScoreReason,
+)
+from deepeval.utils import get_or_create_event_loop, prettify_list
+from deepeval.templates import make_template_class
+
+
+KnowledgeRetentionTemplate = make_template_class("KnowledgeRetentionMetric")
+
+
+class KnowledgeRetentionMetric(BaseConversationalMetric):
+    _required_test_case_params = [MultiTurnParams.CONTENT, MultiTurnParams.ROLE]
+
+    def __init__(
+        self,
+        threshold: Optional[float] = 0.5,
+        model: Optional[Union[str, DeepEvalBaseLLM]] = None,
+        system_one_model: Optional[
+            Union[str, DeepEvalBaseSystemOneModel]
+        ] = None,
+        eval_mode: Optional[EvalModeName] = None,
+        include_reason: bool = True,
+        async_mode: bool = True,
+        strict_mode: bool = False,
+        verbose_mode: bool = False,
+        flaky: bool = False,
+        evaluation_template: Type[
+            KnowledgeRetentionTemplate
+        ] = KnowledgeRetentionTemplate,
+    ):
+        self.threshold = 1 if strict_mode else threshold
+        self.eval_mode = resolve_eval_mode(eval_mode)
+        self.model, self.using_native_model = initialize_model(
+            model, self.eval_mode
+        )
+        self.system_one_model = initialize_system_one_model(
+            system_one_model, self.eval_mode
+        )
+        self.evaluation_model = (
+            self.model or self.system_one_model
+        ).get_model_name()
+        self.include_reason = include_reason
+        self.async_mode = async_mode
+        self.strict_mode = strict_mode
+        self.verbose_mode = verbose_mode
+        self.flaky = flaky
+        self.evaluation_template = evaluation_template
+
+    def measure(
+        self,
+        test_case: ConversationalTestCase,
+        _show_indicator: bool = True,
+        _in_component: bool = False,
+    ):
+        prepare_measure(self, test_case)
+        with metric_progress_indicator(
+            self, _show_indicator=_show_indicator, _in_component=_in_component
+        ):
+            if self.async_mode:
+                loop = get_or_create_event_loop()
+                loop.run_until_complete(
+                    self.a_measure(
+                        test_case,
+                        _show_indicator=False,
+                        _in_component=_in_component,
+                    )
+                )
+            else:
+                if run_system_one_eval(self, test_case):
+                    return self.score
+
+                self.knowledges: List[Union[Knowledge, None]] = (
+                    self._generate_knowledges(test_case.turns)
+                )
+                self.verdicts: List[KnowledgeRetentionVerdict] = (
+                    self._generate_verdicts(
+                        test_case.turns, test_case.multimodal
+                    )
+                )
+                self.score = self._calculate_score()
+                self.reason = self._generate_reason()
+                self.success = self.is_successful()
+                self.verbose_logs = construct_verbose_logs(
+                    self,
+                    steps=[
+                        f"Formatted Turns:\n{prettify_list(test_case.turns)}",
+                        f"Knowledges:\n{prettify_list(self.knowledges)}",
+                        f"Verdicts:\n{prettify_list(self.verdicts)}",
+                        f"Score: {self.score}\nReason: {self.reason}",
+                    ],
+                )
+            return self.score
+
+    async def a_measure(
+        self,
+        test_case: ConversationalTestCase,
+        _show_indicator: bool = True,
+        _in_component: bool = False,
+    ) -> float:
+        prepare_measure(self, test_case)
+        with metric_progress_indicator(
+            self,
+            async_mode=True,
+            _show_indicator=_show_indicator,
+            _in_component=_in_component,
+        ):
+            if await a_run_system_one_eval(self, test_case):
+                return self.score
+
+            self.knowledges: List[Union[Knowledge, None]] = (
+                await self._a_generate_knowledges(test_case.turns)
+            )
+            self.verdicts: List[KnowledgeRetentionVerdict] = (
+                await self._a_generate_verdicts(
+                    test_case.turns, test_case.multimodal
+                )
+            )
+            self.score = self._calculate_score()
+            self.reason = await self._a_generate_reason()
+            self.success = self.is_successful()
+            self.verbose_logs = construct_verbose_logs(
+                self,
+                steps=[
+                    f"Knowledges:\n{prettify_list(self.knowledges)}",
+                    f"Verdicts:\n{prettify_list(self.verdicts)}",
+                    f"Score: {self.score}\nReason: {self.reason}",
+                ],
+            )
+            return self.score
+
+    async def _a_generate_reason(self) -> str:
+        if self.include_reason is False:
+            return None
+
+        attritions = []
+        for verdict in self.verdicts:
+            if verdict.verdict == Verdict.YES:
+                attritions.append(verdict.reason)
+
+        prompt: dict = self._get_prompt(
+            "generate_reason",
+            attritions=attritions,
+            score=format(self.score, ".2f"),
+        )
+        return await a_generate_with_schema_and_extract(
+            metric=self,
+            prompt=prompt,
+            schema_cls=KnowledgeRetentionScoreReason,
+            extract_schema=lambda s: s.reason,
+            extract_json=lambda data: data["reason"],
+        )
+
+    def _generate_reason(self) -> str:
+        if self.include_reason is False:
+            return None
+
+        attritions = []
+        for verdict in self.verdicts:
+            if verdict.verdict == Verdict.YES:
+                attritions.append(verdict.reason)
+
+        prompt: dict = self._get_prompt(
+            "generate_reason",
+            attritions=attritions,
+            score=format(self.score, ".2f"),
+        )
+        return generate_with_schema_and_extract(
+            metric=self,
+            prompt=prompt,
+            schema_cls=KnowledgeRetentionScoreReason,
+            extract_schema=lambda s: s.reason,
+            extract_json=lambda data: data["reason"],
+        )
+
+    async def _a_generate_verdicts(
+        self, turns: List[Turn], multimodal: bool
+    ) -> List[KnowledgeRetentionVerdict]:
+        verdicts: List[KnowledgeRetentionVerdict] = []
+        for i in range(len(turns)):
+            if turns[i].role != "assistant":
+                continue
+
+            accumulated_knowledge = [
+                knowledge.data
+                for knowledge in self.knowledges[:i]
+                if knowledge is not None and knowledge.data
+            ]
+            if len(accumulated_knowledge) == 0:
+                continue
+
+            prompt = self._get_prompt(
+                "generate_verdict",
+                llm_message=turns[i].content,
+                accumulated_knowledge=accumulated_knowledge,
+            )
+            verdict = await a_generate_qag_verdict(
+                metric=self,
+                prompt=prompt,
+                verdict_cls=KnowledgeRetentionVerdict,
+                allowed=YES_NO,
+                system_one=self._experimental_system_one_spec(
+                    turns[i].content, accumulated_knowledge, multimodal
+                ),
+            )
+            verdicts.append(verdict)
+        return verdicts
+
+    def _generate_verdicts(
+        self, turns: List[Turn], multimodal: bool
+    ) -> List[KnowledgeRetentionVerdict]:
+        verdicts: List[KnowledgeRetentionVerdict] = []
+        for i in range(len(turns)):
+            if turns[i].role != "assistant":
+                continue
+
+            accumulated_knowledge = [
+                knowledge.data
+                for knowledge in self.knowledges[:i]
+                if knowledge is not None and knowledge.data
+            ]
+            if len(accumulated_knowledge) == 0:
+                continue
+
+            prompt = self._get_prompt(
+                "generate_verdict",
+                llm_message=turns[i].content,
+                accumulated_knowledge=accumulated_knowledge,
+            )
+
+            verdict = generate_qag_verdict(
+                metric=self,
+                prompt=prompt,
+                verdict_cls=KnowledgeRetentionVerdict,
+                allowed=YES_NO,
+                system_one=self._experimental_system_one_spec(
+                    turns[i].content, accumulated_knowledge, multimodal
+                ),
+            )
+            verdicts.append(verdict)
+        return verdicts
+
+    async def _a_generate_knowledges(
+        self, turns: List[Turn]
+    ) -> List[Union[Knowledge, None]]:
+        knowledges: List[Union[Knowledge, None]] = [None] * len(turns)
+
+        for i in range(0, len(turns)):
+            if turns[i].role == "assistant":
+                continue
+
+            previous_turns = turns[:i]
+            user_message = turns[i].content
+
+            prompt = self._get_prompt(
+                "extract_data",
+                user_message=user_message,
+                previous_turns=[
+                    convert_turn_to_dict(turn) for turn in previous_turns
+                ],
+            )
+            knowledges[i] = await a_generate_with_schema_and_extract(
+                metric=self,
+                prompt=prompt,
+                schema_cls=Knowledge,
+                extract_schema=lambda s: s,
+                extract_json=lambda data: Knowledge(**data),
+            )
+
+        return knowledges
+
+    def _generate_knowledges(
+        self, turns: List[Turn]
+    ) -> List[Union[Knowledge, None]]:
+        knowledges: List[Union[Knowledge, None]] = [None] * len(turns)
+
+        for i in range(0, len(turns)):
+            if turns[i].role == "assistant":
+                continue
+
+            previous_turns = turns[:i]
+            user_message = turns[i].content
+
+            prompt = self._get_prompt(
+                "extract_data",
+                user_message=user_message,
+                previous_turns=[
+                    convert_turn_to_dict(turn) for turn in previous_turns
+                ],
+            )
+
+            knowledges[i] = generate_with_schema_and_extract(
+                metric=self,
+                prompt=prompt,
+                schema_cls=Knowledge,
+                extract_schema=lambda s: s,
+                extract_json=lambda data: Knowledge(**data),
+            )
+
+        return knowledges
+
+    def _experimental_system_one_spec(
+        self, llm_message: str, accumulated_knowledge: List, multimodal: bool
+    ) -> Optional[SystemOneBinarySpec]:
+        if multimodal:
+            return None
+        return SystemOneBinarySpec(
+            instructions=self._get_prompt("_experimental_system_one_verdict"),
+            state={
+                "llm_message": llm_message,
+                "accumulated_knowledge": accumulated_knowledge,
+            },
+        )
+
+    def _system_one_eval_spec(
+        self, test_case: ConversationalTestCase
+    ) -> Optional[SystemOneEvalSpec]:
+        """`system_one` eval mode: the whole conversation as one Jev
+        request, each turn carrying its `role` and `content`; see
+        EXPERIMENTAL.md."""
+        if test_case.multimodal:
+            return None
+        return SystemOneEvalSpec(
+            evaluation_params=self._required_test_case_params,
+            questions=parse_questions(
+                self._get_prompt("_experimental_system_one_questions")
+            ),
+        )
+
+    def _calculate_score(self) -> float:
+        # "yes" means the assistant forgot something, so "no" is the pass.
+        return score_qag_verdicts(self, self.verdicts, passing=(Verdict.NO,))
+
+    @property
+    def __name__(self):
+        return "Knowledge Retention"

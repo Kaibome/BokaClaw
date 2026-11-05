@@ -1,0 +1,440 @@
+"""A slightly modified tailored version of the LLM evaluated metric based on the GEval framework: https://arxiv.org/pdf/2303.16634.pdf"""
+
+from typing import Optional, List, Tuple, Union, Type
+from rich.console import Console
+from deepeval.metrics import BaseConversationalMetric
+from deepeval.metrics.g_eval.utils import (
+    MetricPullResponse,
+    Rubric,
+    calculate_weighted_summed_score,
+    construct_conversational_g_eval_turn_params_string,
+    construct_non_turns_test_case_string,
+    format_rubrics,
+    validate_and_sort_rubrics,
+    validate_criteria_and_evaluation_steps,
+    CONVERSATIONAL_G_EVAL_API_PARAMS,
+    construct_geval_upload_payload,
+    construct_geval_pull_evaluation_params,
+    ensure_required_params,
+)
+from deepeval.test_case import (
+    Audio,
+    MultiTurnParams,
+    ConversationalTestCase,
+)
+from deepeval.utils import get_or_create_event_loop, prettify_list
+from deepeval.metrics.utils import (
+    check_conversational_test_case_params,
+    construct_verbose_logs,
+    initialize_model,
+    convert_turn_to_dict,
+    a_generate_with_schema_and_extract,
+    generate_with_schema_and_extract,
+    generate_rubric_score,
+    a_generate_rubric_score,
+)
+from deepeval.models import DeepEvalBaseLLM
+from deepeval.metrics.indicator import metric_progress_indicator
+import deepeval.metrics.conversational_g_eval.schema as cgschema
+from deepeval.confident.api import Api, Endpoints, HttpMethods
+from deepeval.templates import make_template_class
+
+
+ConversationalGEvalTemplate = make_template_class("ConversationalGEval")
+
+
+class ConversationalGEval(BaseConversationalMetric):
+    def __init__(
+        self,
+        name: str,
+        evaluation_params: Optional[List[MultiTurnParams]] = None,
+        criteria: Optional[str] = None,
+        evaluation_steps: Optional[List[str]] = None,
+        model: Optional[Union[str, DeepEvalBaseLLM]] = None,
+        threshold: Optional[float] = 0.5,
+        top_logprobs: int = 20,
+        rubric: Optional[List[Rubric]] = None,
+        async_mode: bool = True,
+        strict_mode: bool = False,
+        verbose_mode: bool = False,
+        _include_g_eval_suffix: bool = True,
+        flaky: bool = False,
+        evaluation_template: Type[
+            ConversationalGEvalTemplate
+        ] = ConversationalGEvalTemplate,
+        _audio_model: Optional[Union[str, DeepEvalBaseLLM]] = None,
+    ):
+        if evaluation_params is not None and len(evaluation_params) == 0:
+            raise ValueError("evaluation_params cannot be an empty list.")
+
+        self.name = name
+        if evaluation_params is not None:
+            if MultiTurnParams.CONTENT not in evaluation_params:
+                evaluation_params.append(MultiTurnParams.CONTENT)
+            if MultiTurnParams.ROLE not in evaluation_params:
+                evaluation_params.append(MultiTurnParams.ROLE)
+
+        self.evaluation_params = evaluation_params
+
+        if criteria is not None or evaluation_steps is not None:
+            validate_criteria_and_evaluation_steps(criteria, evaluation_steps)
+        self.criteria = criteria
+        self.rubric = validate_and_sort_rubrics(rubric)
+        self.model, self.using_native_model = initialize_model(model)
+        self.evaluation_model = self.model.get_model_name()
+        self.evaluation_steps = (
+            evaluation_steps
+            if evaluation_steps and len(evaluation_steps) > 0
+            else None
+        )
+        if (
+            self.evaluation_steps is None
+            and isinstance(self.model, DeepEvalBaseLLM)
+            and self.model.requires_audio()
+        ):
+            raise ValueError(
+                f"{self.evaluation_model} can't turn `criteria` into "
+                "evaluation steps: it only accepts requests that include "
+                "audio, generating the steps from `criteria` is a text-only request. "
+                "Pass `evaluation_steps` instead of `criteria`, or use a "
+                "model that also accepts text-only requests."
+            )
+        if _audio_model is None:
+            self._audio_model = self.model
+            self._using_native_audio_model = self.using_native_model
+        else:
+            self._audio_model, self._using_native_audio_model = (
+                initialize_model(_audio_model)
+            )
+            self.evaluation_model += (
+                f" (audio: {self._audio_model.get_model_name()})"
+            )
+        self.threshold = 1 if strict_mode else threshold
+        self.top_logprobs = top_logprobs
+        self.strict_mode = strict_mode
+        self.async_mode = async_mode
+        self.verbose_mode = verbose_mode
+        self.flaky = flaky
+        self._include_g_eval_suffix = _include_g_eval_suffix
+        self.evaluation_template = evaluation_template
+
+    def measure(
+        self,
+        test_case: ConversationalTestCase,
+        _show_indicator: bool = True,
+        _in_component: bool = False,
+    ) -> float:
+        ensure_required_params(
+            self.evaluation_params, self.criteria, self.evaluation_steps
+        )
+        multimodal = test_case.multimodal
+        check_conversational_test_case_params(
+            test_case,
+            self.evaluation_params,
+            self,
+            False,
+            self._scoring_model,
+            multimodal,
+            audio=self._sends_audio,
+        )
+
+        self.evaluation_cost = 0 if self._native_models else None
+        self.input_tokens = 0 if self._native_models else None
+        self.output_tokens = 0 if self._native_models else None
+        with metric_progress_indicator(
+            self, _show_indicator=_show_indicator, _in_component=_in_component
+        ):
+            if self.async_mode:
+                loop = get_or_create_event_loop()
+                loop.run_until_complete(
+                    self.a_measure(
+                        test_case,
+                        _show_indicator=False,
+                        _in_component=_in_component,
+                    )
+                )
+            else:
+                self.evaluation_steps: List[str] = (
+                    self._generate_evaluation_steps()
+                )
+                g_score, reason = self.evaluate(test_case)
+                self.reason = reason
+                self.score = float(g_score) / 10
+                self.score = (
+                    0
+                    if self.strict_mode and self.score < self.threshold
+                    else self.score
+                )
+                self.success = self.is_successful()
+                self.verbose_logs = construct_verbose_logs(
+                    self,
+                    steps=[
+                        f"Criteria:\n{self.criteria}",
+                        f"Evaluation Steps:\n{prettify_list(self.evaluation_steps)}",
+                        f"Rubric:\n{format_rubrics(self.rubric)}",
+                        f"Score: {self.score}\nReason: {self.reason}",
+                    ],
+                )
+
+            return self.score
+
+    async def a_measure(
+        self,
+        test_case: ConversationalTestCase,
+        _show_indicator: bool = True,
+        _in_component: bool = False,
+    ) -> float:
+        ensure_required_params(
+            self.evaluation_params, self.criteria, self.evaluation_steps
+        )
+        multimodal = test_case.multimodal
+        check_conversational_test_case_params(
+            test_case,
+            self.evaluation_params,
+            self,
+            False,
+            self._scoring_model,
+            multimodal,
+            audio=self._sends_audio,
+        )
+
+        self.evaluation_cost = 0 if self._native_models else None
+        self.input_tokens = 0 if self._native_models else None
+        self.output_tokens = 0 if self._native_models else None
+        with metric_progress_indicator(
+            self,
+            async_mode=True,
+            _show_indicator=_show_indicator,
+            _in_component=_in_component,
+        ):
+            self.evaluation_steps: List[str] = (
+                await self._a_generate_evaluation_steps()
+            )
+            g_score, reason = await self._a_evaluate(test_case)
+            self.reason = reason
+            self.score = float(g_score) / 10
+            self.score = (
+                0
+                if self.strict_mode and self.score < self.threshold
+                else self.score
+            )
+            self.success = self.is_successful()
+            self.verbose_logs = construct_verbose_logs(
+                self,
+                steps=[
+                    f"Criteria:\n{self.criteria}",
+                    f"Evaluation Steps:\n{prettify_list(self.evaluation_steps)}",
+                    f"Rubric:\n{format_rubrics(self.rubric)}",
+                    f"Score: {self.score}\nReason: {self.reason}",
+                ],
+            )
+
+            return self.score
+
+    async def _a_generate_evaluation_steps(self) -> List[str]:
+        if self.evaluation_steps:
+            return self.evaluation_steps
+
+        g_eval_params_str = construct_conversational_g_eval_turn_params_string(
+            self.evaluation_params
+        )
+        prompt = self._get_prompt(
+            "generate_evaluation_steps",
+            criteria=self.criteria,
+            parameters=g_eval_params_str,
+        )
+        return await a_generate_with_schema_and_extract(
+            metric=self,
+            prompt=prompt,
+            schema_cls=cgschema.Steps,
+            extract_schema=lambda s: s.steps,
+            extract_json=lambda data: data["steps"],
+        )
+
+    def _generate_evaluation_steps(self) -> List[str]:
+        if self.evaluation_steps:
+            return self.evaluation_steps
+
+        g_eval_params_str = construct_conversational_g_eval_turn_params_string(
+            self.evaluation_params
+        )
+        prompt = self._get_prompt(
+            "generate_evaluation_steps",
+            criteria=self.criteria,
+            parameters=g_eval_params_str,
+        )
+        return generate_with_schema_and_extract(
+            metric=self,
+            prompt=prompt,
+            schema_cls=cgschema.Steps,
+            extract_schema=lambda s: s.steps,
+            extract_json=lambda data: data["steps"],
+        )
+
+    @property
+    def _sends_audio(self) -> bool:
+        return MultiTurnParams.AUDIO in (self.evaluation_params or [])
+
+    @property
+    def _scoring_model(self) -> DeepEvalBaseLLM:
+        return self._audio_model if self._sends_audio else self.model
+
+    @property
+    def _native_models(self) -> bool:
+        return self.using_native_model and (
+            not self._sends_audio or self._using_native_audio_model
+        )
+
+    def _evaluation_prompt(
+        self, test_case: ConversationalTestCase
+    ) -> Tuple[str, List[Audio]]:
+        test_case_content = construct_non_turns_test_case_string(
+            self.evaluation_params, test_case
+        )
+        g_eval_params_str = construct_conversational_g_eval_turn_params_string(
+            self.evaluation_params
+        )
+        rubric_str = format_rubrics(self.rubric) if self.rubric else None
+        turns, audio = [], []
+        for turn in test_case.turns:
+            turn_dict = convert_turn_to_dict(turn, self.evaluation_params)
+            if self._sends_audio and turn.audio is not None:
+                # Clips go after the prompt in turn order; the label tells the
+                # judge which clip is this turn's audio.
+                audio.append(turn.audio)
+                turn_dict["audio"] = (
+                    f"audio clip {len(audio)} (attached after this prompt)"
+                )
+            turns.append(turn_dict)
+        prompt = self._get_prompt(
+            "generate_evaluation_results",
+            evaluation_steps=self.number_evaluation_steps(),
+            test_case_content=test_case_content,
+            turns=turns,
+            parameters=g_eval_params_str,
+            rubric=rubric_str,
+        )
+        return prompt, audio
+
+    async def _a_evaluate(
+        self, test_case: ConversationalTestCase
+    ) -> Tuple[Union[int, float], str]:
+        prompt, audio = self._evaluation_prompt(test_case)
+        return await a_generate_rubric_score(
+            metric=self,
+            prompt=prompt,
+            schema_cls=cgschema.ReasonScore,
+            strict_mode=self.strict_mode,
+            top_logprobs=self.top_logprobs,
+            weighted_score_fn=calculate_weighted_summed_score,
+            audio=audio,
+            model=self._scoring_model,
+        )
+
+    def evaluate(
+        self, test_case: ConversationalTestCase
+    ) -> Tuple[Union[int, float], str]:
+        prompt, audio = self._evaluation_prompt(test_case)
+        return generate_rubric_score(
+            metric=self,
+            prompt=prompt,
+            schema_cls=cgschema.ReasonScore,
+            strict_mode=self.strict_mode,
+            top_logprobs=self.top_logprobs,
+            weighted_score_fn=calculate_weighted_summed_score,
+            audio=audio,
+            model=self._scoring_model,
+        )
+
+    def number_evaluation_steps(self):
+        evaluation_steps = """"""
+        for index, string in enumerate(self.evaluation_steps, start=1):
+            evaluation_steps += f"{index}. {string}\n"
+        return evaluation_steps
+
+    def upload(self):
+        ensure_required_params(
+            self.evaluation_params,
+            self.criteria,
+            self.evaluation_steps,
+            operation="upload",
+        )
+        api = Api()
+
+        payload = construct_geval_upload_payload(
+            name=self.name,
+            evaluation_params=self.evaluation_params,
+            g_eval_api_params=CONVERSATIONAL_G_EVAL_API_PARAMS,
+            criteria=self.criteria,
+            evaluation_steps=self.evaluation_steps,
+            multi_turn=True,
+            rubric=self.rubric,
+        )
+
+        data, _ = api.send_request(
+            method=HttpMethods.POST,
+            endpoint=Endpoints.METRICS_ENDPOINT,
+            body=payload,
+        )
+
+        metric_id = data.get("id")
+        self.metric_id = metric_id
+        console = Console()
+
+        if metric_id:
+            console.print(
+                "[rgb(5,245,141)]✓[/rgb(5,245,141)] Metric uploaded successfully "
+                f"(id: [bold]{metric_id}[/bold])"
+            )
+
+        return data
+
+    def pull(self):
+        api = Api()
+        data, _ = api.send_request(
+            method=HttpMethods.GET,
+            endpoint=Endpoints.METRIC_ENDPOINT,
+            url_params={"name": self.name},
+        )
+
+        data = MetricPullResponse.model_validate(data)
+
+        self.criteria = data.criteria
+        self.evaluation_steps = data.evaluationSteps
+
+        self.evaluation_params = construct_geval_pull_evaluation_params(
+            data.requiredParameters, multi_turn=True
+        )
+
+        self.rubric = validate_and_sort_rubrics(
+            [
+                Rubric(
+                    score_range=r.scoreRange,
+                    expected_outcome=r.expectedOutcome,
+                )
+                for r in data.rubric
+            ]
+            if data.rubric
+            else None
+        )
+
+        ensure_required_params(
+            self.evaluation_params, self.criteria, self.evaluation_steps
+        )
+
+        metric_id = data.id
+        self.metric_id = metric_id
+        console = Console()
+        if metric_id:
+            console.print(
+                f"[rgb(5,245,141)]✓[/rgb(5,245,141)] Metric '{self.name}' [Conversational GEval] pulled successfully"
+            )
+
+        return data
+
+    @property
+    def __name__(self):
+        if self._include_g_eval_suffix:
+            return f"{self.name} [Conversational GEval]"
+        else:
+            return self.name

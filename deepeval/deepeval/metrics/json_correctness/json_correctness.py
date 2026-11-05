@@ -1,0 +1,205 @@
+from typing import List, Optional, Union, Type
+from pydantic import BaseModel, ValidationError
+
+from deepeval.test_case import (
+    LLMTestCase,
+    SingleTurnParams,
+)
+from deepeval.metrics import BaseMetric
+from deepeval.metrics.utils import (
+    prepare_measure,
+    construct_verbose_logs,
+    initialize_model,
+    a_generate_with_schema_and_extract,
+    generate_with_schema_and_extract,
+    SystemOneEvalSpec,
+)
+from deepeval.config.eval_mode import EvalModeName, resolve_eval_mode
+from deepeval.models import DeepEvalBaseLLM
+from deepeval.metrics.indicator import metric_progress_indicator
+from deepeval.metrics.json_correctness.schema import JsonCorrectnessScoreReason
+from deepeval.utils import get_or_create_event_loop, serialize_to_json
+from deepeval.templates import make_template_class
+
+DEFAULT_CORRECT_REASON = "The generated Json matches and is syntactically correct to the expected schema."
+
+
+JsonCorrectnessTemplate = make_template_class("JsonCorrectnessMetric")
+
+
+class JsonCorrectnessMetric(BaseMetric):
+    _required_params: List[SingleTurnParams] = [
+        SingleTurnParams.INPUT,
+        SingleTurnParams.ACTUAL_OUTPUT,
+    ]
+
+    def __init__(
+        self,
+        expected_schema: BaseModel,
+        model: Optional[Union[str, DeepEvalBaseLLM]] = None,
+        threshold: Optional[float] = 0.5,
+        async_mode: bool = True,
+        include_reason: bool = True,
+        strict_mode: bool = True,
+        verbose_mode: bool = False,
+        flaky: bool = False,
+        evaluation_template: Type[
+            JsonCorrectnessTemplate
+        ] = JsonCorrectnessTemplate,
+        eval_mode: Optional[EvalModeName] = None,
+    ):
+        self.threshold = 1 if strict_mode else threshold
+        self.eval_mode = resolve_eval_mode(eval_mode)
+        self.model, self.using_native_model = initialize_model(
+            model, self.eval_mode
+        )
+        self.include_reason = include_reason
+        self.strict_mode = strict_mode
+        self.async_mode = async_mode
+        self.verbose_mode = verbose_mode
+        self.flaky = flaky
+        self.expected_schema = expected_schema
+        self.evaluation_model = (
+            self.model.get_model_name() if self.model is not None else None
+        )
+        self.evaluation_template = evaluation_template
+
+    def measure(
+        self,
+        test_case: LLMTestCase,
+        _show_indicator: bool = True,
+        _in_component: bool = False,
+    ) -> float:
+
+        multimodal = test_case.multimodal
+        prepare_measure(self, test_case)
+        with metric_progress_indicator(
+            self, _show_indicator=_show_indicator, _in_component=_in_component
+        ):
+            if self.async_mode:
+                loop = get_or_create_event_loop()
+                loop.run_until_complete(
+                    self.a_measure(
+                        test_case,
+                        _show_indicator=False,
+                        _in_component=_in_component,
+                    )
+                )
+            else:
+                self.score = self._validate(test_case.actual_output)
+                self.reason = self.generate_reason(test_case.actual_output)
+                self.success = self.is_successful()
+                self.verbose_logs = construct_verbose_logs(
+                    self,
+                    steps=[
+                        f"LLM outputed Json:\n{test_case.actual_output}",
+                        # f"Expected Json Schema:\n{json.dumps(self.expected_schema.model_json_schema(), indent=4)}",
+                        f"Score: {self.score}\nReason: {self.reason}",
+                    ],
+                )
+
+            return self.score
+
+    async def a_measure(
+        self,
+        test_case: LLMTestCase,
+        _show_indicator: bool = True,
+        _in_component: bool = False,
+    ) -> float:
+
+        multimodal = test_case.multimodal
+        prepare_measure(self, test_case)
+        with metric_progress_indicator(
+            self,
+            async_mode=True,
+            _show_indicator=_show_indicator,
+            _in_component=_in_component,
+        ):
+            self.score = self._validate(test_case.actual_output)
+            self.reason = await self.a_generate_reason(test_case.actual_output)
+            self.success = self.is_successful()
+            self.verbose_logs = construct_verbose_logs(
+                self,
+                steps=[
+                    f"LLM outputed Json:\n{test_case.actual_output}",
+                    # f"Expected Json Schema:\n{json.dumps(self.expected_schema.model_json_schema(), indent=4)}",
+                    f"Score: {self.score}\nReason: {self.reason}",
+                ],
+            )
+            return self.score
+
+    async def a_generate_reason(self, actual_output: str) -> str:
+        if self.include_reason is False:
+            return None
+
+        is_valid_json = self.score == 1
+        if is_valid_json:
+            return DEFAULT_CORRECT_REASON
+        if self.model is None:
+            return self._validation_error
+
+        prompt: dict = self._get_prompt(
+            "generate_reason",
+            actual_output=actual_output,
+            expected_schema=serialize_to_json(
+                self.expected_schema.model_json_schema(), indent=4
+            ),
+            is_valid_json=is_valid_json,
+        )
+
+        return await a_generate_with_schema_and_extract(
+            metric=self,
+            prompt=prompt,
+            schema_cls=JsonCorrectnessScoreReason,
+            extract_schema=lambda s: s.reason,
+            extract_json=lambda data: data["reason"],
+        )
+
+    def generate_reason(self, actual_output: str) -> str:
+        if self.include_reason is False:
+            return None
+
+        is_valid_json = self.score == 1
+        if is_valid_json:
+            return DEFAULT_CORRECT_REASON
+        if self.model is None:
+            return self._validation_error
+
+        prompt: dict = self._get_prompt(
+            "generate_reason",
+            actual_output=actual_output,
+            expected_schema=serialize_to_json(
+                self.expected_schema.model_json_schema(), indent=4
+            ),
+            is_valid_json=is_valid_json,
+        )
+
+        return generate_with_schema_and_extract(
+            metric=self,
+            prompt=prompt,
+            schema_cls=JsonCorrectnessScoreReason,
+            extract_schema=lambda s: s.reason,
+            extract_json=lambda data: data["reason"],
+        )
+
+    def _validate(self, actual_output: str) -> int:
+        self._validation_error: Optional[str] = None
+        try:
+            self.expected_schema.model_validate_json(actual_output)
+        except ValidationError as e:
+            self._validation_error = str(e)
+            return 0
+        return 1
+
+    def _system_one_eval_spec(
+        self, test_case: LLMTestCase
+    ) -> Optional[SystemOneEvalSpec]:
+        """`system_one` eval mode: the score is decided in code by
+        validating `actual_output` against `expected_schema`, so Jev has
+        nothing to decide; the metric runs without the LLM and its reason is
+        the validation error. See EXPERIMENTAL.md."""
+        return None
+
+    @property
+    def __name__(self):
+        return "Json Correctness"

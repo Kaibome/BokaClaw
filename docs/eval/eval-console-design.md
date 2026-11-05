@@ -940,10 +940,9 @@ export const EVAL_ENDPOINTS = {
 
 ### 11.1 新镜像
 
-`server/eval-requirements.txt`：
+`server/eval-requirements.txt`（deepeval 本身从仓库内 `./deepeval` 源码安装，不走 PyPI）：
 
 ```
-deepeval==4.3.3
 sqlalchemy>=2.0,<3.0
 psycopg[binary]>=3.2.8,<4.0.0
 ```
@@ -957,8 +956,12 @@ WORKDIR /app
 ARG PIP_INDEX_URL=https://pypi.org/simple
 
 COPY server/eval-requirements.txt .
+COPY deepeval/ /tmp/deepeval-src/
 RUN pip install --no-cache-dir --retries 10 --timeout 120 \
-    --index-url "${PIP_INDEX_URL}" -r eval-requirements.txt
+        --index-url "${PIP_INDEX_URL}" -r eval-requirements.txt \
+    && pip install --no-cache-dir --retries 10 --timeout 120 \
+        --index-url "${PIP_INDEX_URL}" /tmp/deepeval-src \
+    && rm -rf /tmp/deepeval-src
 
 COPY server/ .
 

@@ -435,7 +435,7 @@ if use_llm_judge:
 
 | 设计点 | 做法 | 原因 |
 | --- | --- | --- |
-| 依赖隔离 | deepeval 只装进 `server/eval.Dockerfile` 的独立镜像 | server 固定 pydantic 2.10.4，deepeval 4.3.3 要求 pydantic ≥ 2.11.7 |
+| 依赖隔离 | deepeval 由仓库内 `./deepeval` 源码构建，只装进 `server/eval.Dockerfile` 的独立镜像 | server 固定 pydantic 2.10.4，deepeval 要求 pydantic ≥ 2.11.7；源码入库后评测与仓库代码同源 |
 | span → 用例 | `server/app/eval/adapter.py` 把 `agent_run_spans` 还原为 `LLMTestCase` | 采集端不依赖 deepeval，评测端可回放、可替换 |
 | 轨迹字段 | 整棵 span 树写入 `case._trace_dict` | 4.3.3 没有公开的 trace 导入 API，私有字段只允许 adapter 触碰 |
 | 指标选择 | `server/app/eval/metrics.py` 统一构建指标列表 | 确定性指标常开，judge 指标按开关追加 |

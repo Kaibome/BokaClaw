@@ -1,0 +1,479 @@
+"""LLM evaluated metric based on the GEval framework: https://arxiv.org/pdf/2303.16634.pdf"""
+
+import asyncio
+from functools import partial
+from rich.console import Console
+from typing import Dict, Optional, List, Tuple, Union, Type
+from deepeval.errors import MissingTestCaseParamsError
+from deepeval.metrics import BaseMetric
+from deepeval.test_case import (
+    LLMTestCase,
+    SingleTurnParams,
+)
+from deepeval.utils import (
+    get_or_create_event_loop,
+    prettify_list,
+    serialize_to_json,
+)
+from deepeval.metrics.utils import (
+    construct_verbose_logs,
+    initialize_model,
+    check_llm_test_case_params,
+    generate_with_schema_and_extract,
+    a_generate_with_schema_and_extract,
+    generate_rubric_score,
+    a_generate_rubric_score,
+)
+from deepeval.models import DeepEvalBaseLLM
+from deepeval.metrics.indicator import metric_progress_indicator
+from deepeval.metrics.g_eval import schema as gschema
+from deepeval.metrics.g_eval.utils import (
+    MetricPullResponse,
+    Rubric,
+    construct_g_eval_params_string,
+    construct_test_case_string,
+    format_rubrics,
+    calculate_weighted_summed_score,
+    validate_and_sort_rubrics,
+    validate_criteria_and_evaluation_steps,
+    number_evaluation_steps,
+    get_score_range,
+    construct_geval_upload_payload,
+    construct_geval_pull_evaluation_params,
+    ensure_required_params,
+    G_EVAL_API_PARAMS,
+)
+from deepeval.config.settings import get_settings
+from deepeval.confident.api import Api, Endpoints, HttpMethods
+from deepeval.templates import make_template_class
+
+
+GEvalTemplate = make_template_class("GEval")
+
+
+class GEval(BaseMetric):
+    def __init__(
+        self,
+        name: str,
+        evaluation_params: Optional[List[SingleTurnParams]] = None,
+        criteria: Optional[str] = None,
+        evaluation_steps: Optional[List[str]] = None,
+        rubric: Optional[List[Rubric]] = None,
+        model: Optional[Union[str, DeepEvalBaseLLM]] = None,
+        threshold: Optional[float] = 0.5,
+        top_logprobs: int = 20,
+        async_mode: bool = True,
+        strict_mode: bool = False,
+        verbose_mode: bool = False,
+        _include_g_eval_suffix: bool = True,
+        flaky: bool = False,
+        evaluation_template: Type[GEvalTemplate] = GEvalTemplate,
+    ):
+        if evaluation_params is not None and len(evaluation_params) == 0:
+            raise ValueError("evaluation_params cannot be an empty list.")
+
+        if criteria is not None or evaluation_steps is not None:
+            validate_criteria_and_evaluation_steps(criteria, evaluation_steps)
+
+        self.name = name
+        self.evaluation_params = evaluation_params
+        self.criteria = criteria
+        self.rubric = validate_and_sort_rubrics(rubric)
+        self.score_range = get_score_range(self.rubric)
+        self.score_range_span = self.score_range[1] - self.score_range[0]
+        self.model, self.using_native_model = initialize_model(model)
+        self.evaluation_model = self.model.get_model_name()
+        self.evaluation_steps = (
+            evaluation_steps
+            if evaluation_steps and len(evaluation_steps) > 0
+            else None
+        )
+        self.threshold = 1 if strict_mode else threshold
+        self.top_logprobs = top_logprobs
+        self.strict_mode = strict_mode
+        self.async_mode = async_mode
+        self.verbose_mode = verbose_mode
+        self.flaky = flaky
+        self._include_g_eval_suffix = _include_g_eval_suffix
+        self.evaluation_template = evaluation_template
+
+    def measure(
+        self,
+        test_case: LLMTestCase,
+        _show_indicator: bool = True,
+        _in_component: bool = False,
+        _additional_context: Optional[str] = None,
+    ) -> float:
+        multimodal = test_case.multimodal
+        self._validate(test_case, multimodal)
+
+        self.evaluation_cost = 0 if self.using_native_model else None
+        self.input_tokens = 0 if self.using_native_model else None
+        self.output_tokens = 0 if self.using_native_model else None
+
+        with metric_progress_indicator(
+            self, _show_indicator=_show_indicator, _in_component=_in_component
+        ):
+            if self.async_mode:
+                loop = get_or_create_event_loop()
+                coro = self.a_measure(
+                    test_case,
+                    _show_indicator=False,
+                    _in_component=_in_component,
+                    _additional_context=_additional_context,
+                )
+                settings = get_settings()
+                loop.run_until_complete(
+                    asyncio.wait_for(
+                        coro,
+                        timeout=(
+                            None
+                            if settings.DEEPEVAL_DISABLE_TIMEOUTS
+                            else settings.DEEPEVAL_PER_TASK_TIMEOUT_SECONDS
+                        ),
+                    )
+                )
+            else:
+                self.evaluation_steps: List[str] = (
+                    self._generate_evaluation_steps(multimodal)
+                )
+                g_score, reason = self._evaluate(
+                    test_case,
+                    _additional_context=_additional_context,
+                    multimodal=multimodal,
+                )
+                self.score = (
+                    (float(g_score) - self.score_range[0])
+                    / self.score_range_span
+                    if not self.strict_mode
+                    else int(g_score)
+                )
+                self.success = self.is_successful()
+
+                self.reason = reason
+                self.verbose_logs = construct_verbose_logs(
+                    self,
+                    steps=[
+                        f"Criteria:\n{self.criteria}",
+                        f"Evaluation Steps:\n{prettify_list(self.evaluation_steps)}",
+                        f"Rubric:\n{format_rubrics(self.rubric)}",
+                        f"Score: {self.score}",
+                        f"Reason: {self.reason}",
+                    ],
+                )
+
+            return self.score
+
+    async def a_measure(
+        self,
+        test_case: LLMTestCase,
+        _show_indicator: bool = True,
+        _in_component: bool = False,
+        _additional_context: Optional[str] = None,
+    ) -> float:
+        multimodal = test_case.multimodal
+        self._validate(test_case, multimodal)
+
+        self.evaluation_cost = 0 if self.using_native_model else None
+        self.input_tokens = 0 if self.using_native_model else None
+        self.output_tokens = 0 if self.using_native_model else None
+        with metric_progress_indicator(
+            self,
+            async_mode=True,
+            _show_indicator=_show_indicator,
+            _in_component=_in_component,
+        ):
+            self.evaluation_steps: List[str] = (
+                await self._a_generate_evaluation_steps(multimodal)
+            )
+            g_score, reason = await self._a_evaluate(
+                test_case,
+                _additional_context=_additional_context,
+                multimodal=multimodal,
+            )
+            self.score = (
+                (float(g_score) - self.score_range[0]) / self.score_range_span
+                if not self.strict_mode
+                else int(g_score)
+            )
+            self.success = self.is_successful()
+
+            self.reason = reason
+            self.verbose_logs = construct_verbose_logs(
+                self,
+                steps=[
+                    f"Criteria:\n{self.criteria}",
+                    f"Evaluation Steps:\n{prettify_list(self.evaluation_steps)}",
+                    f"Rubric:\n{format_rubrics(self.rubric)}",
+                    (f"Score: {self.score}"),
+                    f"Reason: {self.reason}",
+                ],
+            )
+            return self.score
+
+    @property
+    def requires_trace(self) -> bool:
+        return not self.evaluation_params
+
+    def _validate(self, test_case: LLMTestCase, multimodal: bool) -> None:
+        if not self.requires_trace:
+            ensure_required_params(
+                self.evaluation_params, self.criteria, self.evaluation_steps
+            )
+            check_llm_test_case_params(
+                test_case,
+                self.evaluation_params,
+                None,
+                None,
+                self,
+                self.model,
+                multimodal,
+            )
+            return
+
+        validate_criteria_and_evaluation_steps(
+            self.criteria, self.evaluation_steps
+        )
+        if not isinstance(test_case, LLMTestCase):
+            check_llm_test_case_params(
+                test_case, [], None, None, self, self.model, multimodal
+            )
+        if not isinstance(test_case._trace_dict, Dict):
+            error_str = (
+                f"The '{self.__name__}' metric has no evaluation_params, so it "
+                "evaluates the trace, but this test case has none. Run it on a "
+                "traced component (`@observe` or `evals_iterator`), or pass "
+                "evaluation_params to evaluate a plain LLMTestCase."
+            )
+            self.error = error_str
+            raise MissingTestCaseParamsError(error_str)
+
+    def _steps_prompt(self, multimodal: bool) -> str:
+        if self.requires_trace:
+            return self._get_prompt(
+                "generate_trace_evaluation_steps",
+                criteria=self.criteria,
+                multimodal=multimodal,
+            )
+        return self._get_prompt(
+            "generate_evaluation_steps",
+            criteria=self.criteria,
+            parameters=construct_g_eval_params_string(self.evaluation_params),
+            multimodal=multimodal,
+        )
+
+    def _results_prompt(
+        self,
+        test_case: LLMTestCase,
+        multimodal: bool,
+        _additional_context: Optional[str],
+    ) -> str:
+        evaluation_steps = number_evaluation_steps(self.evaluation_steps)
+        rubric_str = format_rubrics(self.rubric) if self.rubric else None
+
+        if self.requires_trace:
+            trace_json = serialize_to_json(test_case._trace_dict, indent=2)
+            if self.strict_mode:
+                return self._get_prompt(
+                    "generate_strict_trace_evaluation_results",
+                    evaluation_steps=evaluation_steps,
+                    trace_json=trace_json,
+                    _additional_context=_additional_context,
+                    multimodal=multimodal,
+                )
+            return self._get_prompt(
+                "generate_trace_evaluation_results",
+                evaluation_steps=evaluation_steps,
+                trace_json=trace_json,
+                rubric=rubric_str,
+                score_range=self.score_range,
+                _additional_context=_additional_context,
+                multimodal=multimodal,
+            )
+
+        test_case_content = construct_test_case_string(
+            self.evaluation_params, test_case
+        )
+        g_eval_params_str = construct_g_eval_params_string(
+            self.evaluation_params
+        )
+        if self.strict_mode:
+            return self._get_prompt(
+                "generate_strict_evaluation_results",
+                evaluation_steps=evaluation_steps,
+                test_case_content=test_case_content,
+                parameters=g_eval_params_str,
+                _additional_context=_additional_context,
+                multimodal=multimodal,
+            )
+        return self._get_prompt(
+            "generate_evaluation_results",
+            evaluation_steps=evaluation_steps,
+            test_case_content=test_case_content,
+            parameters=g_eval_params_str,
+            rubric=rubric_str,
+            score_range=self.score_range,
+            _additional_context=_additional_context,
+            multimodal=multimodal,
+        )
+
+    async def _a_generate_evaluation_steps(self, multimodal: bool) -> List[str]:
+        if self.evaluation_steps:
+            return self.evaluation_steps
+
+        return await a_generate_with_schema_and_extract(
+            metric=self,
+            prompt=self._steps_prompt(multimodal),
+            schema_cls=gschema.Steps,
+            extract_schema=lambda s: s.steps,
+            extract_json=lambda d: d["steps"],
+        )
+
+    def _generate_evaluation_steps(self, multimodal: bool) -> List[str]:
+        if self.evaluation_steps:
+            return self.evaluation_steps
+
+        return generate_with_schema_and_extract(
+            metric=self,
+            prompt=self._steps_prompt(multimodal),
+            schema_cls=gschema.Steps,
+            extract_schema=lambda s: s.steps,
+            extract_json=lambda d: d["steps"],
+        )
+
+    async def _a_evaluate(
+        self,
+        test_case: LLMTestCase,
+        multimodal: bool,
+        _additional_context: Optional[str] = None,
+    ) -> Tuple[Union[int, float], str]:
+        prompt = self._results_prompt(
+            test_case, multimodal, _additional_context
+        )
+        return await a_generate_rubric_score(
+            metric=self,
+            prompt=prompt,
+            schema_cls=gschema.ReasonScore,
+            strict_mode=self.strict_mode,
+            top_logprobs=self.top_logprobs,
+            weighted_score_fn=partial(
+                calculate_weighted_summed_score,
+                score_max=self.score_range[1],
+            ),
+        )
+
+    def _evaluate(
+        self,
+        test_case: LLMTestCase,
+        multimodal: bool,
+        _additional_context: Optional[str] = None,
+    ) -> Tuple[Union[int, float], str]:
+        prompt = self._results_prompt(
+            test_case, multimodal, _additional_context
+        )
+        return generate_rubric_score(
+            metric=self,
+            prompt=prompt,
+            schema_cls=gschema.ReasonScore,
+            strict_mode=self.strict_mode,
+            top_logprobs=self.top_logprobs,
+            weighted_score_fn=partial(
+                calculate_weighted_summed_score,
+                score_max=self.score_range[1],
+            ),
+        )
+
+    def upload(self):
+        if self.requires_trace:
+            raise ValueError(
+                "GEval without evaluation_params evaluates the trace and cannot "
+                "be uploaded yet. Provide evaluation_params to upload."
+            )
+        ensure_required_params(
+            self.evaluation_params,
+            self.criteria,
+            self.evaluation_steps,
+            operation="upload",
+        )
+        api = Api()
+
+        payload = construct_geval_upload_payload(
+            name=self.name,
+            evaluation_params=self.evaluation_params,
+            g_eval_api_params=G_EVAL_API_PARAMS,
+            criteria=self.criteria,
+            evaluation_steps=self.evaluation_steps,
+            multi_turn=False,
+            rubric=self.rubric,
+        )
+
+        data, _ = api.send_request(
+            method=HttpMethods.POST,
+            endpoint=Endpoints.METRICS_ENDPOINT,
+            body=payload,
+        )
+
+        metric_id = data.get("id")
+        self.metric_id = metric_id
+        console = Console()
+
+        if metric_id:
+            console.print(
+                "[rgb(5,245,141)]✓[/rgb(5,245,141)] Metric uploaded successfully "
+                f"(id: [bold]{metric_id}[/bold])"
+            )
+
+        return data
+
+    def pull(self):
+        api = Api()
+        data, _ = api.send_request(
+            method=HttpMethods.GET,
+            endpoint=Endpoints.METRIC_ENDPOINT,
+            url_params={"name": self.name},
+        )
+
+        data = MetricPullResponse.model_validate(data)
+
+        self.criteria = data.criteria
+        self.evaluation_steps = data.evaluationSteps
+
+        self.evaluation_params = construct_geval_pull_evaluation_params(
+            data.requiredParameters, multi_turn=False
+        )
+
+        self.rubric = validate_and_sort_rubrics(
+            [
+                Rubric(
+                    score_range=r.scoreRange,
+                    expected_outcome=r.expectedOutcome,
+                )
+                for r in data.rubric
+            ]
+            if data.rubric
+            else None
+        )
+
+        self.score_range = get_score_range(self.rubric)
+        self.score_range_span = self.score_range[1] - self.score_range[0]
+
+        ensure_required_params(
+            self.evaluation_params, self.criteria, self.evaluation_steps
+        )
+
+        metric_id = data.id
+        self.metric_id = metric_id
+        console = Console()
+        if metric_id:
+            console.print(
+                f"[rgb(5,245,141)]✓[/rgb(5,245,141)] Metric '{self.name}' [GEval] pulled successfully"
+            )
+
+        return data
+
+    @property
+    def __name__(self):
+        if self._include_g_eval_suffix:
+            return f"{self.name} [GEval]"
+        else:
+            return self.name

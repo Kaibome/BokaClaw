@@ -6,7 +6,15 @@ ARG PIP_INDEX_URL=https://pypi.org/simple
 
 COPY server/eval-requirements.txt .
 
-RUN pip install --no-cache-dir --retries 10 --timeout 120 --index-url "${PIP_INDEX_URL}" -r eval-requirements.txt
+# deepeval is built from the in-repo source, so the eval image runs the same
+# code the repository tracks. The source is removed in the same layer.
+COPY deepeval/ /tmp/deepeval-src/
+
+RUN pip install --no-cache-dir --retries 10 --timeout 120 --index-url "${PIP_INDEX_URL}" \
+        -r eval-requirements.txt \
+    && pip install --no-cache-dir --retries 10 --timeout 120 --index-url "${PIP_INDEX_URL}" \
+        /tmp/deepeval-src \
+    && rm -rf /tmp/deepeval-src
 
 COPY server/ .
 

@@ -116,12 +116,13 @@ attributes 标 `usage_estimated: true`；有原始值时优先原始值。
 
 ## 5. 回放与 deepeval 适配
 
-评测代码放在 `tests/agent_eval/`。`evaluation/` 是 benchmark submodule，`deepeval/` 是
-本地参考源码，二者都不作为运行时依赖。
+评测代码放在 `tests/agent_eval/`。`evaluation/` 是 benchmark submodule，不作为运行时依赖；
+`deepeval/` 是仓库内源码，评测环境从它构建安装，不走 PyPI。
 
-- 依赖：deepeval **pin 4.3.3**，放在根 `pyproject.toml` 的 optional group，不进入 core
-  `dependencies`。deepeval 4.3.3 要求 pydantic ≥ 2.11，而 server 锁 2.10.4，**必须在独立
-  venv/容器里跑评测**，不要与 server 依赖装在同一环境。
+- 依赖：deepeval 源码在 `./deepeval`（版本 4.3.3），由根 `pyproject.toml` 的
+  `[tool.hatch.envs.eval]` 以 path 依赖安装，不进入 core `dependencies`，也不从 PyPI 拉取。
+  deepeval 要求 pydantic ≥ 2.11，而 server 锁 2.10.4，**必须在独立 venv/容器里跑评测**
+  （`hatch run eval:test`），不要与 server 依赖装在同一环境。
 - `spans_from_db(run_id)`：读取 span 行，按 `parent_span_id` 还原树。
 - `to_llm_test_case(run, golden=None)`：构造公开的 `LLMTestCase`：
   `input`=用户消息、`actual_output`=最终回答、`tools_called`=工具 span、

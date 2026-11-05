@@ -1,0 +1,598 @@
+from typing import List, Optional, Union, Tuple, Type
+import asyncio
+import itertools
+from deepeval.test_case import ConversationalTestCase, MultiTurnParams, Turn
+from deepeval.metrics import BaseConversationalMetric
+from deepeval.utils import (
+    get_or_create_event_loop,
+    prettify_list,
+)
+from deepeval.metrics.base_metric import Verdict, YES_NO_BORDERLINE
+from deepeval.metrics.utils import (
+    prepare_measure,
+    generate_qag_verdicts,
+    a_generate_qag_verdicts,
+    SystemOneEvalSpec,
+    SystemOneVerdictSpec,
+    initialize_system_one_model,
+    parse_questions,
+    run_system_one_eval,
+    a_run_system_one_eval,
+    score_qag_verdicts,
+    construct_verbose_logs,
+    get_unit_interactions,
+    get_turns_in_sliding_window,
+    initialize_model,
+    generate_with_schema_and_extract,
+    a_generate_with_schema_and_extract,
+)
+from deepeval.config.eval_mode import EvalModeName, resolve_eval_mode
+from deepeval.models import DeepEvalBaseLLM, DeepEvalBaseSystemOneModel
+from deepeval.metrics.indicator import metric_progress_indicator
+from deepeval.metrics.turn_faithfulness.schema import (
+    FaithfulnessVerdict,
+    Verdicts,
+    FaithfulnessScoreReason,
+    Truths,
+    Claims,
+    InteractionFaithfulnessScore,
+)
+from deepeval.templates import make_template_class
+
+
+def _turn_faithfulness_limit_description(
+    extraction_limit: Optional[int],
+) -> str:
+    if extraction_limit is None:
+        return "factual, explicit truths"
+    if extraction_limit == 1:
+        return "one factual, explicit truth"
+    return f"{extraction_limit} factual, explicit truths"
+
+
+TurnFaithfulnessTemplate = make_template_class("TurnFaithfulnessMetric")
+
+
+class TurnFaithfulnessMetric(BaseConversationalMetric):
+    _required_test_case_params: List[MultiTurnParams] = [
+        MultiTurnParams.ROLE,
+        MultiTurnParams.CONTENT,
+        MultiTurnParams.RETRIEVAL_CONTEXT,
+    ]
+
+    def __init__(
+        self,
+        threshold: Optional[float] = 0.5,
+        model: Optional[Union[str, DeepEvalBaseLLM]] = None,
+        system_one_model: Optional[
+            Union[str, DeepEvalBaseSystemOneModel]
+        ] = None,
+        eval_mode: Optional[EvalModeName] = None,
+        include_reason: bool = True,
+        async_mode: bool = True,
+        strict_mode: bool = False,
+        verbose_mode: bool = False,
+        truths_extraction_limit: Optional[int] = None,
+        penalize_ambiguous_claims: bool = False,
+        window_size: int = 10,
+        flaky: bool = False,
+        evaluation_template: Type[
+            TurnFaithfulnessTemplate
+        ] = TurnFaithfulnessTemplate,
+    ):
+        self.threshold = 1 if strict_mode else threshold
+        self.eval_mode = resolve_eval_mode(eval_mode)
+        self.model, self.using_native_model = initialize_model(
+            model, self.eval_mode
+        )
+        self.system_one_model = initialize_system_one_model(
+            system_one_model, self.eval_mode
+        )
+        self.evaluation_model = (
+            self.model or self.system_one_model
+        ).get_model_name()
+        self.include_reason = include_reason
+        self.async_mode = async_mode
+        self.strict_mode = strict_mode
+        self.verbose_mode = verbose_mode
+        self.flaky = flaky
+        self.penalize_ambiguous_claims = penalize_ambiguous_claims
+        self.window_size = window_size
+
+        self.truths_extraction_limit = truths_extraction_limit
+        if self.truths_extraction_limit is not None:
+            self.truths_extraction_limit = max(self.truths_extraction_limit, 0)
+        self.evaluation_template = evaluation_template
+
+    def measure(
+        self,
+        test_case: ConversationalTestCase,
+        _show_indicator: bool = True,
+        _in_component: bool = False,
+    ):
+        prepare_measure(self, test_case)
+        multimodal = test_case.multimodal
+        with metric_progress_indicator(
+            self, _show_indicator=_show_indicator, _in_component=_in_component
+        ):
+            if self.async_mode:
+                loop = get_or_create_event_loop()
+                loop.run_until_complete(
+                    self.a_measure(
+                        test_case,
+                        _show_indicator=False,
+                        _in_component=_in_component,
+                    )
+                )
+            else:
+                if run_system_one_eval(self, test_case):
+                    return self.score
+
+                unit_interactions = get_unit_interactions(test_case.turns)
+                turns_windows: List[List[Turn]] = [
+                    list(itertools.chain(*window))
+                    for window in get_turns_in_sliding_window(
+                        unit_interactions, self.window_size
+                    )
+                ]
+                scores = []
+                for window in turns_windows:
+                    scores.extend(
+                        self._get_faithfulness_scores(window, multimodal)
+                    )
+                self.score = self._calculate_score(scores)
+                self.success = self.is_successful()
+                self.reason = self._generate_reason(scores)
+                verbose_steps = self._get_verbose_steps(scores)
+                self.verbose_logs = construct_verbose_logs(
+                    self,
+                    steps=[
+                        *verbose_steps,
+                        f"Final Score: {self.score}\n",
+                        f"Final Reason: {self.reason}\n",
+                    ],
+                )
+
+            return self.score
+
+    async def a_measure(
+        self,
+        test_case: ConversationalTestCase,
+        _show_indicator: bool = True,
+        _in_component: bool = False,
+    ) -> float:
+        prepare_measure(self, test_case)
+        multimodal = test_case.multimodal
+        with metric_progress_indicator(
+            self,
+            async_mode=True,
+            _show_indicator=_show_indicator,
+            _in_component=_in_component,
+        ):
+            if await a_run_system_one_eval(self, test_case):
+                return self.score
+
+            unit_interactions = get_unit_interactions(test_case.turns)
+            turns_windows: List[List[Turn]] = [
+                list(itertools.chain(*window))
+                for window in get_turns_in_sliding_window(
+                    unit_interactions, self.window_size
+                )
+            ]
+            scores = []
+            tasks = []
+
+            async def get_individual_scores(window):
+                scores.extend(
+                    await self._a_get_faithfulness_scores(window, multimodal)
+                )
+
+            for window in turns_windows:
+                tasks.append(get_individual_scores(window))
+            await asyncio.gather(*tasks)
+            self.score = self._calculate_score(scores)
+            self.success = self.is_successful()
+            self.reason = await self._a_generate_reason(scores)
+            verbose_steps = self._get_verbose_steps(scores)
+            self.verbose_logs = construct_verbose_logs(
+                self,
+                steps=[
+                    *verbose_steps,
+                    f"Final Score: {self.score}\n",
+                    f"Final Reason: {self.reason}\n",
+                ],
+            )
+
+            return self.score
+
+    async def _a_get_faithfulness_scores(
+        self, turns_window: List[Turn], multimodal: bool
+    ):
+
+        windows_scores = []
+
+        user_content = ""
+        assistant_content = ""
+        retrieval_context = []
+        for turn in turns_window:
+            if turn.role == "user":
+                user_content += f"\n{turn.content} "
+            else:
+                assistant_content += f"\n{turn.content}"
+                if turn.retrieval_context is not None:
+                    retrieval_context.extend(turn.retrieval_context)
+
+        truths = await self._a_generate_truths(retrieval_context, multimodal)
+        claims = await self._a_generate_claims(
+            user_content, assistant_content, multimodal
+        )
+        verdicts = await self._a_generate_verdicts(claims, truths, multimodal)
+        score, reason = self._get_interaction_score_and_reason(
+            verdicts, multimodal
+        )
+        interaction_score = InteractionFaithfulnessScore(
+            score=score,
+            reason=reason,
+            claims=claims,
+            truths=truths,
+            verdicts=verdicts,
+        )
+        windows_scores.append(interaction_score)
+
+        return windows_scores
+
+    def _get_faithfulness_scores(
+        self, turns_window: List[Turn], multimodal: bool
+    ):
+        windows_scores = []
+
+        user_content = ""
+        assistant_content = ""
+        retrieval_context = []
+        for turn in turns_window:
+            if turn.role == "user":
+                user_content += f"\n{turn.content} "
+            else:
+                assistant_content += f"\n{turn.content}"
+                if turn.retrieval_context is not None:
+                    retrieval_context.extend(turn.retrieval_context)
+
+        truths = self._generate_truths(retrieval_context, multimodal)
+        claims = self._generate_claims(
+            user_content, assistant_content, multimodal
+        )
+        verdicts = self._generate_verdicts(claims, truths, multimodal)
+        score, reason = self._get_interaction_score_and_reason(
+            verdicts, multimodal
+        )
+        interaction_score = InteractionFaithfulnessScore(
+            score=score,
+            reason=reason,
+            claims=claims,
+            truths=truths,
+            verdicts=verdicts,
+        )
+        windows_scores.append(interaction_score)
+
+        return windows_scores
+
+    async def _a_generate_truths(
+        self, retrieval_context: str, multimodal: bool
+    ) -> List[str]:
+        prompt = self._get_prompt(
+            "generate_truths",
+            reference_context="\n\n".join(retrieval_context),
+            limit_description=_turn_faithfulness_limit_description(
+                self.truths_extraction_limit
+            ),
+            multimodal=multimodal,
+        )
+
+        return await a_generate_with_schema_and_extract(
+            metric=self,
+            prompt=prompt,
+            schema_cls=Truths,
+            extract_schema=lambda s: s.truths,
+            extract_json=lambda data: data["truths"],
+        )
+
+    def _generate_truths(
+        self, retrieval_context: str, multimodal: bool
+    ) -> List[str]:
+        prompt = self._get_prompt(
+            "generate_truths",
+            reference_context="\n\n".join(retrieval_context),
+            limit_description=_turn_faithfulness_limit_description(
+                self.truths_extraction_limit
+            ),
+            multimodal=multimodal,
+        )
+
+        return generate_with_schema_and_extract(
+            metric=self,
+            prompt=prompt,
+            schema_cls=Truths,
+            extract_schema=lambda s: s.truths,
+            extract_json=lambda data: data["truths"],
+        )
+
+    async def _a_generate_claims(
+        self, user_content: str, assistant_content: str, multimodal: bool
+    ) -> List[str]:
+        prompt = self._get_prompt(
+            "generate_claims",
+            input=user_content,
+            assistant_output=assistant_content,
+            multimodal=multimodal,
+        )
+
+        return await a_generate_with_schema_and_extract(
+            metric=self,
+            prompt=prompt,
+            schema_cls=Claims,
+            extract_schema=lambda s: s.claims,
+            extract_json=lambda data: data["claims"],
+        )
+
+    def _generate_claims(
+        self, user_content: str, assistant_content: str, multimodal: bool
+    ) -> List[str]:
+        prompt = self._get_prompt(
+            "generate_claims",
+            input=user_content,
+            assistant_output=assistant_content,
+            multimodal=multimodal,
+        )
+
+        return generate_with_schema_and_extract(
+            metric=self,
+            prompt=prompt,
+            schema_cls=Claims,
+            extract_schema=lambda s: s.claims,
+            extract_json=lambda data: data["claims"],
+        )
+
+    async def _a_generate_verdicts(
+        self, claims: Claims, truths: Truths, multimodal: bool
+    ) -> List[FaithfulnessVerdict]:
+        if len(claims) == 0:
+            return []
+
+        verdicts: List[FaithfulnessVerdict] = []
+
+        prompt = self._get_prompt(
+            "generate_verdicts",
+            claims=claims,
+            reference_context="\n\n".join(truths),
+            multimodal=multimodal,
+        )
+
+        return await a_generate_qag_verdicts(
+            metric=self,
+            prompt=prompt,
+            verdict_cls=FaithfulnessVerdict,
+            verdicts_cls=Verdicts,
+            allowed=YES_NO_BORDERLINE,
+            system_one=self._experimental_system_one_spec(claims, truths),
+        )
+
+    def _generate_verdicts(
+        self, claims: Claims, truths: Truths, multimodal: bool
+    ) -> List[FaithfulnessVerdict]:
+        if len(claims) == 0:
+            return []
+
+        verdicts: List[FaithfulnessVerdict] = []
+
+        prompt = self._get_prompt(
+            "generate_verdicts",
+            claims=claims,
+            reference_context="\n\n".join(truths),
+            multimodal=multimodal,
+        )
+
+        return generate_qag_verdicts(
+            metric=self,
+            prompt=prompt,
+            verdict_cls=FaithfulnessVerdict,
+            verdicts_cls=Verdicts,
+            allowed=YES_NO_BORDERLINE,
+            system_one=self._experimental_system_one_spec(claims, truths),
+        )
+
+    def _experimental_system_one_spec(
+        self, claims: Claims, truths: Truths
+    ) -> SystemOneVerdictSpec:
+        return SystemOneVerdictSpec(
+            instructions=self._get_prompt("_experimental_system_one_verdict"),
+            items=list(claims),
+            item_key="claim",
+            state={"reference_context": list(truths)},
+        )
+
+    def _system_one_eval_spec(
+        self, test_case: ConversationalTestCase
+    ) -> Optional[SystemOneEvalSpec]:
+        """`system_one` eval mode: the whole conversation as one Jev request,
+        each turn carrying its `role`, `content` and `retrieval_context`;
+        see EXPERIMENTAL.md."""
+        if test_case.multimodal:
+            return None
+        return SystemOneEvalSpec(
+            evaluation_params=self._required_test_case_params,
+            questions=parse_questions(
+                self._get_prompt("_experimental_system_one_questions")
+            ),
+        )
+
+    def _passing_verdicts(self) -> Tuple[str, ...]:
+        if self.penalize_ambiguous_claims:
+            return (Verdict.YES,)
+        return (Verdict.YES, Verdict.BORDERLINE)
+
+    def _get_interaction_score_and_reason(
+        self, verdicts, multimodal: bool
+    ) -> Tuple[float, str]:
+        number_of_verdicts = len(verdicts)
+        if number_of_verdicts == 0:
+            reason = "<no claims to verify>" if self.include_reason else None
+            return 1.0, reason
+
+        score = score_qag_verdicts(
+            self, verdicts, passing=self._passing_verdicts()
+        )
+        reason = self._get_interaction_reason(score, verdicts, multimodal)
+        return score, reason
+
+    async def _a_get_interaction_score_and_reason(
+        self, verdicts, multimodal: bool
+    ) -> Tuple[float, str]:
+        number_of_verdicts = len(verdicts)
+        if number_of_verdicts == 0:
+            reason = "<no claims to verify>" if self.include_reason else None
+            return 1.0, reason
+
+        score = score_qag_verdicts(
+            self, verdicts, passing=self._passing_verdicts()
+        )
+        reason = await self._a_get_interaction_reason(
+            score, verdicts, multimodal
+        )
+        return score, reason
+
+    async def _a_get_interaction_reason(
+        self, score, verdicts, multimodal: bool
+    ) -> str:
+        if self.include_reason is False:
+            return None
+
+        contradictions = []
+        for verdict in verdicts:
+            if verdict.verdict == Verdict.NO:
+                contradictions.append(verdict.reason)
+
+        prompt = self._get_prompt(
+            "generate_reason",
+            contradictions=contradictions,
+            score=format(score, ".2f"),
+            multimodal=multimodal,
+        )
+
+        return await a_generate_with_schema_and_extract(
+            metric=self,
+            prompt=prompt,
+            schema_cls=FaithfulnessScoreReason,
+            extract_schema=lambda s: s.reason,
+            extract_json=lambda data: data["reason"],
+        )
+
+    def _get_interaction_reason(self, score, verdicts, multimodal: bool) -> str:
+        if self.include_reason is False:
+            return None
+
+        contradictions = []
+        for verdict in verdicts:
+            if verdict.verdict == Verdict.NO:
+                contradictions.append(verdict.reason)
+
+        prompt = self._get_prompt(
+            "generate_reason",
+            contradictions=contradictions,
+            score=format(score, ".2f"),
+            multimodal=multimodal,
+        )
+
+        return generate_with_schema_and_extract(
+            metric=self,
+            prompt=prompt,
+            schema_cls=FaithfulnessScoreReason,
+            extract_schema=lambda s: s.reason,
+            extract_json=lambda data: data["reason"],
+        )
+
+    def _get_verbose_steps(
+        self, interaction_scores: List[InteractionFaithfulnessScore]
+    ):
+        steps = []
+        for index, interaction_score in enumerate(interaction_scores):
+            interaction_steps = [
+                f"Window {index + 1} \n",
+                f"Truths: {prettify_list(interaction_score.truths)} \n",
+                f"Claims: {prettify_list(interaction_score.claims)} \n",
+                f"Verdicts: {prettify_list(interaction_score.verdicts)} \n",
+                f"Score: {interaction_score.score} \n",
+                f"Reason: {interaction_score.reason} \n",
+            ]
+            steps.extend(interaction_steps)
+        return steps
+
+    def _generate_reason(
+        self, scores: List[InteractionFaithfulnessScore]
+    ) -> str:
+        if self.include_reason is False:
+            return None
+
+        if len(scores) == 0:
+            return "There were no retrieval contexts in your turns to evaluate, hence the score is 1"
+
+        reasons = []
+        for score in scores:
+            reasons.append(score.reason)
+
+        prompt = self._get_prompt(
+            "generate_final_reason",
+            final_score=self.score,
+            success=self.success,
+            reasons=reasons,
+        )
+
+        return generate_with_schema_and_extract(
+            metric=self,
+            prompt=prompt,
+            schema_cls=FaithfulnessScoreReason,
+            extract_schema=lambda s: s.reason,
+            extract_json=lambda data: data["reason"],
+        )
+
+    async def _a_generate_reason(
+        self, scores: List[InteractionFaithfulnessScore]
+    ) -> str:
+        if self.include_reason is False:
+            return None
+
+        if len(scores) == 0:
+            return "There were no retrieval contexts in your turns to evaluate, hence the score is 1"
+
+        reasons = []
+        for score in scores:
+            reasons.append(score.reason)
+
+        prompt = self._get_prompt(
+            "generate_final_reason",
+            final_score=self.score,
+            success=self.success,
+            reasons=reasons,
+        )
+
+        return await a_generate_with_schema_and_extract(
+            metric=self,
+            prompt=prompt,
+            schema_cls=FaithfulnessScoreReason,
+            extract_schema=lambda s: s.reason,
+            extract_json=lambda data: data["reason"],
+        )
+
+    def _calculate_score(
+        self, scores: List[InteractionFaithfulnessScore]
+    ) -> float:
+        number_of_scores = len(scores)
+        if number_of_scores == 0:
+            return 1
+        total_score = 0
+        for score in scores:
+            total_score += score.score
+        return total_score / number_of_scores
+
+    @property
+    def __name__(self):
+        return "Turn Faithfulness"

@@ -3,8 +3,9 @@
 Example:
     python tests/agent_eval/run.py --run-id <uuid> --goldens tests/agent_eval/goldens.example.json
 
-Run this from an environment where deepeval 4.3.3 is installed (see the ``eval``
-extra), not the server environment: deepeval requires a newer pydantic than the
+Run this from the evaluation environment (``hatch run eval:test``, or any venv
+where ``pip install -e ./deepeval`` has been run), not the server environment:
+deepeval is built from the in-repo source and requires a newer pydantic than the
 server pins. Nothing is uploaded; results are printed to stdout.
 
 The implementation lives in ``server/app/eval/cli.py`` so the worker image and

@@ -6,7 +6,10 @@ repos:
         entry: ruff check
         language: system
         types: [python]
-        args: [--fix] 
+        # --force-exclude keeps the vendored deepeval source (excluded in
+        # pyproject.toml) out of the run even though pre-commit passes the
+        # staged file paths explicitly.
+        args: [--fix, --force-exclude]
 
       - id: isort
         name: isort

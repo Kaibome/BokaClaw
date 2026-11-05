@@ -195,8 +195,8 @@ notebooks/*.yaml
 # ...but keep the design docs under docs/eval tracked.
 !docs/eval/
 !docs/eval/**
-# Local deepeval source checkout and runtime cache; never vendored.
-/deepeval/
+# deepeval source is part of this repository (see ./deepeval), not a nested
+# project. Only its runtime cache stays untracked.
 .deepeval/
 qdrant_storage/
 .crossnote

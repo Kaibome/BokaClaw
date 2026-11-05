@@ -1,0 +1,507 @@
+import asyncio
+from typing import Any, Dict, Optional, Union, List
+
+from deepeval.metrics import BaseConversationalMetric
+from deepeval.models import DeepEvalBaseLLM, DeepEvalBaseSystemOneModel
+from deepeval.metrics.utils import (
+    prepare_measure,
+    construct_verbose_logs,
+    get_unit_interactions,
+    initialize_model,
+    initialize_system_one_model,
+    a_generate_with_schema_and_extract,
+    generate_with_schema_and_extract,
+    SystemOneEvalSpec,
+    SystemOneScoreSpec,
+    format_decision_reason,
+    parse_questions,
+    run_system_one_eval,
+    a_run_system_one_eval,
+    system_one_score,
+    a_system_one_score,
+)
+from deepeval.config.eval_mode import EvalModeName, resolve_eval_mode
+from deepeval.metrics.indicator import metric_progress_indicator
+from deepeval.test_case import ConversationalTestCase, MultiTurnParams
+from deepeval.utils import get_or_create_event_loop, prettify_list
+from deepeval.metrics.mcp.utils import (
+    available_mcp_servers_block,
+    mcp_servers_state,
+    task_steps_taken_text,
+    turn_mcp_interaction_text,
+)
+from deepeval.metrics.mcp.schema import Task, ArgsScore, ToolScore, Reason
+
+_MCP_TASK_COMPLETION_TEMPLATES = "MCPTaskCompletionMetric"
+
+PRIMITIVE_USAGE_LEVELS = [
+    "Wrong primitives",
+    "Poor choice",
+    "Reasonable choice",
+    "Best choice",
+]
+ARGUMENT_CORRECTNESS_LEVELS = [
+    "Incorrect",
+    "Mostly incorrect",
+    "Mostly correct",
+    "Fully correct",
+]
+
+
+class MultiTurnMCPUseMetric(BaseConversationalMetric):
+    _required_test_case_params = [
+        MultiTurnParams.ROLE,
+        MultiTurnParams.CONTENT,
+    ]
+    _requires_mcp_servers = True
+
+    def __init__(
+        self,
+        threshold: Optional[float] = 0.5,
+        model: Optional[Union[str, DeepEvalBaseLLM]] = None,
+        system_one_model: Optional[
+            Union[str, DeepEvalBaseSystemOneModel]
+        ] = None,
+        eval_mode: Optional[EvalModeName] = None,
+        include_reason: bool = True,
+        async_mode: bool = True,
+        strict_mode: bool = False,
+        verbose_mode: bool = False,
+        flaky: bool = False,
+    ):
+        self.threshold = 1 if strict_mode else threshold
+        self.eval_mode = resolve_eval_mode(eval_mode)
+        self.model, self.using_native_model = initialize_model(
+            model, self.eval_mode
+        )
+        self.system_one_model = initialize_system_one_model(
+            system_one_model, self.eval_mode
+        )
+        self.evaluation_model = (
+            self.model or self.system_one_model
+        ).get_model_name()
+        self.include_reason = include_reason
+        self.async_mode = async_mode
+        self.strict_mode = strict_mode
+        self.verbose_mode = verbose_mode
+        self.flaky = flaky
+
+    def measure(
+        self,
+        test_case: ConversationalTestCase,
+        _show_indicator: bool = True,
+        _in_component: bool = False,
+    ):
+        prepare_measure(self, test_case)
+        with metric_progress_indicator(
+            self, _show_indicator=_show_indicator, _in_component=_in_component
+        ):
+            if self.async_mode:
+                loop = get_or_create_event_loop()
+                loop.run_until_complete(
+                    self.a_measure(
+                        test_case,
+                        _show_indicator=False,
+                        _in_component=_in_component,
+                    )
+                )
+            else:
+                if run_system_one_eval(self, test_case):
+                    return self.score
+
+                self.unit_interactions = get_unit_interactions(test_case.turns)
+                self.tasks = self._get_tasks(self.unit_interactions)
+                primitives_accuracy_scores = [
+                    self._get_tool_accuracy_score(task, test_case)
+                    for task in self.tasks
+                ]
+                args_accuracy_scores = [
+                    self._get_args_score(task, test_case) for task in self.tasks
+                ]
+                self.score = self._calculate_score(
+                    primitives_accuracy_scores, args_accuracy_scores
+                )
+                self.reason = self._generate_reason(
+                    primitives_accuracy_scores, args_accuracy_scores
+                )
+                self.tools_scores_reasons_list = [
+                    (tool_score.score, tool_score.reason)
+                    for tool_score in primitives_accuracy_scores
+                ]
+                self.args_scores_reasons_list = [
+                    (args_score.score, args_score.reason)
+                    for args_score in args_accuracy_scores
+                ]
+                self.success = self.is_successful()
+                self.verbose_logs = construct_verbose_logs(
+                    self,
+                    steps=[
+                        f"Tasks:\n{prettify_list(self.tasks)}",
+                        f"Individual Scores & Reasons for Primitives:\n{prettify_list(self.tools_scores_reasons_list)}",
+                        f"Individual Scores & Reasons for Arguments:\n{prettify_list(self.args_scores_reasons_list)}",
+                        f"Score: {self.score}",
+                    ],
+                )
+
+            return self.score
+
+    async def a_measure(
+        self,
+        test_case: ConversationalTestCase,
+        _show_indicator: bool = True,
+        _in_component: bool = False,
+    ):
+        prepare_measure(self, test_case)
+        with metric_progress_indicator(
+            self,
+            async_mode=True,
+            _show_indicator=_show_indicator,
+            _in_component=_in_component,
+        ):
+            if await a_run_system_one_eval(self, test_case):
+                return self.score
+
+            self.unit_interactions = get_unit_interactions(test_case.turns)
+            self.tasks = self._get_tasks(self.unit_interactions)
+            primitives_accuracy_scores = await asyncio.gather(
+                *[
+                    self._a_get_tool_accuracy_score(task, test_case)
+                    for task in self.tasks
+                ]
+            )
+            args_accuracy_scores = await asyncio.gather(
+                *[
+                    self._a_get_args_score(task, test_case)
+                    for task in self.tasks
+                ]
+            )
+            self.score = self._calculate_score(
+                primitives_accuracy_scores, args_accuracy_scores
+            )
+            self.reason = self._generate_reason(
+                primitives_accuracy_scores, args_accuracy_scores
+            )
+            self.tools_scores_reasons_list = [
+                (tool_score.score, tool_score.reason)
+                for tool_score in primitives_accuracy_scores
+            ]
+            self.args_scores_reasons_list = [
+                (args_score.score, args_score.reason)
+                for args_score in args_accuracy_scores
+            ]
+            self.success = self.is_successful()
+            self.verbose_logs = construct_verbose_logs(
+                self,
+                steps=[
+                    f"Tasks:\n{prettify_list(self.tasks)}",
+                    f"Individual Scores & Reasons for Primitives:\n{prettify_list(self.tools_scores_reasons_list)}",
+                    f"Individual Scores & Reasons for Arguments:\n{prettify_list(self.args_scores_reasons_list)}",
+                    f"Score: {self.score}",
+                ],
+            )
+        return self.score
+
+    def _get_tool_accuracy_score(
+        self, task: Task, test_case: ConversationalTestCase
+    ) -> ToolScore:
+        value = system_one_score(
+            self, self._system_one_primitives_spec(task, test_case)
+        )
+        if value is not None:
+            return ToolScore(
+                score=value,
+                reason=format_decision_reason(self, "primitive usage", value),
+            )
+        available_tools, _, _ = available_mcp_servers_block(
+            test_case.mcp_servers
+        )
+        prompt = self._get_prompt(
+            "get_tool_correctness_score",
+            template_class=_MCP_TASK_COMPLETION_TEMPLATES,
+            task=task,
+            available_tools=available_tools,
+            steps_taken=task_steps_taken_text(task),
+            multimodal=test_case.multimodal,
+        )
+        return generate_with_schema_and_extract(
+            metric=self,
+            prompt=prompt,
+            schema_cls=ToolScore,
+            extract_schema=lambda s: s,
+            extract_json=lambda data: ToolScore(**data),
+        )
+
+    async def _a_get_tool_accuracy_score(
+        self, task: Task, test_case: ConversationalTestCase
+    ) -> ToolScore:
+        value = await a_system_one_score(
+            self, self._system_one_primitives_spec(task, test_case)
+        )
+        if value is not None:
+            return ToolScore(
+                score=value,
+                reason=format_decision_reason(self, "primitive usage", value),
+            )
+        available_tools, _, _ = available_mcp_servers_block(
+            test_case.mcp_servers
+        )
+        prompt = self._get_prompt(
+            "get_tool_correctness_score",
+            template_class=_MCP_TASK_COMPLETION_TEMPLATES,
+            task=task,
+            available_tools=available_tools,
+            steps_taken=task_steps_taken_text(task),
+            multimodal=test_case.multimodal,
+        )
+        return await a_generate_with_schema_and_extract(
+            metric=self,
+            prompt=prompt,
+            schema_cls=ToolScore,
+            extract_schema=lambda s: s,
+            extract_json=lambda data: ToolScore(**data),
+        )
+
+    def _get_args_score(
+        self, task: Task, test_case: ConversationalTestCase
+    ) -> ArgsScore:
+        value = system_one_score(
+            self, self._system_one_args_spec(task, test_case)
+        )
+        if value is not None:
+            return ArgsScore(
+                score=value,
+                reason=format_decision_reason(
+                    self, "argument correctness", value
+                ),
+            )
+        (
+            available_tools,
+            available_resources,
+            available_prompts,
+        ) = available_mcp_servers_block(test_case.mcp_servers)
+        prompt = self._get_prompt(
+            "get_args_correctness_score",
+            template_class=_MCP_TASK_COMPLETION_TEMPLATES,
+            task=task,
+            available_tools=available_tools,
+            available_resources=available_resources,
+            available_prompts=available_prompts,
+            steps_taken=task_steps_taken_text(task),
+            multimodal=test_case.multimodal,
+        )
+        return generate_with_schema_and_extract(
+            metric=self,
+            prompt=prompt,
+            schema_cls=ArgsScore,
+            extract_schema=lambda s: s,
+            extract_json=lambda data: ArgsScore(**data),
+        )
+
+    async def _a_get_args_score(
+        self, task: Task, test_case: ConversationalTestCase
+    ) -> ArgsScore:
+        value = await a_system_one_score(
+            self, self._system_one_args_spec(task, test_case)
+        )
+        if value is not None:
+            return ArgsScore(
+                score=value,
+                reason=format_decision_reason(
+                    self, "argument correctness", value
+                ),
+            )
+        (
+            available_tools,
+            available_resources,
+            available_prompts,
+        ) = available_mcp_servers_block(test_case.mcp_servers)
+        prompt = self._get_prompt(
+            "get_args_correctness_score",
+            template_class=_MCP_TASK_COMPLETION_TEMPLATES,
+            task=task,
+            available_tools=available_tools,
+            available_resources=available_resources,
+            available_prompts=available_prompts,
+            steps_taken=task_steps_taken_text(task),
+            multimodal=test_case.multimodal,
+        )
+        return await a_generate_with_schema_and_extract(
+            metric=self,
+            prompt=prompt,
+            schema_cls=ArgsScore,
+            extract_schema=lambda s: s,
+            extract_json=lambda data: ArgsScore(**data),
+        )
+
+    def _system_one_task_state(
+        self, task: Task, test_case: ConversationalTestCase
+    ) -> Dict[str, Any]:
+        return {
+            "task": task.task,
+            "steps_taken": task.steps_taken,
+            "mcp_servers": mcp_servers_state(test_case.mcp_servers),
+        }
+
+    def _system_one_primitives_spec(
+        self, task: Task, test_case: ConversationalTestCase
+    ) -> Optional[SystemOneScoreSpec]:
+        if test_case.multimodal:
+            return None
+        return SystemOneScoreSpec(
+            instructions=self._get_prompt(
+                "_experimental_system_one_mcp_use_primitive_score",
+                template_class=_MCP_TASK_COMPLETION_TEMPLATES,
+            ),
+            levels=PRIMITIVE_USAGE_LEVELS,
+            state=self._system_one_task_state(task, test_case),
+        )
+
+    def _system_one_args_spec(
+        self, task: Task, test_case: ConversationalTestCase
+    ) -> Optional[SystemOneScoreSpec]:
+        if test_case.multimodal:
+            return None
+        return SystemOneScoreSpec(
+            instructions=self._get_prompt(
+                "_experimental_system_one_mcp_use_args_score",
+                template_class=_MCP_TASK_COMPLETION_TEMPLATES,
+            ),
+            levels=ARGUMENT_CORRECTNESS_LEVELS,
+            state=self._system_one_task_state(task, test_case),
+        )
+
+    def _system_one_eval_spec(
+        self, test_case: ConversationalTestCase
+    ) -> Optional[SystemOneEvalSpec]:
+        """`system_one` eval mode: the whole conversation as one Jev request,
+        each turn carrying its `role`, `content` and the MCP primitives it
+        called, alongside the `mcp_servers` available; see EXPERIMENTAL.md."""
+        if test_case.multimodal:
+            return None
+        return SystemOneEvalSpec(
+            evaluation_params=[
+                MultiTurnParams.ROLE,
+                MultiTurnParams.CONTENT,
+                MultiTurnParams.MCP_TOOLS,
+                MultiTurnParams.MCP_RESOURCES,
+                MultiTurnParams.MCP_PROMPTS,
+                MultiTurnParams.TOOLS_CALLED,
+            ],
+            questions=parse_questions(
+                self._get_prompt(
+                    "_experimental_system_one_mcp_use_questions",
+                    template_class=_MCP_TASK_COMPLETION_TEMPLATES,
+                )
+            ),
+            extra_state={
+                "mcp_servers": mcp_servers_state(test_case.mcp_servers)
+            },
+        )
+
+    def _get_tasks(self, unit_interactions: List) -> List[Task]:
+        tasks = []
+        for unit_interaction in unit_interactions:
+            if len(unit_interaction) <= 2:
+                continue
+            user_messages = ""
+            for turn in unit_interaction:
+                if turn.role == "user":
+                    user_messages += turn.content + "\n"
+                else:
+                    break
+            new_task = Task(task=user_messages, steps_taken=[])
+            for turn in unit_interaction[1:]:
+                if turn._mcp_interaction:
+                    new_task.steps_taken.append(turn_mcp_interaction_text(turn))
+                else:
+                    new_task.steps_taken.append(
+                        "Agent's response to user: \n" + turn.content
+                    )
+            tasks.append(new_task)
+        return tasks
+
+    def _calculate_score(
+        self,
+        tool_accuracy_score: List[ToolScore],
+        args_accuracy_score: List[ArgsScore],
+    ) -> float:
+        tool_divisor = (
+            len(tool_accuracy_score) if len(tool_accuracy_score) > 0 else 1
+        )
+        args_divisor = (
+            len(args_accuracy_score) if len(args_accuracy_score) > 0 else 1
+        )
+        tool_score = (
+            sum(score.score for score in tool_accuracy_score) / tool_divisor
+        )
+        args_score = (
+            sum(score.score for score in args_accuracy_score) / args_divisor
+        )
+        score = min(tool_score, args_score)
+        return 0 if self.strict_mode and score < self.threshold else score
+
+    def _generate_reason(
+        self,
+        tool_accuracy_score: List[ToolScore],
+        args_accuracy_score: List[ArgsScore],
+    ) -> Optional[str]:
+        if not self.include_reason:
+            return None
+
+        reasons = []
+        for task_score in tool_accuracy_score:
+            reasons.append(task_score.reason)
+
+        for arg_score in args_accuracy_score:
+            reasons.append(arg_score.reason)
+
+        prompt = self._get_prompt(
+            "generate_final_reason",
+            template_class=_MCP_TASK_COMPLETION_TEMPLATES,
+            final_score=self.score,
+            success=self.success,
+            reasons=reasons,
+        )
+
+        return generate_with_schema_and_extract(
+            metric=self,
+            prompt=prompt,
+            schema_cls=Reason,
+            extract_schema=lambda s: s.reason,
+            extract_json=lambda data: data["reason"],
+        )
+
+    async def _a_generate_reason(
+        self,
+        tool_accuracy_score: List[ToolScore],
+        args_accuracy_score: List[ArgsScore],
+    ) -> Optional[str]:
+        if not self.include_reason:
+            return None
+
+        reasons = []
+        for task_score in tool_accuracy_score:
+            reasons.append(task_score.reason)
+
+        for arg_score in args_accuracy_score:
+            reasons.append(arg_score.reason)
+
+        prompt = self._get_prompt(
+            "generate_final_reason",
+            template_class=_MCP_TASK_COMPLETION_TEMPLATES,
+            final_score=self.score,
+            success=self.success,
+            reasons=reasons,
+        )
+
+        return await a_generate_with_schema_and_extract(
+            metric=self,
+            prompt=prompt,
+            schema_cls=Reason,
+            extract_schema=lambda s: s.reason,
+            extract_json=lambda data: data["reason"],
+        )
+
+    @property
+    def __name__(self):
+        return "Multi-Turn MCP Use"

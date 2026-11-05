@@ -1,0 +1,329 @@
+from typing import List, Optional, Union, Type
+
+from deepeval.metrics import BaseMetric
+from deepeval.test_case import (
+    LLMTestCase,
+    SingleTurnParams,
+)
+from deepeval.metrics.indicator import metric_progress_indicator
+from deepeval.models import DeepEvalBaseLLM, DeepEvalBaseSystemOneModel
+from deepeval.utils import get_or_create_event_loop, prettify_list
+from deepeval.metrics.base_metric import Verdict, YES_NO
+from deepeval.metrics.utils import (
+    prepare_measure,
+    generate_qag_verdicts,
+    a_generate_qag_verdicts,
+    SystemOneEvalSpec,
+    SystemOneVerdictSpec,
+    initialize_system_one_model,
+    parse_questions,
+    run_system_one_eval,
+    a_run_system_one_eval,
+    construct_verbose_logs,
+    initialize_model,
+    a_generate_with_schema_and_extract,
+    generate_with_schema_and_extract,
+)
+from deepeval.config.eval_mode import EvalModeName, resolve_eval_mode
+from deepeval.metrics.role_violation.schema import (
+    RoleViolationVerdict,
+    Verdicts,
+    RoleViolations,
+    RoleViolationScoreReason,
+)
+from deepeval.templates import make_template_class
+
+
+RoleViolationTemplate = make_template_class("RoleViolationMetric")
+
+
+class RoleViolationMetric(BaseMetric):
+    _required_params: List[SingleTurnParams] = [
+        SingleTurnParams.INPUT,
+        SingleTurnParams.ACTUAL_OUTPUT,
+    ]
+
+    def __init__(
+        self,
+        threshold: Optional[float] = 0.5,
+        role: str = None,  # Required parameter to specify the expected role
+        model: Optional[Union[str, DeepEvalBaseLLM]] = None,
+        system_one_model: Optional[
+            Union[str, DeepEvalBaseSystemOneModel]
+        ] = None,
+        eval_mode: Optional[EvalModeName] = None,
+        include_reason: bool = True,
+        async_mode: bool = True,
+        strict_mode: bool = False,
+        verbose_mode: bool = False,
+        flaky: bool = False,
+        evaluation_template: Type[
+            RoleViolationTemplate
+        ] = RoleViolationTemplate,
+    ):
+        if role is None:
+            raise ValueError(
+                "Role parameter is required. Please specify the expected role (e.g., 'helpful assistant', 'customer service agent', etc.)"
+            )
+
+        self.threshold = 0 if strict_mode else threshold
+        self.role = role
+        self.eval_mode = resolve_eval_mode(eval_mode)
+        self.model, self.using_native_model = initialize_model(
+            model, self.eval_mode
+        )
+        self.system_one_model = initialize_system_one_model(
+            system_one_model, self.eval_mode
+        )
+        self.evaluation_model = (
+            self.model or self.system_one_model
+        ).get_model_name()
+        self.include_reason = include_reason
+        self.async_mode = async_mode
+        self.strict_mode = strict_mode
+        self.verbose_mode = verbose_mode
+        self.flaky = flaky
+        self.evaluation_template = evaluation_template
+
+    def measure(
+        self,
+        test_case: LLMTestCase,
+        _show_indicator: bool = True,
+        _in_component: bool = False,
+    ) -> float:
+
+        prepare_measure(self, test_case)
+        with metric_progress_indicator(
+            self, _show_indicator=_show_indicator, _in_component=_in_component
+        ):
+            if self.async_mode:
+                loop = get_or_create_event_loop()
+                loop.run_until_complete(
+                    self.a_measure(
+                        test_case,
+                        _show_indicator=False,
+                        _in_component=_in_component,
+                    )
+                )
+            else:
+                if run_system_one_eval(self, test_case):
+                    return self.score
+
+                self.role_violations: List[str] = self._detect_role_violations(
+                    test_case.actual_output, multimodal=test_case.multimodal
+                )
+                self.verdicts: List[RoleViolationVerdict] = (
+                    self._generate_verdicts()
+                )
+                self.score = self._calculate_score()
+                self.reason = self._generate_reason()
+                self.success = self.is_successful()
+                self.verbose_logs = construct_verbose_logs(
+                    self,
+                    steps=[
+                        f"Role: {self.role}",
+                        f"Role Violations:\n{prettify_list(self.role_violations)}",
+                        f"Verdicts:\n{prettify_list(self.verdicts)}",
+                        f"Score: {self.score}\nReason: {self.reason}",
+                    ],
+                )
+
+            return self.score
+
+    async def a_measure(
+        self,
+        test_case: LLMTestCase,
+        _show_indicator: bool = True,
+        _in_component: bool = False,
+    ) -> float:
+
+        prepare_measure(self, test_case)
+        with metric_progress_indicator(
+            self,
+            async_mode=True,
+            _show_indicator=_show_indicator,
+            _in_component=_in_component,
+        ):
+            if await a_run_system_one_eval(self, test_case):
+                return self.score
+
+            self.role_violations: List[str] = (
+                await self._a_detect_role_violations(
+                    test_case.actual_output, multimodal=test_case.multimodal
+                )
+            )
+            self.verdicts: List[RoleViolationVerdict] = (
+                await self._a_generate_verdicts()
+            )
+            self.score = self._calculate_score()
+            self.reason = await self._a_generate_reason()
+            self.success = self.is_successful()
+            self.verbose_logs = construct_verbose_logs(
+                self,
+                steps=[
+                    f"Role: {self.role}",
+                    f"Role Violations:\n{prettify_list(self.role_violations)}",
+                    f"Verdicts:\n{prettify_list(self.verdicts)}",
+                    f"Score: {self.score}\nReason: {self.reason}",
+                ],
+            )
+
+            return self.score
+
+    async def _a_generate_reason(self) -> Optional[str]:
+        if self.include_reason is False:
+            return None
+
+        role_violations = []
+        for verdict in self.verdicts:
+            if verdict.verdict == Verdict.YES:
+                role_violations.append(verdict.reason)
+
+        prompt: dict = self._get_prompt(
+            "generate_reason",
+            role_violations=role_violations,
+            score=format(self.score, ".2f"),
+        )
+
+        return await a_generate_with_schema_and_extract(
+            metric=self,
+            prompt=prompt,
+            schema_cls=RoleViolationScoreReason,
+            extract_schema=lambda s: s.reason,
+            extract_json=lambda data: data["reason"],
+        )
+
+    def _generate_reason(self) -> Optional[str]:
+        if self.include_reason is False:
+            return None
+
+        role_violations = []
+        for verdict in self.verdicts:
+            if verdict.verdict == Verdict.YES:
+                role_violations.append(verdict.reason)
+
+        prompt: dict = self._get_prompt(
+            "generate_reason",
+            role_violations=role_violations,
+            score=format(self.score, ".2f"),
+        )
+
+        return generate_with_schema_and_extract(
+            metric=self,
+            prompt=prompt,
+            schema_cls=RoleViolationScoreReason,
+            extract_schema=lambda s: s.reason,
+            extract_json=lambda data: data["reason"],
+        )
+
+    async def _a_generate_verdicts(self) -> List[RoleViolationVerdict]:
+        if len(self.role_violations) == 0:
+            return []
+
+        prompt = self._get_prompt(
+            "generate_verdicts",
+            role_violations=self.role_violations,
+            expected_role=self.role,
+        )
+        return await a_generate_qag_verdicts(
+            metric=self,
+            prompt=prompt,
+            verdict_cls=RoleViolationVerdict,
+            verdicts_cls=Verdicts,
+            allowed=YES_NO,
+            system_one=self._experimental_system_one_spec(),
+        )
+
+    def _generate_verdicts(self) -> List[RoleViolationVerdict]:
+        if len(self.role_violations) == 0:
+            return []
+
+        prompt = self._get_prompt(
+            "generate_verdicts",
+            role_violations=self.role_violations,
+            expected_role=self.role,
+        )
+        return generate_qag_verdicts(
+            metric=self,
+            prompt=prompt,
+            verdict_cls=RoleViolationVerdict,
+            verdicts_cls=Verdicts,
+            allowed=YES_NO,
+            system_one=self._experimental_system_one_spec(),
+        )
+
+    def _experimental_system_one_spec(self) -> SystemOneVerdictSpec:
+        return SystemOneVerdictSpec(
+            instructions=self._get_prompt("_experimental_system_one_verdict"),
+            items=self.role_violations,
+            item_key="statement",
+            state={"role": self.role},
+        )
+
+    def _system_one_eval_spec(
+        self, test_case: LLMTestCase
+    ) -> Optional[SystemOneEvalSpec]:
+        """`system_one` eval mode: the whole metric as one Jev request over
+        `input` and `actual_output`, with the assigned `role` written into
+        the questions; higher probabilities mean the role was kept. See
+        EXPERIMENTAL.md."""
+        if test_case.multimodal:
+            return None
+        return SystemOneEvalSpec(
+            evaluation_params=self._required_params,
+            questions=parse_questions(
+                self._get_prompt(
+                    "_experimental_system_one_questions", role=self.role
+                )
+            ),
+        )
+
+    async def _a_detect_role_violations(
+        self, actual_output: str, *, multimodal: bool
+    ) -> List[str]:
+        prompt = self._get_prompt(
+            "detect_role_violations",
+            actual_output=actual_output,
+            expected_role=self.role,
+            multimodal=multimodal,
+        )
+        return await a_generate_with_schema_and_extract(
+            metric=self,
+            prompt=prompt,
+            schema_cls=RoleViolations,
+            extract_schema=lambda s: s.role_violations,
+            extract_json=lambda data: data["role_violations"],
+        )
+
+    def _detect_role_violations(
+        self, actual_output: str, *, multimodal: bool
+    ) -> List[str]:
+        prompt = self._get_prompt(
+            "detect_role_violations",
+            actual_output=actual_output,
+            expected_role=self.role,
+            multimodal=multimodal,
+        )
+        return generate_with_schema_and_extract(
+            metric=self,
+            prompt=prompt,
+            schema_cls=RoleViolations,
+            extract_schema=lambda s: s.role_violations,
+            extract_json=lambda data: data["role_violations"],
+        )
+
+    def _calculate_score(self) -> float:
+        # Role adherence should be binary: either there's adherence (1) or not (0)
+        number_of_verdicts = len(self.verdicts)
+        if number_of_verdicts == 0:
+            return 1
+
+        # If any verdict indicates a role violation, score is 0, otherwise 1
+        for verdict in self.verdicts:
+            if verdict.verdict == Verdict.YES:
+                return 0.0  # Role violation detected - no adherence
+        return 1.0  # No role violation - full adherence
+
+    @property
+    def __name__(self):
+        return "Role Violation"

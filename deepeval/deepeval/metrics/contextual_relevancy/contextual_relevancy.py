@@ -1,0 +1,361 @@
+from typing import Dict, Optional, List, Union, Type
+import asyncio
+import textwrap
+
+from deepeval.utils import (
+    get_or_create_event_loop,
+    prettify_list,
+)
+from deepeval.metrics.base_metric import Verdict, YES_NO
+from deepeval.metrics.utils import (
+    prepare_measure,
+    generate_qag_verdicts,
+    a_generate_qag_verdicts,
+    score_qag_verdicts,
+    construct_verbose_logs,
+    initialize_model,
+    initialize_system_one_model,
+    a_generate_with_schema_and_extract,
+    generate_with_schema_and_extract,
+    SystemOneEvalSpec,
+    SystemOneVerdictSpec,
+    parse_questions,
+    run_system_one_eval,
+    a_run_system_one_eval,
+    split_sentences,
+)
+from deepeval.config.eval_mode import EvalModeName, resolve_eval_mode
+from deepeval.test_case import (
+    LLMTestCase,
+    SingleTurnParams,
+)
+from deepeval.metrics import BaseMetric
+from deepeval.models import DeepEvalBaseLLM, DeepEvalBaseSystemOneModel
+from deepeval.metrics.indicator import metric_progress_indicator
+from deepeval.metrics.contextual_relevancy.schema import (
+    ContextualRelevancyVerdict,
+    ContextualRelevancyVerdicts,
+    ContextualRelevancyScoreReason,
+)
+from deepeval.templates import make_template_class
+
+
+def _contextual_relevancy_verdict_kwargs(multimodal: bool) -> Dict[str, str]:
+    context_type = "context (image or string)" if multimodal else "context"
+    statement_or_image = "statement or image" if multimodal else "statement"
+    if multimodal:
+        extraction_instructions = textwrap.dedent(
+            """
+            If the context is textual, you should first extract the statements found in the context if the context, which are high level information found in the context, before deciding on a verdict and optionally a reason for each statement.
+            If the context is an image, `statement` should be a description of the image. Do not assume any information not visibly available.
+            """
+        ).strip()
+        empty_context_instruction = ""
+    else:
+        extraction_instructions = (
+            "You should first extract statements found in the context, which are "
+            "high level information found in the context, before deciding on a "
+            "verdict and optionally a reason for each statement."
+        )
+        empty_context_instruction = (
+            "\nIf provided context contains no actual content or statements then: "
+            'give "no" as a "verdict",\nput context into "statement", and '
+            '"No statements found in provided context." into "reason".'
+        )
+    return {
+        "context_type": context_type,
+        "statement_or_image": statement_or_image,
+        "extraction_instructions": extraction_instructions,
+        "empty_context_instruction": empty_context_instruction,
+    }
+
+
+def _system_one_relevancy_verdict(
+    statement: str, verdict: Verdict, probability: float
+) -> ContextualRelevancyVerdict:
+    reason = f"P(yes)={probability:.2f}"
+    if verdict == Verdict.NO:
+        reason = f"'{statement}' is not relevant to the input ({reason})."
+    return ContextualRelevancyVerdict(
+        statement=statement, verdict=verdict, reason=reason
+    )
+
+
+ContextualRelevancyTemplate = make_template_class("ContextualRelevancyMetric")
+
+
+class ContextualRelevancyMetric(BaseMetric):
+    _required_params: List[SingleTurnParams] = [
+        SingleTurnParams.INPUT,
+        SingleTurnParams.RETRIEVAL_CONTEXT,
+    ]
+
+    def __init__(
+        self,
+        threshold: Optional[float] = 0.5,
+        model: Optional[Union[str, DeepEvalBaseLLM]] = None,
+        system_one_model: Optional[
+            Union[str, DeepEvalBaseSystemOneModel]
+        ] = None,
+        eval_mode: Optional[EvalModeName] = None,
+        include_reason: bool = True,
+        async_mode: bool = True,
+        strict_mode: bool = False,
+        verbose_mode: bool = False,
+        flaky: bool = False,
+        evaluation_template: Type[
+            ContextualRelevancyTemplate
+        ] = ContextualRelevancyTemplate,
+    ):
+        self.threshold = 1 if strict_mode else threshold
+        self.eval_mode = resolve_eval_mode(eval_mode)
+        self.model, self.using_native_model = initialize_model(
+            model, self.eval_mode
+        )
+        self.system_one_model = initialize_system_one_model(
+            system_one_model, self.eval_mode
+        )
+        self.evaluation_model = (
+            self.model or self.system_one_model
+        ).get_model_name()
+        self.include_reason = include_reason
+        self.async_mode = async_mode
+        self.strict_mode = strict_mode
+        self.verbose_mode = verbose_mode
+        self.flaky = flaky
+        self.evaluation_template = evaluation_template
+
+    def measure(
+        self,
+        test_case: LLMTestCase,
+        _show_indicator: bool = True,
+        _in_component: bool = False,
+    ) -> float:
+
+        multimodal = test_case.multimodal
+
+        prepare_measure(self, test_case)
+        with metric_progress_indicator(
+            self, _show_indicator=_show_indicator, _in_component=_in_component
+        ):
+            if self.async_mode:
+                loop = get_or_create_event_loop()
+                loop.run_until_complete(
+                    self.a_measure(
+                        test_case,
+                        _show_indicator=False,
+                        _in_component=_in_component,
+                    )
+                )
+            else:
+                if run_system_one_eval(self, test_case):
+                    return self.score
+
+                input = test_case.input
+                retrieval_context = test_case.retrieval_context
+
+                self.verdicts_list: List[ContextualRelevancyVerdicts] = [
+                    (self._generate_verdicts(input, context, multimodal))
+                    for context in retrieval_context
+                ]
+                self.score = self._calculate_score()
+                self.reason = self._generate_reason(input, multimodal)
+                self.success = self.is_successful()
+                self.verbose_logs = construct_verbose_logs(
+                    self,
+                    steps=[
+                        f"Verdicts:\n{prettify_list(self.verdicts_list)}",
+                        f"Score: {self.score}\nReason: {self.reason}",
+                    ],
+                )
+
+            return self.score
+
+    async def a_measure(
+        self,
+        test_case: LLMTestCase,
+        _show_indicator: bool = True,
+        _in_component: bool = False,
+    ) -> float:
+
+        multimodal = test_case.multimodal
+
+        prepare_measure(self, test_case)
+        with metric_progress_indicator(
+            self,
+            async_mode=True,
+            _show_indicator=_show_indicator,
+            _in_component=_in_component,
+        ):
+            if await a_run_system_one_eval(self, test_case):
+                return self.score
+
+            input = test_case.input
+            retrieval_context = test_case.retrieval_context
+
+            self.verdicts_list: List[ContextualRelevancyVerdicts] = (
+                await asyncio.gather(
+                    *[
+                        self._a_generate_verdicts(input, context, multimodal)
+                        for context in retrieval_context
+                    ]
+                )
+            )
+            self.score = self._calculate_score()
+            self.reason = await self._a_generate_reason(input, multimodal)
+            self.success = self.is_successful()
+            self.verbose_logs = construct_verbose_logs(
+                self,
+                steps=[
+                    f"Verdicts:\n{prettify_list(self.verdicts_list)}",
+                    f"Score: {self.score}\nReason: {self.reason}",
+                ],
+            )
+            return self.score
+
+    async def _a_generate_reason(self, input: str, multimodal: bool):
+        if self.include_reason is False:
+            return None
+
+        irrelevant_statements = []
+        relevant_statements = []
+        for verdicts in self.verdicts_list:
+            for verdict in verdicts.verdicts:
+                if verdict.verdict == Verdict.NO:
+                    irrelevant_statements.append(verdict.reason)
+                else:
+                    relevant_statements.append(verdict.statement)
+
+        prompt: dict = self._get_prompt(
+            "generate_reason",
+            input=input,
+            irrelevant_statements=irrelevant_statements,
+            relevant_statements=relevant_statements,
+            score=format(self.score, ".2f"),
+            multimodal=multimodal,
+        )
+
+        return await a_generate_with_schema_and_extract(
+            metric=self,
+            prompt=prompt,
+            schema_cls=ContextualRelevancyScoreReason,
+            extract_schema=lambda score_reason: score_reason.reason,
+            extract_json=lambda data: data["reason"],
+        )
+
+    def _generate_reason(self, input: str, multimodal: bool):
+        if self.include_reason is False:
+            return None
+
+        irrelevant_statements = []
+        relevant_statements = []
+        for verdicts in self.verdicts_list:
+            for verdict in verdicts.verdicts:
+                if verdict.verdict == Verdict.NO:
+                    irrelevant_statements.append(verdict.reason)
+                else:
+                    relevant_statements.append(verdict.statement)
+
+        prompt: dict = self._get_prompt(
+            "generate_reason",
+            input=input,
+            irrelevant_statements=irrelevant_statements,
+            relevant_statements=relevant_statements,
+            score=format(self.score, ".2f"),
+            multimodal=multimodal,
+        )
+
+        return generate_with_schema_and_extract(
+            metric=self,
+            prompt=prompt,
+            schema_cls=ContextualRelevancyScoreReason,
+            extract_schema=lambda score_reason: score_reason.reason,
+            extract_json=lambda data: data["reason"],
+        )
+
+    def _calculate_score(self):
+        return score_qag_verdicts(
+            self,
+            [v for verdicts in self.verdicts_list for v in verdicts.verdicts],
+            passing=(Verdict.YES,),
+            empty_score=0,
+        )
+
+    async def _a_generate_verdicts(
+        self, input: str, context: List[str], multimodal: bool
+    ) -> ContextualRelevancyVerdicts:
+        prompt = self._get_prompt(
+            "generate_verdicts",
+            input=input,
+            context=context,
+            multimodal=multimodal,
+            **_contextual_relevancy_verdict_kwargs(multimodal),
+        )
+
+        return ContextualRelevancyVerdicts(
+            verdicts=await a_generate_qag_verdicts(
+                metric=self,
+                prompt=prompt,
+                verdict_cls=ContextualRelevancyVerdict,
+                verdicts_cls=ContextualRelevancyVerdicts,
+                allowed=YES_NO,
+                system_one=self._experimental_system_one_spec(
+                    input, context, multimodal
+                ),
+            )
+        )
+
+    def _generate_verdicts(
+        self, input: str, context: str, multimodal: bool
+    ) -> ContextualRelevancyVerdicts:
+        prompt = self._get_prompt(
+            "generate_verdicts",
+            input=input,
+            context=context,
+            multimodal=multimodal,
+            **_contextual_relevancy_verdict_kwargs(multimodal),
+        )
+
+        return ContextualRelevancyVerdicts(
+            verdicts=generate_qag_verdicts(
+                metric=self,
+                prompt=prompt,
+                verdict_cls=ContextualRelevancyVerdict,
+                verdicts_cls=ContextualRelevancyVerdicts,
+                allowed=YES_NO,
+                system_one=self._experimental_system_one_spec(
+                    input, context, multimodal
+                ),
+            )
+        )
+
+    def _experimental_system_one_spec(
+        self, input: str, context: str, multimodal: bool
+    ) -> Optional[SystemOneVerdictSpec]:
+        if multimodal:
+            return None
+        return SystemOneVerdictSpec(
+            instructions=self._get_prompt("_experimental_system_one_verdict"),
+            items=split_sentences(context),
+            item_key="statement",
+            state={"input": input},
+            build_verdict=_system_one_relevancy_verdict,
+        )
+
+    def _system_one_eval_spec(
+        self, test_case: LLMTestCase
+    ) -> Optional[SystemOneEvalSpec]:
+        """`system_one` eval mode: the whole metric as one Jev request over
+        `input` and `retrieval_context`; see EXPERIMENTAL.md."""
+        if test_case.multimodal:
+            return None
+        return SystemOneEvalSpec(
+            evaluation_params=self._required_params,
+            questions=parse_questions(
+                self._get_prompt("_experimental_system_one_questions")
+            ),
+        )
+
+    @property
+    def __name__(self):
+        return "Contextual Relevancy"

@@ -1,0 +1,483 @@
+import asyncio
+from typing import Optional, List, Tuple, Union, Type
+
+from deepeval.utils import get_or_create_event_loop, prettify_list
+from deepeval.metrics.utils import (
+    prepare_measure,
+    construct_verbose_logs,
+    get_unit_interactions,
+    initialize_model,
+    initialize_system_one_model,
+    a_generate_with_schema_and_extract,
+    generate_with_schema_and_extract,
+    SystemOneBinarySpec,
+    SystemOneEvalSpec,
+    parse_questions,
+    run_system_one_eval,
+    a_run_system_one_eval,
+    system_one_probability,
+    a_system_one_probability,
+    verdict_from_probability,
+)
+from deepeval.metrics.base_metric import Verdict
+from deepeval.config.eval_mode import EvalModeName, resolve_eval_mode
+from deepeval.test_case import ConversationalTestCase, MultiTurnParams
+from deepeval.metrics import BaseConversationalMetric
+from deepeval.models import DeepEvalBaseLLM, DeepEvalBaseSystemOneModel
+from deepeval.metrics.indicator import metric_progress_indicator
+from deepeval.metrics.topic_adherence.schema import (
+    RelevancyVerdict,
+    QAPairs,
+    QAPair,
+    TopicAdherenceReason,
+)
+from deepeval.templates import make_template_class
+
+
+TopicAdherenceTemplate = make_template_class("TopicAdherenceMetric")
+
+
+class TopicAdherenceMetric(BaseConversationalMetric):
+
+    _required_test_case_params = [
+        MultiTurnParams.ROLE,
+        MultiTurnParams.CONTENT,
+    ]
+
+    def __init__(
+        self,
+        relevant_topics: List[str],
+        threshold: Optional[float] = 0.5,
+        model: Optional[Union[str, DeepEvalBaseLLM]] = None,
+        system_one_model: Optional[
+            Union[str, DeepEvalBaseSystemOneModel]
+        ] = None,
+        eval_mode: Optional[EvalModeName] = None,
+        include_reason: bool = True,
+        async_mode: bool = True,
+        strict_mode: bool = False,
+        verbose_mode: bool = False,
+        flaky: bool = False,
+        evaluation_template: Type[
+            TopicAdherenceTemplate
+        ] = TopicAdherenceTemplate,
+    ):
+        self.relevant_topics = relevant_topics
+        self.threshold = 1 if strict_mode else threshold
+        self.eval_mode = resolve_eval_mode(eval_mode)
+        self.model, self.using_native_model = initialize_model(
+            model, self.eval_mode
+        )
+        self.system_one_model = initialize_system_one_model(
+            system_one_model, self.eval_mode
+        )
+        self.evaluation_model = (
+            self.model or self.system_one_model
+        ).get_model_name()
+        self.include_reason = include_reason
+        self.async_mode = async_mode
+        self.strict_mode = strict_mode
+        self.verbose_mode = verbose_mode
+        self.flaky = flaky
+        self.evaluation_template = evaluation_template
+
+    def measure(
+        self,
+        test_case: ConversationalTestCase,
+        _show_indicator: bool = True,
+        _in_component: bool = False,
+    ):
+        prepare_measure(self, test_case)
+        with metric_progress_indicator(
+            self, _show_indicator=_show_indicator, _in_component=_in_component
+        ):
+            if self.async_mode:
+                loop = get_or_create_event_loop()
+                loop.run_until_complete(
+                    self.a_measure(
+                        test_case,
+                        _show_indicator=False,
+                        _in_component=_in_component,
+                    )
+                )
+            else:
+                if run_system_one_eval(self, test_case):
+                    return self.score
+
+                unit_interactions = get_unit_interactions(test_case.turns)
+                interaction_pairs = self._get_qa_pairs(
+                    unit_interactions, multimodal=test_case.multimodal
+                )
+                True_Positives = [0, []]
+                True_Negatives = [0, []]
+                False_Positives = [0, []]
+                False_Negatives = [0, []]
+                for interaction_pair in interaction_pairs:
+                    for qa_pair in interaction_pair.qa_pairs:
+                        qa_verdict: RelevancyVerdict = self._get_qa_verdict(
+                            qa_pair, multimodal=test_case.multimodal
+                        )
+                        if qa_verdict.verdict == "TP":
+                            True_Positives[0] += 1
+                            True_Positives[1].append(qa_verdict.reason)
+                        elif qa_verdict.verdict == "TN":
+                            True_Negatives[0] += 1
+                            True_Negatives[1].append(qa_verdict.reason)
+                        elif qa_verdict.verdict == "FP":
+                            False_Positives[0] += 1
+                            False_Positives[1].append(qa_verdict.reason)
+                        elif qa_verdict.verdict == "FN":
+                            False_Negatives[0] += 1
+                            False_Negatives[1].append(qa_verdict.reason)
+
+                self.score = self._get_score(
+                    True_Positives,
+                    True_Negatives,
+                    False_Positives,
+                    False_Negatives,
+                )
+                self.success = self.is_successful()
+                self.reason = self._generate_reason(
+                    True_Positives,
+                    True_Negatives,
+                    False_Positives,
+                    False_Negatives,
+                    multimodal=test_case.multimodal,
+                )
+
+                self.verbose_logs = construct_verbose_logs(
+                    self,
+                    steps=[
+                        f"Interaction Pairs: \n{prettify_list(interaction_pairs)} \n",
+                        "Truth Table:",
+                        "\nTrue Positives:",
+                        f"Count: {True_Positives[0]}, Reasons: {prettify_list(True_Positives[1])} \n",
+                        "\nTrue Negatives: ",
+                        f"Count: {True_Negatives[0]}, Reasons: {prettify_list(True_Negatives[1])} \n",
+                        "\nFalse Positives: ",
+                        f"Count: {False_Positives[0]}, Reasons: {prettify_list(False_Positives[1])} \n",
+                        "\nFalse Negatives: ",
+                        f"Count: {False_Negatives[0]}, Reasons: {prettify_list(False_Negatives[1])} \n",
+                        f"Final Score: {self.score}",
+                        f"Final Reason: {self.reason}",
+                    ],
+                )
+
+                return self.score
+
+    async def a_measure(
+        self,
+        test_case: ConversationalTestCase,
+        _show_indicator: bool = True,
+        _in_component: bool = False,
+    ):
+        prepare_measure(self, test_case)
+
+        with metric_progress_indicator(
+            self,
+            async_mode=True,
+            _show_indicator=_show_indicator,
+            _in_component=_in_component,
+        ):
+            if await a_run_system_one_eval(self, test_case):
+                return self.score
+
+            unit_interactions = get_unit_interactions(test_case.turns)
+            interaction_pairs = await self._a_get_qa_pairs(
+                unit_interactions, multimodal=test_case.multimodal
+            )
+            True_Positives = [0, []]
+            True_Negatives = [0, []]
+            False_Positives = [0, []]
+            False_Negatives = [0, []]
+            for interaction_pair in interaction_pairs:
+                for qa_pair in interaction_pair.qa_pairs:
+                    qa_verdict: RelevancyVerdict = await self._a_get_qa_verdict(
+                        qa_pair, multimodal=test_case.multimodal
+                    )
+                    if qa_verdict.verdict == "TP":
+                        True_Positives[0] += 1
+                        True_Positives[1].append(qa_verdict.reason)
+                    elif qa_verdict.verdict == "TN":
+                        True_Negatives[0] += 1
+                        True_Negatives[1].append(qa_verdict.reason)
+                    elif qa_verdict.verdict == "FP":
+                        False_Positives[0] += 1
+                        False_Positives[1].append(qa_verdict.reason)
+                    elif qa_verdict.verdict == "FN":
+                        False_Negatives[0] += 1
+                        False_Negatives[1].append(qa_verdict.reason)
+
+            self.score = self._get_score(
+                True_Positives, True_Negatives, False_Positives, False_Negatives
+            )
+            self.success = self.is_successful()
+            self.reason = await self._a_generate_reason(
+                True_Positives,
+                True_Negatives,
+                False_Positives,
+                False_Negatives,
+                multimodal=test_case.multimodal,
+            )
+
+            self.verbose_logs = construct_verbose_logs(
+                self,
+                steps=[
+                    f"Interaction Pairs: \n{prettify_list(interaction_pairs)} \n",
+                    "Truth Table:",
+                    "\nTrue Positives:",
+                    f"Count: {True_Positives[0]}, Reasons: {prettify_list(True_Positives[1])} \n",
+                    "\nTrue Negatives: ",
+                    f"Count: {True_Negatives[0]}, Reasons: {prettify_list(True_Negatives[1])} \n",
+                    "\nFalse Positives: ",
+                    f"Count: {False_Positives[0]}, Reasons: {prettify_list(False_Positives[1])} \n",
+                    "\nFalse Negatives: ",
+                    f"Count: {False_Negatives[0]}, Reasons: {prettify_list(False_Negatives[1])} \n",
+                    f"Final Score: {self.score}",
+                    f"Final Reason: {self.reason}",
+                ],
+            )
+
+            return self.score
+
+    def _generate_reason(self, TP, TN, FP, FN, *, multimodal: bool):
+        if self.include_reason is False:
+            return None
+
+        total = TP[0] + TN[0] + FP[0] + FN[0]
+        if total <= 0:
+            return "There were no question-answer pairs to evaluate. Please enable verbose logs to look at the evaluation steps taken"
+        tp_line = prettify_list(TP[1]) if TP[1] else "(none)"
+        tn_line = prettify_list(TN[1]) if TN[1] else "(none)"
+        fp_line = prettify_list(FP[1]) if FP[1] else "(none)"
+        fn_line = prettify_list(FN[1]) if FN[1] else "(none)"
+        prompt = self._get_prompt(
+            "generate_reason",
+            success=self.success,
+            score=self.score,
+            threshold=self.threshold,
+            true_positives_reason_line=tp_line,
+            true_negatives_reason_line=tn_line,
+            false_positives_reason_line=fp_line,
+            false_negatives_reason_line=fn_line,
+            multimodal=multimodal,
+        )
+        return generate_with_schema_and_extract(
+            metric=self,
+            prompt=prompt,
+            schema_cls=TopicAdherenceReason,
+            extract_schema=lambda s: s.reason,
+            extract_json=lambda data: data["reason"],
+        )
+
+    async def _a_generate_reason(self, TP, TN, FP, FN, *, multimodal: bool):
+        if self.include_reason is False:
+            return None
+
+        total = TP[0] + TN[0] + FP[0] + FN[0]
+        if total <= 0:
+            return "There were no question-answer pairs to evaluate. Please enable verbose logs to look at the evaluation steps taken"
+        tp_line = prettify_list(TP[1]) if TP[1] else "(none)"
+        tn_line = prettify_list(TN[1]) if TN[1] else "(none)"
+        fp_line = prettify_list(FP[1]) if FP[1] else "(none)"
+        fn_line = prettify_list(FN[1]) if FN[1] else "(none)"
+        prompt = self._get_prompt(
+            "generate_reason",
+            success=self.success,
+            score=self.score,
+            threshold=self.threshold,
+            true_positives_reason_line=tp_line,
+            true_negatives_reason_line=tn_line,
+            false_positives_reason_line=fp_line,
+            false_negatives_reason_line=fn_line,
+            multimodal=multimodal,
+        )
+        return await a_generate_with_schema_and_extract(
+            metric=self,
+            prompt=prompt,
+            schema_cls=TopicAdherenceReason,
+            extract_schema=lambda s: s.reason,
+            extract_json=lambda data: data["reason"],
+        )
+
+    def _get_score(self, TP, TN, FP, FN) -> float:
+        true_values = TP[0] + TN[0]
+        total = TP[0] + TN[0] + FP[0] + FN[0]
+        if total <= 0:
+            score = 0
+        else:
+            score = true_values / total
+        return 0 if self.strict_mode and score < self.threshold else score
+
+    def _get_qa_verdict(
+        self, qa_pair: QAPair, *, multimodal: bool
+    ) -> RelevancyVerdict:
+        specs = self._experimental_system_one_specs(qa_pair, multimodal)
+        if specs is not None:
+            on_topic = system_one_probability(self, specs[0])
+            answered = (
+                system_one_probability(self, specs[1])
+                if on_topic is not None
+                else None
+            )
+            if answered is not None:
+                return self._system_one_verdict(on_topic, answered)
+        prompt = self._get_prompt(
+            "get_qa_pair_verdict",
+            relevant_topics=self.relevant_topics,
+            question=qa_pair.question,
+            response=qa_pair.response,
+            multimodal=multimodal,
+        )
+        return generate_with_schema_and_extract(
+            metric=self,
+            prompt=prompt,
+            schema_cls=RelevancyVerdict,
+            extract_schema=lambda s: s,
+            extract_json=lambda data: RelevancyVerdict(**data),
+        )
+
+    async def _a_get_qa_verdict(
+        self, qa_pair: QAPair, *, multimodal: bool
+    ) -> RelevancyVerdict:
+        specs = self._experimental_system_one_specs(qa_pair, multimodal)
+        if specs is not None:
+            on_topic, answered = await asyncio.gather(
+                *[a_system_one_probability(self, spec) for spec in specs]
+            )
+            if on_topic is not None and answered is not None:
+                return self._system_one_verdict(on_topic, answered)
+        prompt = self._get_prompt(
+            "get_qa_pair_verdict",
+            relevant_topics=self.relevant_topics,
+            question=qa_pair.question,
+            response=qa_pair.response,
+            multimodal=multimodal,
+        )
+        return await a_generate_with_schema_and_extract(
+            metric=self,
+            prompt=prompt,
+            schema_cls=RelevancyVerdict,
+            extract_schema=lambda s: s,
+            extract_json=lambda data: RelevancyVerdict(**data),
+        )
+
+    def _experimental_system_one_specs(
+        self, qa_pair: QAPair, multimodal: bool
+    ) -> Optional[Tuple[SystemOneBinarySpec, SystemOneBinarySpec]]:
+        if multimodal:
+            return None
+        state = {
+            "relevant_topics": list(self.relevant_topics),
+            "question": qa_pair.question,
+            "response": qa_pair.response,
+        }
+        return (
+            SystemOneBinarySpec(
+                instructions=self._get_prompt(
+                    "_experimental_system_one_on_topic_verdict"
+                ),
+                state=state,
+            ),
+            SystemOneBinarySpec(
+                instructions=self._get_prompt(
+                    "_experimental_system_one_answered_verdict"
+                ),
+                state=state,
+            ),
+        )
+
+    def _system_one_verdict(
+        self, on_topic: float, answered: float
+    ) -> RelevancyVerdict:
+        relevant = verdict_from_probability(on_topic) == Verdict.YES
+        responded = verdict_from_probability(answered) == Verdict.YES
+        if relevant:
+            verdict = "TP" if responded else "FN"
+        else:
+            verdict = "FP" if responded else "TN"
+        return RelevancyVerdict(
+            verdict=verdict,
+            reason=f"P(on topic)={on_topic:.2f}, P(answered)={answered:.2f}",
+        )
+
+    def _system_one_eval_spec(
+        self, test_case: ConversationalTestCase
+    ) -> Optional[SystemOneEvalSpec]:
+        """`system_one` eval mode: the whole conversation and
+        `relevant_topics` as one Jev request, with one Noul per topic and one
+        for off-topic questions; see EXPERIMENTAL.md."""
+        if test_case.multimodal:
+            return None
+        return SystemOneEvalSpec(
+            evaluation_params=self._required_test_case_params,
+            questions=parse_questions(
+                self._get_prompt(
+                    "_experimental_system_one_questions",
+                    relevant_topics=list(self.relevant_topics),
+                )
+            ),
+            extra_state={"relevant_topics": list(self.relevant_topics)},
+        )
+
+    def _get_qa_pairs(
+        self, unit_interactions: List, *, multimodal: bool
+    ) -> List[QAPairs]:
+        qa_pairs = []
+        for unit_interaction in unit_interactions:
+            conversation = "Conversation: \n"
+            for turn in unit_interaction:
+                conversation += f"{turn.role} \n"
+                conversation += f"{turn.content} \n\n"
+            prompt = self._get_prompt(
+                "get_qa_pairs",
+                conversation=conversation,
+                multimodal=multimodal,
+            )
+            new_pair = None
+
+            new_pair = generate_with_schema_and_extract(
+                metric=self,
+                prompt=prompt,
+                schema_cls=QAPairs,
+                extract_schema=lambda s: s,
+                extract_json=lambda data: QAPairs(**data),
+            )
+
+            if new_pair is not None:
+                qa_pairs.append(new_pair)
+
+        return qa_pairs
+
+    async def _a_get_qa_pairs(
+        self, unit_interactions: List, *, multimodal: bool
+    ) -> List[QAPairs]:
+        qa_pairs = []
+        for unit_interaction in unit_interactions:
+            conversation = "Conversation: \n"
+            for turn in unit_interaction:
+                conversation += f"{turn.role} \n"
+                conversation += f"{turn.content} \n\n"
+            prompt = self._get_prompt(
+                "get_qa_pairs",
+                conversation=conversation,
+                multimodal=multimodal,
+            )
+            new_pair = None
+
+            new_pair = await a_generate_with_schema_and_extract(
+                metric=self,
+                prompt=prompt,
+                schema_cls=QAPairs,
+                extract_schema=lambda s: s,
+                extract_json=lambda data: QAPairs(**data),
+            )
+
+            if new_pair is not None:
+                qa_pairs.append(new_pair)
+
+        return qa_pairs
+
+    @property
+    def __name__(self):
+        return "Topic Adherence"

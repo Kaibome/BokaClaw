@@ -80,11 +80,6 @@ test = [
     "pytest-mock>=3.14.0",
     "pytest-asyncio>=0.23.7",
 ]
-eval = [
-    # Offline evaluation only. deepeval 4.3.3 needs pydantic >= 2.11 while the
-    # server pins 2.10.4, so install this group in a separate environment.
-    "deepeval==4.3.3",
-]
 dev = [
     "ruff==0.16.0",
     "isort>=5.13.2",
@@ -144,6 +139,21 @@ features = [
   "dev",
 ]
 
+# Offline evaluation only. deepeval is built from the in-repo source at
+# ./deepeval rather than installed from PyPI, and it needs pydantic >= 2.11
+# while the server pins 2.10.4, so it stays in its own environment.
+[tool.hatch.envs.eval]
+python = "3.12"
+features = [
+  "test",
+]
+dependencies = [
+  "deepeval @ {root:uri}/deepeval",
+]
+
+[tool.hatch.envs.eval.scripts]
+test = "pytest tests/agent_eval {args}"
+
 [tool.hatch.envs.default.scripts]
 format = [
     "ruff format",
@@ -163,6 +173,8 @@ test = [
 
 [tool.ruff]
 line-length = 120
+# Vendored deepeval source (./deepeval) keeps its own formatting.
+extend-exclude = ["deepeval"]
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F"]
@@ -173,6 +185,8 @@ known-first-party = ["mem0", "mem0_cli"]
 [tool.isort]
 profile = "black"
 known_first_party = ["mem0", "mem0_cli"]
+# Vendored deepeval source (./deepeval) keeps its own import ordering.
+skip = ["deepeval"]
 # isort scope kept aligned with [tool.ruff.lint.isort] above.
 # black-equivalent profile here matches the formatter behaviour ruff applies.
 # Plugin-version bumps need a touch here to fire required CI checks (path-filter trap).

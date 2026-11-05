@@ -1,0 +1,189 @@
+from deepeval.dataset.expectations import Expectations
+from pydantic import BaseModel, Field
+from typing import Optional, List, Union, Dict
+
+from deepeval.test_case import MLLMImage, ToolCall
+from deepeval.tracing.api import (
+    ApiMetricsData,
+    ExpectationsData,
+    MetricData,
+    TraceApi,
+)
+from deepeval.utils import make_model_config
+
+
+class Classification(BaseModel):
+    """Classifier counterpart of ``MetricData``: one classifier's result on
+    one test case. ``success`` is ``None`` when the test case declared no
+    expected label for this classifier.
+
+    Local-only: classifications live on ``TestResult`` and are never attached
+    to the API test cases that are uploaded to Confident AI."""
+
+    model_config = make_model_config(extra="ignore")
+
+    name: str
+    label: Optional[str] = None
+    expected_label: Optional[str] = Field(None, alias="expectedLabel")
+    success: Optional[bool] = None
+    reason: Optional[str] = None
+    evaluation_model: Optional[str] = Field(None, alias="evaluationModel")
+    error: Optional[str] = None
+    evaluation_cost: Union[float, None] = Field(None, alias="evaluationCost")
+    input_tokens: Optional[int] = Field(None, alias="inputTokenCount")
+    output_tokens: Optional[int] = Field(None, alias="outputTokenCount")
+
+
+class LLMApiTestCase(BaseModel):
+    expectations: Optional[Expectations] = Field(None, exclude=True)
+    expectations_data: Optional[ExpectationsData] = Field(
+        None, alias="expectationsData"
+    )
+    name: str
+    input: str
+    actual_output: Optional[str] = Field(None, alias="actualOutput")
+    expected_output: Optional[str] = Field(None, alias="expectedOutput")
+    context: Optional[list] = Field(None)
+    retrieval_context: Optional[list] = Field(None, alias="retrievalContext")
+    tools_called: Optional[list] = Field(None, alias="toolsCalled")
+    expected_tools: Optional[list] = Field(None, alias="expectedTools")
+    token_cost: Optional[float] = Field(None, alias="tokenCost")
+    input_token_count: Optional[int] = Field(None, alias="inputTokenCount")
+    output_token_count: Optional[int] = Field(None, alias="outputTokenCount")
+    completion_time: Optional[float] = Field(None, alias="completionTime")
+    tags: Optional[List[str]] = Field(None)
+    flaky: bool = False
+    images_mapping: Optional[Dict[str, MLLMImage]] = Field(
+        None, alias="imagesMapping"
+    )
+
+    # make these optional, not all test cases in a conversation will be evaluated
+    success: Union[bool, None] = Field(None)
+    metrics_data: Union[ApiMetricsData, None] = Field(None, alias="metricsData")
+    run_duration: Union[float, None] = Field(None, alias="runDuration")
+    evaluation_cost: Union[float, None] = Field(None, alias="evaluationCost")
+
+    order: Union[int, None] = Field(None)
+    # These should map 1 to 1 from golden
+    metadata: Optional[Dict] = Field(None)
+    comments: Optional[str] = Field(None)
+    trace: Optional[TraceApi] = Field(None)
+
+    model_config = make_model_config(arbitrary_types_allowed=True)
+    # metric_collection: Optional[str] = Field(None, alias="metricCollection")
+
+    def update_metric_data(self, metric_data: MetricData):
+        if self.metrics_data is None:
+            self.metrics_data = [metric_data]
+        else:
+            self.metrics_data.append(metric_data)
+        if metric_data.expectations_data is not None:
+            self.expectations_data = metric_data.expectations_data.model_copy(
+                update={"evaluation_cost": metric_data.evaluation_cost}
+            )
+
+        # Flaky metrics never decide a test case's pass/fail status
+        if not metric_data.flaky:
+            if self.success is None:
+                # self.success will be None when it is a message
+                # in that case we will be setting success for the first time
+                self.success = metric_data.success
+            else:
+                if metric_data.success is False:
+                    self.success = False
+
+        evaluationCost = metric_data.evaluation_cost
+        if evaluationCost is None:
+            return
+
+        if self.evaluation_cost is None:
+            self.evaluation_cost = evaluationCost
+        else:
+            self.evaluation_cost += evaluationCost
+
+    def update_run_duration(self, run_duration: float):
+        self.run_duration = run_duration
+
+    def update_status(self, success: Optional[bool], flaky: bool = False):
+        # Flaky metrics never decide a test case's pass/fail status
+        if flaky:
+            return
+        if self.success is None:
+            self.success = success
+        else:
+            if success is False:
+                self.success = False
+
+    def is_multimodal(self):
+        if (
+            self.multimodal_input is not None
+            and self.multimodal_input_actual_output is not None
+        ):
+            return True
+
+        return False
+
+
+class TurnApi(BaseModel):
+    role: str
+    content: str
+    order: int
+    user_id: Optional[str] = Field(None, alias="userId")
+    retrieval_context: Optional[list] = Field(None, alias="retrievalContext")
+    tools_called: Optional[List[ToolCall]] = Field(None, alias="toolsCalled")
+    comments: Optional[str] = Field(None)
+
+
+class ConversationalApiTestCase(BaseModel):
+    expectations: Optional[Expectations] = Field(None, exclude=True)
+    expectations_data: Optional[ExpectationsData] = Field(
+        None, alias="expectationsData"
+    )
+    name: str
+    success: bool
+    metrics_data: ApiMetricsData = Field(alias="metricsData")
+    run_duration: float = Field(0.0, alias="runDuration")
+    evaluation_cost: Union[float, None] = Field(None, alias="evaluationCost")
+    turns: List[TurnApi] = Field(default_factory=lambda: [])
+    order: Union[int, None] = Field(None)
+    scenario: Optional[str] = Field(None)
+    expected_outcome: Optional[str] = Field(None, alias="expectedOutcome")
+    user_description: Optional[str] = Field(None, alias="userDescription")
+    context: Optional[list] = Field(None)
+    comments: Optional[str] = Field(None)
+    metadata: Optional[Dict] = Field(None)
+    images_mapping: Optional[Dict[str, MLLMImage]] = Field(
+        None, alias="imagesMapping"
+    )
+    tags: Optional[List[str]] = Field(None)
+    flaky: bool = False
+
+    def update_metric_data(self, metrics_data: MetricData):
+        if self.metrics_data is None:
+            self.metrics_data = [metrics_data]
+        else:
+            self.metrics_data.append(metrics_data)
+        if metrics_data.expectations_data is not None:
+            self.expectations_data = metrics_data.expectations_data.model_copy(
+                update={"evaluation_cost": metrics_data.evaluation_cost}
+            )
+
+        # Flaky metrics never decide a test case's pass/fail status
+        if metrics_data.success is False and not metrics_data.flaky:
+            self.success = False
+
+        evaluationCost = metrics_data.evaluation_cost
+        if evaluationCost is None:
+            return
+
+        if self.evaluation_cost is None:
+            self.evaluation_cost = evaluationCost
+        else:
+            self.evaluation_cost += evaluationCost
+
+    def update_run_duration(self, run_duration: float):
+        self.run_duration += run_duration
+
+
+class TestRunHttpResponse(BaseModel):
+    id: str
