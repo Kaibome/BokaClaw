@@ -219,10 +219,13 @@ data: {"run_id":"uuid","conversation_id":"uuid","status":"completed","last_seq":
   "input_tokens": 1200,
   "output_tokens": 300,
   "total_tokens": 1500,
+  "cached_tokens": 800,
+  "cache_miss_tokens": 400,
+  "cache_hit_rate": 0.6667,
   "model_calls": 4,
   "unknown_calls": 0,
   "sources": {
-    "agent_loop":       {"input_tokens": 1000, "output_tokens": 280, "total_tokens": 1280, "calls": 3, "unknown_calls": 0},
+    "agent_loop":       {"input_tokens": 1000, "output_tokens": 280, "total_tokens": 1280, "cached_tokens": 800, "cache_miss_tokens": 400, "calls": 3, "unknown_calls": 0},
     "compression":      {"input_tokens": 120, "output_tokens": 20,  "total_tokens": 140,  "calls": 1, "unknown_calls": 0},
     "memory_llm":       {"input_tokens": 80,  "output_tokens": 0,   "total_tokens": 80,   "calls": 0, "unknown_calls": 0},
     "memory_embedding": {"input_tokens": 0,   "output_tokens": 0,   "total_tokens": 0,    "calls": 0, "unknown_calls": 0}
@@ -236,6 +239,9 @@ data: {"run_id":"uuid","conversation_id":"uuid","status":"completed","last_seq":
 - `unavailable`：旧 run 没有 `usage_breakdown`；`pending`：run 尚未终态。
 
 `usage` 是同一快照的展开形式；`usage_breakdown` 保留原始分桶数据。历史 run 的 `usage_coverage` 为 `unavailable`，dashboard 不显示 0。
+
+- `cached_tokens` / `cache_miss_tokens` / `cache_hit_rate` 是**可选**字段，只在至少一次调用返回了缓存计数时出现；`cache_hit_rate = cached / (cached + miss)`。provider 差异在 `agent-loop/src/bokaclaw_agent/providers/openai_compatible.py` 统一拍平：DeepSeek 的 `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`、OpenAI 的 `prompt_tokens_details.cached_tokens`（缺失 miss 时按 `prompt - cached` 推导）、`completion_tokens_details.reasoning_tokens`。
+- Dashboard 展示：Agent 消息的 usage tooltip 追加 `cache hit N% · X cached / Y uncached`；Trace 页 Tokens 卡片在有缓存数据时显示 `cache hit N%`；llm span 的 `attributes.usage` 是 provider 原始使用量，含缓存与推理 token 明细。
 
 ```text
 event: error

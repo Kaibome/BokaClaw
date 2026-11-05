@@ -73,6 +73,8 @@ export interface UsageSource {
   input_tokens: number;
   output_tokens: number;
   total_tokens: number;
+  cached_tokens?: number;
+  cache_miss_tokens?: number;
   calls: number;
   unknown_calls: number;
 }
@@ -83,6 +85,9 @@ export interface RunUsage {
   input_tokens: number | null;
   output_tokens: number | null;
   total_tokens: number | null;
+  cached_tokens?: number | null;
+  cache_miss_tokens?: number | null;
+  cache_hit_rate?: number | null;
   model_calls: number;
   unknown_calls: number;
   sources: Record<string, UsageSource>;
@@ -135,6 +140,9 @@ export interface AgentRunSpanSummary {
   duration_ms: number | null;
   error: string | null;
   total_tokens?: number | null;
+  cached_tokens?: number | null;
+  cache_miss_tokens?: number | null;
+  cache_hit_rate?: number | null;
 }
 
 export interface AgentRunSpanDetail extends AgentRunSpanSummary {

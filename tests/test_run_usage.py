@@ -252,3 +252,80 @@ def test_zero_usage_is_not_fabricated(usage):
     assert snapshot["coverage"] in {"unknown", "complete"}
     if not normalize_usage(usage):
         assert snapshot["total_tokens"] is None
+
+
+def test_normalize_usage_keeps_cache_and_reasoning_counters():
+    assert normalize_usage(
+        {
+            "prompt_tokens": 100,
+            "completion_tokens": 5,
+            "total_tokens": 105,
+            "prompt_cache_hit_tokens": 64,
+            "prompt_cache_miss_tokens": 36,
+            "reasoning_tokens": 3,
+        }
+    ) == {
+        "prompt_tokens": 100,
+        "completion_tokens": 5,
+        "total_tokens": 105,
+        "cached_tokens": 64,
+        "cache_miss_tokens": 36,
+        "reasoning_tokens": 3,
+    }
+
+
+def test_meter_aggregates_cache_counters_and_reports_hit_rate():
+    meter = RunUsageMeter()
+    meter.record(
+        "agent_loop",
+        {
+            "prompt_tokens": 100,
+            "completion_tokens": 5,
+            "total_tokens": 105,
+            "cached_tokens": 64,
+            "cache_miss_tokens": 36,
+        },
+    )
+    meter.record(
+        "agent_loop",
+        {"prompt_tokens": 20, "completion_tokens": 1, "total_tokens": 21, "cached_tokens": 0, "cache_miss_tokens": 20},
+    )
+    meter.record("memory_embedding", {"prompt_tokens": 3, "completion_tokens": 0, "total_tokens": 3})
+
+    snapshot = meter.snapshot()
+
+    assert snapshot["cached_tokens"] == 64
+    assert snapshot["cache_miss_tokens"] == 56
+    assert snapshot["cache_hit_rate"] == pytest.approx(64 / 120, abs=0.0001)
+    assert snapshot["sources"]["agent_loop"]["cached_tokens"] == 64
+    assert "cached_tokens" not in snapshot["sources"]["memory_embedding"]
+
+
+def test_meter_omits_cache_fields_when_no_call_reports_them():
+    meter = RunUsageMeter()
+    meter.record("agent_loop", {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12})
+
+    snapshot = meter.snapshot()
+
+    assert "cached_tokens" not in snapshot
+    assert "cache_hit_rate" not in snapshot
+
+
+def test_usage_snapshot_from_metadata_upgrades_legacy_cache_counters():
+    snapshot = usage_snapshot_from_metadata(
+        {
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 1,
+                "total_tokens": 11,
+                "prompt_cache_hit_tokens": 4,
+                "prompt_cache_miss_tokens": 6,
+            }
+        }
+    )
+
+    assert snapshot["coverage"] == "aggregate"
+    assert snapshot["cached_tokens"] == 4
+    assert snapshot["cache_miss_tokens"] == 6
+    assert snapshot["cache_hit_rate"] == 0.4
+    assert snapshot["sources"]["agent_loop"]["cached_tokens"] == 4

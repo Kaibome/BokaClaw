@@ -18,6 +18,21 @@ from ..core.utils import parse_tool_arguments
 _USAGE_KEYS = ("prompt_tokens", "completion_tokens", "total_tokens")
 
 
+def _usage_field(usage: Any, key: str) -> Any:
+    if isinstance(usage, dict):
+        return usage.get(key)
+    return getattr(usage, key, None)
+
+
+def _usage_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _mentions_stream_options(exc: Exception) -> bool:
     message = str(exc).lower()
     return "stream_options" in message or "include_usage" in message
@@ -220,11 +235,39 @@ class OpenAICompatibleProvider:
 
     @staticmethod
     def _parse_usage(usage_obj: Any) -> dict[str, int]:
+        """Flatten provider usage into scalar counts the runtime can sum.
+
+        Cache and reasoning counters arrive in provider-specific shapes:
+        DeepSeek returns ``prompt_cache_hit_tokens`` / ``prompt_cache_miss_tokens``,
+        OpenAI nests ``cached_tokens`` under ``prompt_tokens_details``, and
+        reasoning models nest ``reasoning_tokens`` under
+        ``completion_tokens_details``. The runtime merges usage dicts by adding
+        integers, so nested objects must be flattened here.
+        """
+
         if usage_obj is None:
             return {}
-        if isinstance(usage_obj, dict):
-            return {key: int(usage_obj.get(key) or 0) for key in _USAGE_KEYS}
-        return {key: int(getattr(usage_obj, key, 0) or 0) for key in _USAGE_KEYS}
+
+        usage = {key: _usage_int(_usage_field(usage_obj, key)) or 0 for key in _USAGE_KEYS}
+
+        cached = _usage_int(_usage_field(usage_obj, "prompt_cache_hit_tokens"))
+        if cached is None:
+            details = _usage_field(usage_obj, "prompt_tokens_details")
+            cached = _usage_int(_usage_field(details, "cached_tokens"))
+        if cached is not None:
+            usage["cached_tokens"] = cached
+
+        missed = _usage_int(_usage_field(usage_obj, "prompt_cache_miss_tokens"))
+        if missed is None and cached is not None:
+            missed = max(usage["prompt_tokens"] - cached, 0)
+        if missed is not None:
+            usage["cache_miss_tokens"] = missed
+
+        reasoning_details = _usage_field(usage_obj, "completion_tokens_details")
+        reasoning = _usage_int(_usage_field(reasoning_details, "reasoning_tokens"))
+        if reasoning is not None:
+            usage["reasoning_tokens"] = reasoning
+        return usage
 
     @classmethod
     def _parse_response(cls, response: Any) -> ModelResponse:

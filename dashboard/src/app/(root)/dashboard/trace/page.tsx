@@ -255,6 +255,18 @@ function TracePageInner() {
     (sum, span) => sum + (span.total_tokens ?? 0),
     0,
   );
+  const cachedTokens = filteredSpans.reduce(
+    (sum, span) => sum + (span.cached_tokens ?? 0),
+    0,
+  );
+  const uncachedTokens = filteredSpans.reduce(
+    (sum, span) => sum + (span.cache_miss_tokens ?? 0),
+    0,
+  );
+  const cacheHitRate =
+    cachedTokens + uncachedTokens > 0
+      ? Math.round((cachedTokens / (cachedTokens + uncachedTokens)) * 100)
+      : null;
 
   const loadSpanDetail = async (row: AgentRunSpanSummary) => {
     const requestId = ++detailRequestRef.current;
@@ -425,10 +437,11 @@ function TracePageInner() {
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
         {[
-          { label: "Runs", value: totalRuns },
+          { label: "Runs", value: totalRuns, hint: undefined },
           {
             label: "Avg Duration",
             value: averageDuration === null ? "--" : `${averageDuration} ms`,
+            hint: undefined,
           },
           {
             label: "Tokens",
@@ -436,6 +449,8 @@ function TracePageInner() {
               spansWithTokens.length > 0
                 ? totalTokens.toLocaleString("en-US")
                 : "--",
+            hint:
+              cacheHitRate === null ? undefined : `cache hit ${cacheHitRate}%`,
           },
           {
             label: "Errors",
@@ -443,6 +458,7 @@ function TracePageInner() {
               totalSpans > 0
                 ? `${failedSpans} (${Math.round((failedSpans / totalSpans) * 100)}%)`
                 : "--",
+            hint: undefined,
           },
         ].map((card) => (
           <Card key={card.label} className="border-memBorder-primary">
@@ -451,6 +467,11 @@ function TracePageInner() {
                 {card.label}
               </p>
               <p className="mt-1 text-2xl font-semibold">{card.value}</p>
+              {card.hint ? (
+                <p className="text-xs text-onSurface-default-tertiary">
+                  {card.hint}
+                </p>
+              ) : null}
             </CardContent>
           </Card>
         ))}

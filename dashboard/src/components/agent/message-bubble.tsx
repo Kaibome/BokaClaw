@@ -47,6 +47,13 @@ function usageTitle(usage: RunUsage): string {
   const lines = [
     `input ${usage.input_tokens ?? "?"} · output ${usage.output_tokens ?? "?"} · ${usage.model_calls} calls`,
   ];
+  if (usage.cache_hit_rate !== null && usage.cache_hit_rate !== undefined) {
+    const cached = formatTokens(usage.cached_tokens ?? 0);
+    const missed = formatTokens(usage.cache_miss_tokens ?? 0);
+    lines.push(
+      `cache hit ${Math.round(usage.cache_hit_rate * 100)}% · ${cached} cached / ${missed} uncached`,
+    );
+  }
   for (const [source, detail] of Object.entries(usage.sources ?? {})) {
     if (!detail.calls) continue;
     const unknown = detail.unknown_calls

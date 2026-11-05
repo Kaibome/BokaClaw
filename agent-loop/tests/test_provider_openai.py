@@ -250,3 +250,72 @@ def test_stream_errors_are_wrapped(mocker):
 
     with pytest.raises(ModelError, match="rate limited"):
         list(provider.stream_complete([{"role": "user", "content": "go"}]))
+
+
+def test_parse_usage_flattens_deepseek_cache_and_reasoning_counters():
+    usage = SimpleNamespace(
+        prompt_tokens=100,
+        completion_tokens=5,
+        total_tokens=105,
+        prompt_cache_hit_tokens=64,
+        prompt_cache_miss_tokens=36,
+        completion_tokens_details=SimpleNamespace(reasoning_tokens=3),
+    )
+
+    assert OpenAICompatibleProvider._parse_usage(usage) == {
+        "prompt_tokens": 100,
+        "completion_tokens": 5,
+        "total_tokens": 105,
+        "cached_tokens": 64,
+        "cache_miss_tokens": 36,
+        "reasoning_tokens": 3,
+    }
+
+
+def test_parse_usage_derives_miss_from_openai_cached_details():
+    usage = {
+        "prompt_tokens": 100,
+        "completion_tokens": 5,
+        "total_tokens": 105,
+        "prompt_tokens_details": {"cached_tokens": 40},
+    }
+
+    assert OpenAICompatibleProvider._parse_usage(usage) == {
+        "prompt_tokens": 100,
+        "completion_tokens": 5,
+        "total_tokens": 105,
+        "cached_tokens": 40,
+        "cache_miss_tokens": 60,
+    }
+
+
+def test_parse_usage_omits_cache_keys_when_the_provider_has_none():
+    usage = SimpleNamespace(prompt_tokens=11, completion_tokens=7, total_tokens=18)
+
+    assert OpenAICompatibleProvider._parse_usage(usage) == {
+        "prompt_tokens": 11,
+        "completion_tokens": 7,
+        "total_tokens": 18,
+    }
+
+
+def test_stream_complete_keeps_cache_counters_from_the_final_chunk(mocker):
+    usage = SimpleNamespace(
+        prompt_tokens=64,
+        completion_tokens=2,
+        total_tokens=66,
+        prompt_cache_hit_tokens=32,
+        prompt_cache_miss_tokens=32,
+    )
+    client = _mock_client(mocker, iter([_stream_chunk(finish_reason="stop", usage=usage)]))
+    provider = OpenAICompatibleProvider(ModelConfig(model="test-model", api_key="k"), client=client)
+
+    chunks = list(provider.stream_complete([{"role": "user", "content": "hi"}]))
+
+    assert chunks[-1].usage == {
+        "prompt_tokens": 64,
+        "completion_tokens": 2,
+        "total_tokens": 66,
+        "cached_tokens": 32,
+        "cache_miss_tokens": 32,
+    }

@@ -126,3 +126,44 @@ def test_detail_missing_span_returns_404(client):
 )
 def test_invalid_filters_return_422(client, query):
     assert client.get(f"/traces?{query}").status_code == 422
+
+
+def test_list_reports_cache_counters_from_the_root_span():
+    span = _span(
+        1,
+        attributes={
+            "usage": {
+                "coverage": "complete",
+                "total_tokens": 20,
+                "cached_tokens": 12,
+                "cache_miss_tokens": 8,
+            }
+        },
+    )
+    app = FastAPI()
+    app.include_router(traces_router.router)
+    fake_user = User(id=uuid.uuid4(), name="t", email="t@e.com", password_hash="x", role="admin")
+    app.dependency_overrides[require_admin] = lambda: fake_user
+    app.dependency_overrides[get_db] = lambda: _FakeSession([span])
+
+    body = TestClient(app, raise_server_exceptions=False).get("/traces").json()[0]
+
+    assert body["total_tokens"] == 20
+    assert body["cached_tokens"] == 12
+    assert body["cache_miss_tokens"] == 8
+    assert body["cache_hit_rate"] == 0.6
+
+
+def test_list_omits_cache_fields_when_the_run_reported_none():
+    span = _span(1, attributes={"usage": {"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6}})
+    app = FastAPI()
+    app.include_router(traces_router.router)
+    fake_user = User(id=uuid.uuid4(), name="t", email="t@e.com", password_hash="x", role="admin")
+    app.dependency_overrides[require_admin] = lambda: fake_user
+    app.dependency_overrides[get_db] = lambda: _FakeSession([span])
+
+    body = TestClient(app, raise_server_exceptions=False).get("/traces").json()[0]
+
+    assert body["total_tokens"] == 6
+    assert body["cached_tokens"] is None
+    assert body["cache_hit_rate"] is None

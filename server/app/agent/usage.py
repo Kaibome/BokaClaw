@@ -27,6 +27,11 @@ _TOKEN_ALIASES = {
     "input": "prompt_tokens",
     "output": "completion_tokens",
     "total": "total_tokens",
+    "cached_tokens": "cached_tokens",
+    "prompt_cache_hit_tokens": "cached_tokens",
+    "cache_miss_tokens": "cache_miss_tokens",
+    "prompt_cache_miss_tokens": "cache_miss_tokens",
+    "reasoning_tokens": "reasoning_tokens",
 }
 
 CURRENT_METER: ContextVar["RunUsageMeter | None"] = ContextVar("bokaclaw_run_usage_meter", default=None)
@@ -72,13 +77,38 @@ def normalize_usage(usage: Any) -> dict[str, int]:
     return values
 
 
+def _cache_summary(cached: int, missed: int) -> dict[str, Any]:
+    """Cache counters plus the hit rate, omitted when no call reported them."""
+
+    values: dict[str, Any] = {
+        "cached_tokens": cached,
+        "cache_miss_tokens": missed,
+    }
+    denominator = cached + missed
+    if denominator > 0:
+        values["cache_hit_rate"] = round(cached / denominator, 4)
+    return values
+
+
 class _Bucket:
-    __slots__ = ("prompt_tokens", "completion_tokens", "total_tokens", "calls", "unknown_calls")
+    __slots__ = (
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "cached_tokens",
+        "cache_miss_tokens",
+        "cache_calls",
+        "calls",
+        "unknown_calls",
+    )
 
     def __init__(self) -> None:
         self.prompt_tokens = 0
         self.completion_tokens = 0
         self.total_tokens = 0
+        self.cached_tokens = 0
+        self.cache_miss_tokens = 0
+        self.cache_calls = 0
         self.calls = 0
         self.unknown_calls = 0
 
@@ -86,15 +116,23 @@ class _Bucket:
         self.prompt_tokens += int(usage.get("prompt_tokens") or 0)
         self.completion_tokens += int(usage.get("completion_tokens") or 0)
         self.total_tokens += int(usage.get("total_tokens") or 0)
+        if "cached_tokens" in usage or "cache_miss_tokens" in usage:
+            self.cache_calls += 1
+            self.cached_tokens += int(usage.get("cached_tokens") or 0)
+            self.cache_miss_tokens += int(usage.get("cache_miss_tokens") or 0)
 
     def as_dict(self) -> dict[str, int]:
-        return {
+        values: dict[str, int] = {
             "input_tokens": self.prompt_tokens,
             "output_tokens": self.completion_tokens,
             "total_tokens": self.total_tokens,
             "calls": self.calls,
             "unknown_calls": self.unknown_calls,
         }
+        if self.cache_calls:
+            values["cached_tokens"] = self.cached_tokens
+            values["cache_miss_tokens"] = self.cache_miss_tokens
+        return values
 
 
 class RunUsageMeter:
@@ -223,6 +261,14 @@ class RunUsageMeter:
                 "unknown_calls": unknown_calls,
                 "sources": sources,
             }
+            cache_buckets = [bucket for bucket in self._buckets.values() if bucket.cache_calls]
+            if cache_buckets:
+                snapshot.update(
+                    _cache_summary(
+                        sum(bucket.cached_tokens for bucket in cache_buckets),
+                        sum(bucket.cache_miss_tokens for bucket in cache_buckets),
+                    )
+                )
             if self._unmetered:
                 snapshot["unmetered_sources"] = list(self._unmetered)
             if self._warnings:
@@ -266,7 +312,14 @@ def usage_snapshot_from_metadata(metadata: Mapping[str, Any] | None) -> dict[str
     prompt = normalized.get("prompt_tokens", 0)
     completion = normalized.get("completion_tokens", 0)
     total = normalized.get("total_tokens", prompt + completion)
-    return {
+    source: dict[str, int] = {
+        "input_tokens": prompt,
+        "output_tokens": completion,
+        "total_tokens": total,
+        "calls": 1,
+        "unknown_calls": 0,
+    }
+    snapshot: dict[str, Any] = {
         "coverage": "aggregate",
         "transport": "legacy",
         "input_tokens": prompt,
@@ -274,16 +327,14 @@ def usage_snapshot_from_metadata(metadata: Mapping[str, Any] | None) -> dict[str
         "total_tokens": total,
         "model_calls": 1,
         "unknown_calls": 0,
-        "sources": {
-            "agent_loop": {
-                "input_tokens": prompt,
-                "output_tokens": completion,
-                "total_tokens": total,
-                "calls": 1,
-                "unknown_calls": 0,
-            }
-        },
+        "sources": {"agent_loop": source},
     }
+    if "cached_tokens" in normalized or "cache_miss_tokens" in normalized:
+        cached = normalized.get("cached_tokens", 0)
+        missed = normalized.get("cache_miss_tokens", 0)
+        source.update(cached_tokens=cached, cache_miss_tokens=missed)
+        snapshot.update(_cache_summary(cached, missed))
+    return snapshot
 
 
 # --------------------------------------------------------------------- mem0

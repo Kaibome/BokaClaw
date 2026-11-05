@@ -37,30 +37,47 @@ class TraceSpanItem(BaseModel):
     duration_ms: int | None
     error: str | None
     total_tokens: int | None = None
+    cached_tokens: int | None = None
+    cache_miss_tokens: int | None = None
+    cache_hit_rate: float | None = None
 
     model_config = {"from_attributes": True}
 
 
-def _span_total_tokens(attributes: object) -> int | None:
-    """Read the run total recorded on a root span.
+def _span_usage(attributes: object) -> tuple[int | None, int | None, int | None, float | None]:
+    """Read (total, cached, missed, hit_rate) from a root span's usage.
 
     The runner stores a usage snapshot (``coverage``/``total_tokens``/sources)
     on the root span; older spans may carry the raw provider usage instead.
+    Cache counters are optional: providers that support prompt caching report
+    them, everything else leaves them out.
     """
 
     if not isinstance(attributes, dict):
-        return None
+        return None, None, None, None
     usage = attributes.get("usage")
     if not isinstance(usage, dict):
-        return None
+        return None, None, None, None
+
     total = usage.get("total_tokens")
     if isinstance(total, int):
-        return total
-    prompt = usage.get("prompt_tokens")
-    completion = usage.get("completion_tokens")
-    if isinstance(prompt, int) or isinstance(completion, int):
-        return (prompt if isinstance(prompt, int) else 0) + (completion if isinstance(completion, int) else 0)
-    return None
+        total_tokens: int | None = total
+    else:
+        prompt = usage.get("prompt_tokens")
+        completion = usage.get("completion_tokens")
+        total_tokens = None
+        if isinstance(prompt, int) or isinstance(completion, int):
+            total_tokens = (prompt if isinstance(prompt, int) else 0) + (
+                completion if isinstance(completion, int) else 0
+            )
+
+    cached = usage.get("cached_tokens")
+    missed = usage.get("cache_miss_tokens")
+    if not isinstance(cached, int) or not isinstance(missed, int):
+        return total_tokens, None, None, None
+
+    hit_rate = round(cached / (cached + missed), 4) if cached + missed > 0 else None
+    return total_tokens, cached, missed, hit_rate
 
 
 class TraceSpanDetail(TraceSpanItem):
@@ -97,7 +114,12 @@ def list_traces(
     for span in spans:
         item = TraceSpanItem.model_validate(span)
         if span.span_type == "agent":
-            item.total_tokens = _span_total_tokens(span.attributes)
+            (
+                item.total_tokens,
+                item.cached_tokens,
+                item.cache_miss_tokens,
+                item.cache_hit_rate,
+            ) = _span_usage(span.attributes)
         items.append(item)
     return items
 

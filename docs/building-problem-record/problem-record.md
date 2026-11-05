@@ -548,6 +548,26 @@
 
 ---
 
+## P-16 Span 采集的模型调用缺少缓存命中 / 缓存 token 信息
+
+- **状态**：已解决
+- **发现时间**：2026-11-05
+- **解决时间**：2026-11-05
+- **场景**：评估 Eval 时想在 Trace 里看每次模型调用的 prompt cache 命中情况，发现 span 的 `attributes.usage` 只有 `prompt_tokens` / `completion_tokens` / `total_tokens`。
+- **证据**：
+  - DB 聚合：`agent_run_spans` 中 `span_type='llm'` 且带 usage 的 4 条记录，key 只有上述 3 个；
+  - 直连 `https://api.deepseek.com`（`deepseek-flash`）实测非流式与 `stream_options.include_usage=true` 的末 chunk 返回同样的 6 个字段：`prompt_tokens_details.cached_tokens`、`completion_tokens_details.reasoning_tokens`、`prompt_cache_hit_tokens`、`prompt_cache_miss_tokens`；
+  - 修复后 run `0d6e0f33`：llm span 1 `cached=2048/miss=1686`、llm span 2 `cached=3456/miss=1110`，根 span `cache_hit_rate=0.6631`。
+- **根因**：不是接口没返回，而是 `agent-loop/src/bokaclaw_agent/providers/openai_compatible.py` 的 `_parse_usage()` 只按 `_USAGE_KEYS`（3 个 key）取值，provider 专有字段在入口即被丢弃；后续 runtime `_merge_usage`、span 写入（`server/app/agent/spans.py:370`）都是原样透传。第二处白名单在 `server/app/agent/usage.py`：`_TOKEN_ALIASES` + `_Bucket` 只累加 3 个字段，即使透传也不会进入 run 级快照；`/traces` 与 Dashboard 同样没有缓存槽位。另注意 `_merge_usage` 用 `int(value)` 累加，嵌套对象必须在这里拍平。
+- **解决措施**：
+  - provider：`_parse_usage` 拍平 DeepSeek / OpenAI 两种缓存口径（miss 缺失时按 `prompt - cached` 推导）与 `reasoning_tokens`；
+  - `server/app/agent/usage.py`：别名表、`_Bucket`、`snapshot()` 与 legacy 快照升级路径增加 `cached_tokens` / `cache_miss_tokens` / `cache_hit_rate`，无缓存数据时不输出这些 key；
+  - `/traces` 列表为 agent span 补三个字段；Dashboard 类型、Trace Tokens 卡片与 Agent 消息 usage tooltip 展示命中率。
+- **解决后效果**：真实 run 命中率 66%；`/traces` 返回 `cached_tokens=5504`、`cache_miss_tokens=2796`、`cache_hit_rate=0.6631`；旧 span 对应字段为 `null`（不伪造 0）；agent-loop 165 passed，server 相关 29 passed，`tsc` 与 Prettier 通过。
+- **可复用结论**：OpenAI-compatible provider 的 usage 不是稳定三元组；凡是按固定 key 白名单取值的解析层，都会静默丢掉 provider 的扩展计数字段。计数字段一旦要参与累加，必须在 provider 边界拍平，且「无数据」与「值为 0」要区分开。
+
+---
+
 ## 变更记录
 
 | 日期 | 变更 |
@@ -575,3 +595,4 @@
 | 2026-11-05 | 追加 P-13：按 run 统计所有可归属模型调用（主循环 / 压缩 / mem0 LLM / embedding）的 input/output/total token，迁移 011 落库，`coverage` 区分 complete/partial/unknown/aggregate/unavailable；真实 run 与取消 run 验证通过，server 59 + 扩展 100 passed，agent-loop 161 passed，Dashboard 构建通过 |
 | 2026-11-05 | 追加 P-14：修复 `RunEventWriter` 缓冲未 flush 导致短回答 run 被误判 `agent_protocol_error`；`_run_worker` 在 `_completion_state()` 前 flush，回归测试转绿 |
 | 2026-11-05 | 追加 P-15：分析 run `bf25efa8` 「记忆检索未触发」——实际已注入（日志 + `llm:2` system prompt 第 679 字符起 2750 字符注入块），不可见因自动检索无 span/事件；同时定位阈值口径问题：mem0 混合分在有 BM25 命中时除以 2，`_fresh_entry` 拿混合分比固定 0.5 导致召回随候选池漂移；结论写入候选修复，代码未改 |
+| 2026-11-05 | 追加 P-16：模型接口实际返回了缓存计数字段，但 provider `_parse_usage` 的 3-key 白名单在入口丢弃；拍平 DeepSeek/OpenAI 两种缓存口径与 `reasoning_tokens`，usage meter/`/traces`/Dashboard 增加命中率展示；真实 run `0d6e0f33` 命中率 66% |
