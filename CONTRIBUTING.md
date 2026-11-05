@@ -4,8 +4,8 @@ First off, thank you for taking the time to contribute! 🎉 Mem0 is a
 community-driven project and we welcome contributions of all kinds — bug fixes,
 new features, documentation, examples, and integrations.
 
-Mem0 is a polyglot monorepo, and this guide covers contributing to both the
-**Python SDK** and the **TypeScript SDK** (and the rest of the repository).
+Mem0 is a polyglot monorepo, and this guide covers contributing to the
+**Python SDK** (and the rest of the repository).
 
 By participating you agree to our [Code of Conduct](./CODE_OF_CONDUCT.md). Its
 **Contribution Conduct** section is the enforceable form of the rules on this
@@ -115,12 +115,11 @@ For anything larger than a docs fix or a small bug, follow the full workflow bel
 
 ## Repository Layout
 
-The two most common contribution targets are the SDKs:
+The primary contribution target is the Python SDK:
 
 | Package               | Path       | Language     | Package manager |
 | --------------------- | ---------- | ------------ | --------------- |
 | Python SDK (`mem0ai`) | `mem0/`    | Python 3.9+  | `hatch`         |
-| TypeScript SDK (`mem0ai`) | `mem0-ts/` | TypeScript | `pnpm`        |
 
 Other packages include the CLIs (`cli/python/`, `cli/node/`), integrations
 (`integrations/`), the self-hosted `server/`, and the docs site
@@ -167,26 +166,6 @@ make test
 
 See the full [Development guide](https://docs.mem0.ai/contributing/development) for
 environment details.
-
-### Contributing to the TypeScript SDK (`mem0-ts/`)
-
-We use [`pnpm`](https://pnpm.io/) (v10+) for all TypeScript packages. **Do not use
-`npm` or `yarn`.**
-
-```bash
-cd mem0-ts
-pnpm install
-
-pnpm run build        # tsup (CJS + ESM)
-pnpm run test         # jest (all tests)
-pnpm run test:unit    # unit tests with coverage
-```
-
-- **Build:** tsup
-- **Formatter:** Prettier
-- **Tests:** jest
-- Always run type checking after changes: `pnpm run typecheck` (or `tsc --noEmit`).
-- Use ES module `import` syntax — never `require()`.
 
 ## Good Contribution Practices
 
@@ -235,7 +214,6 @@ is created with the correct tag prefix.
 |---------|----------|------------|---------|
 | `mem0ai` (Python SDK) | PyPI | `v*` | `v0.1.31` |
 | `mem0-cli` (Python CLI) | PyPI | `cli-v*` | `cli-v0.2.1` |
-| `mem0ai` (TypeScript SDK) | npm | `ts-v*` | `ts-v2.4.6` |
 | `@mem0/cli` (Node CLI) | npm | `cli-node-v*` | `cli-node-v0.1.2` |
 | `@mem0/vercel-ai-provider` | npm | `vercel-ai-v*` | `vercel-ai-v2.0.6` |
 | `@mem0/openclaw-mem0` | npm | `openclaw-v*` | `openclaw-v1.0.1` |

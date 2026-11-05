@@ -14,7 +14,6 @@ Package workflows keep their own push-to-main and manual triggers. Their `pull_r
 |----------|------|---------------------|------|
 | CI Gate | `ci-gate.yml` | All PRs | Routes to and aggregates everything below |
 | Python SDK | `ci.yml` | Push to main | Ruff + pytest on Python 3.10, 3.11, 3.12 |
-| TypeScript SDK | `ts-sdk-ci.yml` | Push to main (`mem0-ts/`) | Prettier + build + jest on Node 20, 22 |
 | Python CLI | `cli-python-ci.yml` | Push to main (`cli/python/`), manual | Ruff + pytest + hatch build on Python 3.10, 3.11, 3.12 |
 | Node CLI | `cli-node-ci.yml` | Push to main (`cli/node/`), manual | Biome + tsc + vitest + tsup on Node 20, 22 |
 | OpenClaw | `openclaw-checks.yml` | Push to main (`integrations/openclaw/`), manual | tsc + vitest (Codecov) + tsup on Node 20, 22 |
@@ -54,7 +53,6 @@ Requiring `CI Gate` also means fork PRs from first-time contributors cannot merg
 |----------|------|------------|--------|
 | Release Router | `release.yml` | all releases | dispatches the rows below |
 | Python SDK | `cd.yml` | `v*` | PyPI (`mem0ai`) |
-| TypeScript SDK | `ts-sdk-cd.yml` | `ts-v*` | npm (`mem0ai`) |
 | Python CLI | `cli-python-cd.yml` | `cli-v*` | PyPI (`mem0-cli`) |
 | Node CLI | `cli-node-cd.yml` | `cli-node-v*` | npm (`@mem0/cli`) |
 | Vercel AI SDK | `vercel-ai-cd.yml` | `vercel-ai-v*` | npm (`@mem0/vercel-ai-provider`) |

@@ -9,7 +9,8 @@ export default defineConfig([
     sourcemap: true,
     // Injected rather than written in the source. A hardcoded literal matches
     // package.json on the day it is written and misreports the client version
-    // from the next release bump onwards. Same mechanism as mem0-ts.
+    // from the next release bump onwards. Same mechanism as the other
+    // TypeScript packages.
     define: {
       __MEM0_PROVIDER_VERSION__: JSON.stringify(pkg.version),
     },

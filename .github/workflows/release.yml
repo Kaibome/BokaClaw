@@ -38,7 +38,6 @@ jobs:
           # must stay last so prefixed tags that also start with 'v'
           # (vercel-ai-v*) can never be routed to the Python pipeline.
           case "$TAG" in
-            ts-v*)        workflow="ts-sdk-cd.yml" ;;
             cli-node-v*)  workflow="cli-node-cd.yml" ;;
             cli-v*)       workflow="cli-python-cd.yml" ;;
             vercel-ai-v*) workflow="vercel-ai-cd.yml" ;;

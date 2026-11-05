@@ -10,7 +10,6 @@ body:
       description: Which part of mem0 is affected?
       options:
         - Python SDK
-        - TypeScript SDK
         - Vector Store
         - Plugin
         - REST API

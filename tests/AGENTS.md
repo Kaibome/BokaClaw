@@ -21,4 +21,4 @@ pytest tests/llms/test_openai.py::test_generate_response   # single test
 - Mock the provider SDK, never the code under test. A test that asserts the implementation back at itself is worse than no test.
 - Bug fixes need a regression test that fails without the fix. Write it first and watch it fail.
 
-Tests for other packages live with those packages: `mem0-ts/` (jest), `cli/python/tests/` (pytest), `cli/node/` (vitest), and each directory under `integrations/`.
+Tests for other packages live with those packages: `cli/python/tests/` (pytest), `cli/node/` (vitest), and each directory under `integrations/`.

@@ -10,14 +10,12 @@ sdk-python:
 sdk-typescript:
   - changed-files:
       - any-glob-to-any-file:
-          - 'mem0-ts/**'
           - 'cli/node/**'
 
 vector-store:
   - changed-files:
       - any-glob-to-any-file:
           - 'mem0/vector_stores/**'
-          - 'mem0-ts/src/oss/src/vector_stores/**'
 
 rest-api:
   - changed-files:

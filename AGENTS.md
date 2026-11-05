@@ -16,7 +16,7 @@ This is a polyglot monorepo and **every package sets its own rules**. Read the `
 - Skip pre-commit hooks.
 - Use npm or yarn in TypeScript packages. This repo is pnpm-only (Bun in `integrations/opencode-plugin/`).
 - Use `require()` in TypeScript. ES module `import` syntax only.
-- Mix up linter configs. Root Python is ruff at line length **120**, `cli/python/` is ruff at **100**, `cli/node/` is Biome, `mem0-ts/` is Prettier, `integrations/vercel-ai-sdk/` is ESLint.
+- Mix up linter configs. Root Python is ruff at line length **120**, `cli/python/` is ruff at **100**, `cli/node/` is Biome, `integrations/vercel-ai-sdk/` is ESLint.
 - Add Python dependencies to the core `dependencies` list in `pyproject.toml`. Use an optional group.
 - Change a public API without updating `docs/` in the same pull request.
 - Introduce a new framework or abstraction without discussion. Follow the patterns already in the file you are editing.
@@ -27,7 +27,6 @@ This is a polyglot monorepo and **every package sets its own rules**. Read the `
 |---------|------|-----------|
 | `mem0/` | [`mem0/AGENTS.md`](mem0/AGENTS.md) | hatch, ruff 120, pytest |
 | `tests/` | [`tests/AGENTS.md`](tests/AGENTS.md) | pytest |
-| `mem0-ts/` | [`mem0-ts/AGENTS.md`](mem0-ts/AGENTS.md) | pnpm, tsup, Prettier, jest |
 | `cli/python/` | [`cli/python/AGENTS.md`](cli/python/AGENTS.md) | ruff **100**, pytest |
 | `cli/node/` | [`cli/node/AGENTS.md`](cli/node/AGENTS.md) | pnpm, tsup, Biome, vitest |
 | `agent-loop/` | [`agent-loop/AGENTS.md`](agent-loop/AGENTS.md) | hatch, ruff 120, pytest |
@@ -42,7 +41,6 @@ This is a polyglot monorepo and **every package sets its own rules**. Read the `
 | Directory | What it is |
 |-----------|------------|
 | `mem0/` | Core Python SDK (`mem0ai` on PyPI): memory, LLMs, embeddings, vector stores, graphs, rerankers |
-| `mem0-ts/` | TypeScript SDK (`mem0ai` on npm): hosted client + OSS memory |
 | `cli/python/` | Python CLI (`mem0-cli` on PyPI), Typer-based, entry point `mem0` |
 | `cli/node/` | Node CLI (`@mem0/cli` on npm), Commander-based, entry point `mem0` |
 | `agent-loop/` | Standalone Python SDK (`bokaclaw-agent`): ReAct agent runtime with tool execution and Postgres session persistence |
@@ -57,13 +55,13 @@ This is a polyglot monorepo and **every package sets its own rules**. Read the `
 | `pr-reviews/` | Pull request review materials |
 
 ```
-mem0 (Python SDK)          mem0-ts (TypeScript SDK)
-├── mem0/memory/           ├── src/client/    MemoryClient (hosted)
-├── mem0/llms/             └── src/oss/       Memory (self-hosted)
-├── mem0/embeddings/           ├── src/llms/
-├── mem0/vector_stores/        ├── src/embeddings/
-├── mem0/graphs/               ├── src/vector_stores/
-└── mem0/reranker/             └── src/graphs/
+mem0 (Python SDK)
+├── mem0/memory/
+├── mem0/llms/
+├── mem0/embeddings/
+├── mem0/vector_stores/
+├── mem0/graphs/
+└── mem0/reranker/
 
 cli/python/                 ──▶ mem0ai (optional, OSS mode)
 cli/node/                   ──▶ mem0ai (npm)

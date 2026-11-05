@@ -12,12 +12,6 @@ const cases = [
     expected: ["sdk-python"],
   },
   {
-    number: 5770,
-    title: "feat(ts-sdk): add FastEmbed embedding provider",
-    body: "## Summary\n\nThe Python SDK supports **FastEmbed** as an embedding provider, but the TypeScript OSS SDK (`mem0ai/oss`) does not. Add it to bring the TS SDK to parity.\n\n| | |\n|---|---|\n| Python reference | `mem0/embeddings/fastembed.py` |\n| Registered in (Python) | `mem0/utils/factory.py` (EmbedderFactory) |\n| Target file (TypeScript) | `mem0-ts/src/oss/src/embeddings/fastembed.ts` |\n| Suggested implementation | Use the `fastembed` npm package (ONNX local embeddings). |\n\n## Requirements\n\n- [ ] Implement `FastEmbedEmbedder` in `mem0-ts/src/oss/src/embeddings/fastembed.ts`, extending `Embedder` (`mem0-ts/src/oss/src/embeddings/base.ts`) and mirroring the Python provider's behavior (embed / embedBatch).\n- [ ] Register the `\"fastembed\"` provider in `mem0-ts/src/oss/src/utils/factory.ts` (EmbedderFactory).\n- [ ] Add config typing in `mem0-ts/src/oss/src/types/`.\n- [ ] Add a unit test under `mem0-ts/src/oss/src/tests/`.\n- [ ] Add `fastembed` to `mem0-ts/package.json` (optional/peer dependency, lazy-imported like other providers).\n- [ ] Update docs under `docs/` if this provider is user-facing.\n\n## Reference pattern\n\nMirror an existing TS provider: `embeddings/openai.ts`.\n\n## Notes\n\n`fastembed` (v2.x) is the JS port of Qdrant's FastEmbed — local/offline embeddings. Mirror the default model in `mem0/embeddings/fastembed.py`.\n\n---\n_Part of the TypeScript ↔ Python SDK provider-parity effort. One provider per issue (atomic)._\n",
-    expected: ["sdk-typescript"],
-  },
-  {
     number: 3940,
     title: "Milvus database will return distance not similarity score",
     body: "### 🐛 Describe the bug\n\nMilvus database will return distance not similarity score\n\n## in milvus.py\n\ndef _parse_output(self, data: list):\n        \"\"\"\n        Parse the output data.\n\n        Args:\n            data (Dict): Output data.\n\n        Returns:\n            List[OutputData]: Parsed output data.\n        \"\"\"\n        memory = []\n\n        for value in data:\n            uid, score, metadata = (\n                value.get(\"id\"),\n                value.get(\"distance\"),  # here\n                value.get(\"entity\", {}).get(\"metadata\"),\n            )\n\n            memory_obj = OutputData(id=uid, score=score, payload=metadata)\n            memory.append(memory_obj)\n\n        return memory\n",
@@ -55,6 +49,11 @@ const cliRegressionCase = {
   body: "### 🐛 Describe the bug\n\n#### Description\n\nWhen using the locally deployed `mem0` server, the returned memory `score` from the `search` interface does not align with the expected semantic relevance. In particular, irrelevant or less relevant memories sometimes receive higher scores than directly related ones.\n\n#### Reproduction Steps\n\n```python\nmem0 = mem0_client(mode=\"local\")\nprint(\"Mem0 client initialized successfully.\")\n\nprint(\"Adding memories...\")\nresult = mem0.add(messages=[\n    {\"role\": \"user\", \"content\": \"I like drinking coffee in the morning\"},\n    {\"role\": \"user\", \"content\": \"I enjoy reading books at night\"}\n], user_id=\"alice\")\nprint(\"Memory added:\", result)\n\nprint(\"Searching memories...\")\nsearch_result = mem0.search(query=\"coffee\", user_id=\"alice\", top_k=2)\nprint(\"Search results:\", search_result)\n```\n\n#### Actual Output\n\n```json\n{\n  \"results\": [\n    {\n      \"id\": \"5099b5be-c673-4f09-99de-a196f43b6476\",\n      \"memory\": \"Likes drinking coffee in the morning\",\n      \"score\": 0.5115111920687857\n    },\n    {\n      \"id\": \"08df5c51-c52b-4c45-a5b6-b3f864ea149a\",\n      \"memory\": \"Enjoys reading books at night\",\n      \"score\": 0.7755568273863331\n    }\n  ],\n  \"relations\": [\n    {\"source\": \"coffee\", \"relationship\": \"consumed_in\", \"destination\": \"morning\"},\n    {\"source\": \"user_id:_alice\", \"relationship\": \"likes\", \"destination\": \"coffee\"},\n    {\"source\": \"user_id:_alice\", \"relationship\": \"likes_drinking\", \"destination\": \"coffee\"},\n    {\"source\": \"user_id:_alice\", \"relationship\": \"in_time\", \"destination\": \"morning\"},\n    {\"source\": \"user_id:_alice\", \"relationship\": \"drinks_in\", \"destination\": \"morning\"}\n  ]\n}\n```\n\n#### Expected Behavior\n\nThe memory `\"Likes drinking coffee in the morning\"` should have a **higher score** than `\"Enjoys reading books at night\"` when querying for `\"coffee\"`, since it is directly semantically related.",
 };
 
+const tsCliCase = {
+  title: "fix(node-cli): config command writes undefined under Node 20",
+  body: "### Description\n\nThe TypeScript build passes, but `npx mem0 config set` writes `undefined` into the config file.\n\n### Environment\n\n- @mem0/cli version: 0.1.2\n- Node version: 20.11.0\n",
+};
+
 let failures = 0;
 
 function run(name, fn) {
@@ -84,6 +83,13 @@ ${cliRegressionCase.body}`;
   assert.ok(!inferred.includes('cli'), `expected 'cli' absent (body contains 'Mem0 client', a substring of the removed 'mem0 cli' term), got ${JSON.stringify(inferred)}`);
 });
 
+run('typescriptCliClassification', () => {
+  const text = `${tsCliCase.title}
+
+${tsCliCase.body}`;
+  assert.deepStrictEqual(inferComponentLabels(text, keywords), ['sdk-typescript', 'cli']);
+});
+
 run('noKeywordMatchReturnsEmptyArray', () => {
   const text = 'The weather today is sunny and I went for a walk in the park with my dog.';
   assert.deepStrictEqual(inferComponentLabels(text, keywords), []);
@@ -99,4 +105,4 @@ ${failures} test(s) failed.`);
   process.exit(1);
 }
 console.log(`
-All ${cases.length + 3} tests passed.`);
+All ${cases.length + 4} tests passed.`);

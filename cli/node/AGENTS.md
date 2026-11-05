@@ -19,9 +19,9 @@ pnpm only. Never npm, never yarn.
 
 ## Conventions
 
-> **Biome, not ESLint. vitest, not jest.** `mem0-ts/` uses Prettier + jest and
-> `integrations/vercel-ai-sdk/` uses ESLint + jest. Running those tools here produces
-> spurious diffs. Every toolchain in this repo is per-package.
+> **Biome, not ESLint. vitest, not jest.** `integrations/vercel-ai-sdk/` uses
+> ESLint + jest. Running those tools here produces spurious diffs. Every toolchain
+> in this repo is per-package.
 
 - **Node 18+** required.
 - **Build:** tsup, ESM output only.

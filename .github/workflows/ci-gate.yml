@@ -34,7 +34,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       python_sdk: ${{ steps.filter.outputs.python_sdk }}
-      ts_sdk: ${{ steps.filter.outputs.ts_sdk }}
       cli_python: ${{ steps.filter.outputs.cli_python }}
       cli_node: ${{ steps.filter.outputs.cli_node }}
       openclaw: ${{ steps.filter.outputs.openclaw }}
@@ -61,10 +60,6 @@ jobs:
               - 'tests/**'
               - 'pyproject.toml'
               - '.github/workflows/ci.yml'
-              - '.github/workflows/ci-gate.yml'
-            ts_sdk:
-              - 'mem0-ts/**'
-              - '.github/workflows/ts-sdk-ci.yml'
               - '.github/workflows/ci-gate.yml'
             cli_python:
               - 'cli/python/**'
@@ -146,13 +141,6 @@ jobs:
     needs: changes
     if: needs.changes.outputs.python_sdk == 'true'
     uses: ./.github/workflows/ci.yml
-    secrets: inherit
-
-  ts-sdk:
-    name: TypeScript SDK
-    needs: changes
-    if: needs.changes.outputs.ts_sdk == 'true'
-    uses: ./.github/workflows/ts-sdk-ci.yml
     secrets: inherit
 
   cli-python:
@@ -259,7 +247,6 @@ jobs:
     needs:
       - changes
       - python-sdk
-      - ts-sdk
       - cli-python
       - cli-node
       - openclaw
