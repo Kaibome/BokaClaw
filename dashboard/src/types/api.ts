@@ -117,7 +117,7 @@ export interface AgentRun {
   usage?: RunUsage | null;
 }
 
-export type SpanType = "agent" | "llm" | "tool";
+export type SpanType = "agent" | "llm" | "tool" | "memory";
 
 export type SpanStatus =
   | "running"

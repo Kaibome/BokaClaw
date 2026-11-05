@@ -523,9 +523,9 @@
 
 ## P-15 研究记忆检索「看起来没触发」：无 span 不可见 + 相似度阈值口径漂移
 
-- **状态**：未解决（已完成分析，修复方案待确认）
+- **状态**：已解决
 - **发现时间**：2026-11-05
-- **解决时间**：
+- **解决时间**：2026-11-05
 - **场景**：排查 run `bf25efa8-35dd-4262-b948-a532c5dbe64a`（问题「查下MiniMax最新发布的模型API调用价格」）为什么「没有触发记忆检索」。
 - **现象**：
   1. Trace 里只有 `WebSearch` / `WebFetch` 两个工具事件，`agent_run_events` 里没有 `search_memories`，看起来记忆检索完全没有发生；
@@ -541,10 +541,18 @@
   - `4a15e086` 创建于 2026-11-05 09:01:48，正是本次 run 结束后的 `remember_research` 写入；09:01:38 检索时它还不存在 → `bm25_scores` 为空 → `max_possible=1.0` → 两条旧结论 final = semantic ≈ 0.74 ≥ 0.5 → 注入（2750 字符，与日志一致）；
   - run 结束后新记忆落库，同一问题再做检索变成除以 2 → 0.37 < 0.5 → 同等相关的旧结论再也进不来（只有 `question_key` 精确命中的路径例外，该路径 `score_floor=None`）。
 - **影响**：改写题目（paraphrase）的召回会静默失效，且失效时机取决于「候选池里是否恰好有别的记忆命中关键字」，而不是记忆本身的相关度；精确重复提问仍可命中。此前 P-07 复测记录的「同一问题向量相似度 0.356 < 0.5 导致零注入」很可能也混入了这个分母效应。
-- **候选修复**（未实施）：
-  - 首选：`memory.search(..., explain=True)`，按 `score_details.semantic_score`（稳定余弦相似度）与 floor 比较；`score_details` 缺失时退回现有 `score` 比较；
-  - 备选：把 `min_score` 的语义改成「混合分阈值」，检索时按 mem0 的 `max_possible` 规则换算，但依赖 mem0 内部实现细节；
-  - 另需决定是否给自动检索补一个可观测事件/span，避免「注入了但 Trace 看不见」再次引发误判。
+- **解决措施**：
+  - **阈值口径**：`server/app/agent/research_memory.py` 调用 `memory.search(..., explain=True)`（`TypeError` 时退回不带 `explain` 的调用，兼容不支持该参数的 store），`_fresh_entry` 改为比较 `score_details.semantic_score`（缺 `score_details` 时退回顶层 `score`）。`combined_score` 仅写入报告供排查；检索时仍把 `threshold=floor-0.1` 下推给向量库做过度召回。
+  - **检索/写入可观测**：`prior_research_block` 拆成 `recall_research() -> ResearchRecall`（保留同名 wrapper 返回 `.block`），`remember_research` 拆成 `save_research() -> ResearchSave`。报告分别记录命中（`memory_id`/`question`/`source`/`score`/`combined_score`/`saved_at`/`chars`）、候选数、跳过原因计数（`low_score`/`stale`/`invalid`）、未检索原因（`disabled`/`no_user`/`no_question`/`memory_unavailable`）、错误与耗时。
+  - **事件与 span**：新增 `AgentMemoryRecall` / `AgentMemorySave`；`runtime.stream_local_agent` 在第一次模型请求前 `yield AgentMemoryRecall`，`runner._finalize` 在 `done` 之后调用 `save_research` 并持久化 `memory.save`。两者分别落 `agent_run_events`（事件类型 `memory.recall` / `memory.save`）与 `agent_run_spans`（`span_type="memory"`，`memory:recall` / `memory:save`）。迁移 `012` 扩展两个 CHECK 约束；`/traces?span_type=memory` 与 Dashboard Trace 页支持该类型。
+- **解决后效果**：
+  - 真实 run `ed65c268`（问题「查询 MiniMax 最新模型的价格，并给出官方定价页链接。」）：`memory.recall` seq=1、2750 字符、3 条命中、`floor=0.5`、耗时 47ms；其中 `4a15e086` semantic=0.7283 / combined=0.3642、`3a0ac601` semantic=0.7158 / combined=0.3579——按旧口径两者都低于 0.5 会被丢弃，现在正常注入；`memory.save` seq=25（`done` 之后）、`action=updated`、`memory_id=81cf86b6`、1667 字符、86ms；span 表新增 `memory:recall`（47ms）、`memory:save`（86ms）。
+  - 回归用例：`tests/test_agent_research_memory.py` 新增 9 条（含「mixed 分低于阈值但 semantic 达标必须命中」与反向用例），`tests/test_agent_spans.py` 新增 4 条，`tests/test_agent_runs.py` 新增 1 条并更新事件尾部断言，`tests/test_traces_router.py` 新增 `span_type=memory` 用例。
+  - 验证：server agent 相关 102 passed；`alembic upgrade head` / `downgrade -1` / 再 upgrade 往返通过，两个 CHECK 约束已含新值；`ruff check` 与 `ruff format --check`（改动文件）通过；`tsc --noEmit`、Prettier 通过。
+- **可复用结论**：
+  - 向量库返回的 `score` 只要经过二次归一化（除以随候选池变化的 `max_possible`），就不能当作稳定相似度与固定阈值比较；阈值必须绑定到不随查询上下文变化的量（余弦/语义分），混合分只用于排序或展示。
+  - 任何「静默生效」的自动步骤（预检索、后置写入）都必须留下事件和 span：只写日志时，Trace 与其他工具事件不在同一时间线，排查者会先怀疑「没触发」而不是「口径问题」。
+  - 后置写入放在 `done` 之后可以避免拖慢回复，但事件必须补发（本题的 `memory.save`），否则数据库里只有副作用、没有原因。
 
 ---
 
@@ -595,4 +603,5 @@
 | 2026-11-05 | 追加 P-13：按 run 统计所有可归属模型调用（主循环 / 压缩 / mem0 LLM / embedding）的 input/output/total token，迁移 011 落库，`coverage` 区分 complete/partial/unknown/aggregate/unavailable；真实 run 与取消 run 验证通过，server 59 + 扩展 100 passed，agent-loop 161 passed，Dashboard 构建通过 |
 | 2026-11-05 | 追加 P-14：修复 `RunEventWriter` 缓冲未 flush 导致短回答 run 被误判 `agent_protocol_error`；`_run_worker` 在 `_completion_state()` 前 flush，回归测试转绿 |
 | 2026-11-05 | 追加 P-15：分析 run `bf25efa8` 「记忆检索未触发」——实际已注入（日志 + `llm:2` system prompt 第 679 字符起 2750 字符注入块），不可见因自动检索无 span/事件；同时定位阈值口径问题：mem0 混合分在有 BM25 命中时除以 2，`_fresh_entry` 拿混合分比固定 0.5 导致召回随候选池漂移；结论写入候选修复，代码未改 |
+| 2026-11-05 | P-15 修复：检索改用 `explain=True` 的 `score_details.semantic_score` 比阈值（`combined_score` 仅展示），新增 `memory.recall` / `memory.save` 持久化事件与 `memory` span（迁移 012 扩展 CHECK 约束，Trace 页支持该类型）；真实 run `ed65c268` 验证两条 semantic≈0.72 / combined≈0.36 的结论正常注入、保存走 `updated`；server agent 相关 102 passed，迁移往返与 ruff/tsc 通过；P-15 改为已解决 |
 | 2026-11-05 | 追加 P-16：模型接口实际返回了缓存计数字段，但 provider `_parse_usage` 的 3-key 白名单在入口丢弃；拍平 DeepSeek/OpenAI 两种缓存口径与 `reasoning_tokens`，usage meter/`/traces`/Dashboard 增加命中率展示；真实 run `0d6e0f33` 命中率 66% |

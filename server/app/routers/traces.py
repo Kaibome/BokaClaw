@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 
 router = APIRouter(prefix="/traces", tags=["traces"])
 
-SPAN_TYPE_PATTERN = "^(agent|llm|tool)$"
+SPAN_TYPE_PATTERN = "^(agent|llm|tool|memory)$"
 SPAN_STATUS_PATTERN = "^(running|completed|failed|aborted|interrupted)$"
 
 

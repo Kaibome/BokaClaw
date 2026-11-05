@@ -128,6 +128,10 @@ def test_invalid_filters_return_422(client, query):
     assert client.get(f"/traces?{query}").status_code == 422
 
 
+def test_memory_spans_are_a_valid_filter(client):
+    assert client.get("/traces?span_type=memory").status_code == 200
+
+
 def test_list_reports_cache_counters_from_the_root_span():
     span = _span(
         1,

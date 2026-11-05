@@ -112,7 +112,15 @@ class Conversation(Base):
 
 RUN_STATUSES = ("queued", "running", "completed", "failed", "cancelled", "interrupted")
 TERMINAL_RUN_STATUSES = ("completed", "failed", "cancelled", "interrupted")
-RUN_EVENT_TYPES = ("message.delta", "tool.call", "tool.result", "message.completed", "error")
+RUN_EVENT_TYPES = (
+    "message.delta",
+    "tool.call",
+    "tool.result",
+    "memory.recall",
+    "memory.save",
+    "message.completed",
+    "error",
+)
 
 
 class AgentRun(Base):
@@ -188,7 +196,8 @@ class AgentRunEvent(Base):
     __table_args__ = (
         UniqueConstraint("run_id", "seq", name="uq_agent_run_events_run_seq"),
         CheckConstraint(
-            "event_type IN ('message.delta', 'tool.call', 'tool.result', 'message.completed', 'error')",
+            "event_type IN ('message.delta', 'tool.call', 'tool.result', "
+            "'memory.recall', 'memory.save', 'message.completed', 'error')",
             name="ck_agent_run_events_type",
         ),
         Index("ix_agent_run_events_run_seq", "run_id", "seq"),
@@ -202,7 +211,7 @@ class AgentRunEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
-SPAN_TYPES = ("agent", "llm", "tool")
+SPAN_TYPES = ("agent", "llm", "tool", "memory")
 SPAN_STATUSES = ("running", "completed", "failed", "aborted", "interrupted")
 
 
@@ -211,7 +220,7 @@ class AgentRunSpan(Base):
     __table_args__ = (
         UniqueConstraint("run_id", "span_id", name="uq_agent_run_spans_run_span"),
         CheckConstraint(
-            "span_type IN ('agent', 'llm', 'tool')",
+            "span_type IN ('agent', 'llm', 'tool', 'memory')",
             name="ck_agent_run_spans_type",
         ),
         CheckConstraint(

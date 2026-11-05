@@ -171,3 +171,81 @@ def test_tool_output_redacts_secrets_when_content_is_captured():
     span = repo.spans["tool:t1"]
     assert "sk-abcdef123456" not in str(span["input"])
     assert "abcdefghijklmnop" not in str(span["output"])
+
+
+# ---- memory spans -------------------------------------------------------------
+
+
+def test_memory_recall_span_records_the_lookup_and_its_rejections():
+    repo = RecordingRepo()
+    run = _run()
+    recorder = _recorder(repo, run)
+
+    recorder.handle(
+        agent_events.AgentMemoryRecall(
+            question="a question",
+            hits=[{"memory_id": "m1", "source": "vector", "score": 0.74, "combined_score": 0.37}],
+            floor=0.5,
+            ttl_days=30,
+            candidates=4,
+            skipped_low_score=1,
+            skipped_stale=1,
+            skipped_invalid=2,
+            chars=120,
+            duration_ms=42,
+        )
+    )
+
+    span = repo.spans["memory:recall"]
+    assert span["span_type"] == "memory"
+    assert span["name"] == "memory.recall"
+    assert span["parent_span_id"] == "agent"
+    assert span["status"] == "completed"
+    assert span["duration_ms"] == 42
+    assert span["attributes"]["floor"] == 0.5
+    assert span["attributes"]["candidates"] == 4
+    assert span["attributes"]["skipped_low_score"] == 1
+    assert span["attributes"]["skipped_stale"] == 1
+    assert span["attributes"]["skipped_invalid"] == 2
+    assert span["output"]["chars"] == 120
+    assert span["output"]["hits"][0]["memory_id"] == "m1"
+
+
+def test_memory_recall_span_marks_a_failed_lookup():
+    repo = RecordingRepo()
+    run = _run()
+    recorder = _recorder(repo, run)
+
+    recorder.handle(agent_events.AgentMemoryRecall(question="q", error="RuntimeError: offline", duration_ms=7))
+
+    span = repo.spans["memory:recall"]
+    assert span["status"] == "failed"
+    assert span["error"] == "RuntimeError: offline"
+
+
+def test_memory_save_span_records_skips_as_completed():
+    repo = RecordingRepo()
+    run = _run()
+    recorder = _recorder(repo, run)
+
+    recorder.handle(agent_events.AgentMemorySave(question="q", action="skipped", reason="no_sources", duration_ms=3))
+
+    span = repo.spans["memory:save"]
+    assert span["span_type"] == "memory"
+    assert span["status"] == "completed"
+    assert span["attributes"]["action"] == "skipped"
+    assert span["attributes"]["reason"] == "no_sources"
+
+
+def test_a_memory_save_written_after_finalize_stays_completed():
+    repo = RecordingRepo()
+    run = _run()
+    recorder = _recorder(repo, run)
+
+    recorder.finalize(status="completed", content="done", metadata={}, error_detail=None)
+    recorder.handle(agent_events.AgentMemorySave(question="q", action="added", memory_id="m1", sources=2, chars=90))
+
+    span = repo.spans["memory:save"]
+    assert span["status"] == "completed"
+    assert span["attributes"]["memory_id"] == "m1"
+    assert repo.spans["agent"]["status"] == "completed"

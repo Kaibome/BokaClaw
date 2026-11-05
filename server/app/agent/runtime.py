@@ -16,6 +16,7 @@ import logging
 import os
 import sys
 import threading
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Tuple
@@ -28,6 +29,7 @@ from app.agent.events import (
     AgentError,
     AgentEvent,
     AgentLoopError,
+    AgentMemoryRecall,
     AgentModelRequest,
     AgentModelResponse,
     AgentRunEnded,
@@ -36,7 +38,7 @@ from app.agent.events import (
     AgentToolResult,
     AgentUsageUpdate,
 )
-from app.agent.research_memory import prior_research_block
+from app.agent.research_memory import ResearchRecall, recall_research
 from app.agent.usage import RunUsageMeter, meter_context, normalize_usage
 
 logger = logging.getLogger(__name__)
@@ -751,25 +753,49 @@ async def stream_local_agent(
         )
 
     sdk = _load_sdk()
-    if config.research_memory and payload.get("user_id"):
+    if config.research_memory:
+        question = str(payload.get("message") or "")
+        started = time.monotonic()
         try:
             with meter_context(usage_meter):
-                block = await asyncio.to_thread(
-                    prior_research_block,
-                    str(payload.get("user_id")),
-                    str(payload.get("message") or ""),
+                report = await asyncio.to_thread(
+                    recall_research,
+                    str(payload.get("user_id") or ""),
+                    question,
                     ttl_days=config.research_memory_ttl_days,
                     min_score=config.research_memory_min_score,
                 )
-        except Exception:
+        except Exception as exc:
             logger.warning("Prior research lookup failed; continuing without it", exc_info=True)
-            block = ""
-        if block:
-            config = replace(config, system_prompt=f"{config.system_prompt}\n\n{block}")
+            report = ResearchRecall(
+                question=question,
+                floor=config.research_memory_min_score,
+                ttl_days=config.research_memory_ttl_days,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+        recall = AgentMemoryRecall(
+            question=question[:200],
+            hits=[hit.as_dict() for hit in report.hits],
+            floor=report.floor,
+            ttl_days=report.ttl_days,
+            candidates=report.candidates,
+            skipped_low_score=report.skipped_low_score,
+            skipped_stale=report.skipped_stale,
+            skipped_invalid=report.skipped_invalid,
+            skipped_reason=report.skipped_reason,
+            error=report.error,
+            chars=report.chars,
+            duration_ms=int((time.monotonic() - started) * 1000),
+        )
+        if recall.error:
+            logger.warning("Research recall failed: %s", recall.error)
+        yield recall
+        if report.block:
+            config = replace(config, system_prompt=f"{config.system_prompt}\n\n{report.block}")
             _context_debug(
                 "research memory injected user=%s chunk_chars=%d",
                 payload.get("user_id"),
-                len(block),
+                len(report.block),
             )
     messages = build_messages(payload)
     conversation_id = payload.get("conversation_id")

@@ -20,9 +20,11 @@ from app.agent.events import (  # noqa: E402
     AgentCompleted,
     AgentDelta,
     AgentLoopError,
+    AgentMemoryRecall,
     AgentToolCall,
     AgentToolResult,
 )
+from app.agent.research_memory import RecallHit, ResearchRecall  # noqa: E402
 
 
 class FakeMaxIterationsExceeded(Exception):
@@ -833,13 +835,21 @@ async def test_stream_local_agent_injects_prior_research(monkeypatch):
     monkeypatch.setattr(agent_runtime, "_load_sdk", lambda: sdk)
     calls = {}
 
-    def fake_block(user_id, question, **kwargs):
+    def fake_recall(user_id, question, **kwargs):
         calls["args"] = (user_id, question, kwargs)
-        return "## Reusable research\nA prior conclusion."
+        return ResearchRecall(
+            question=question,
+            user_id=user_id,
+            block="## Reusable research\nA prior conclusion.",
+            hits=[RecallHit(memory_id="m1", question="old question", source="vector", score=0.72, chars=20)],
+            floor=0.5,
+            ttl_days=30,
+            candidates=1,
+        )
 
-    monkeypatch.setattr(agent_runtime, "prior_research_block", fake_block)
+    monkeypatch.setattr(agent_runtime, "recall_research", fake_recall)
 
-    await _collect(_payload(message="a similar question"))
+    events = await _collect(_payload(message="a similar question"))
 
     prompt = sdk.runtimes[0].config.kwargs["system_prompt"]
     assert prompt.startswith("system")
@@ -849,22 +859,36 @@ async def test_stream_local_agent_injects_prior_research(monkeypatch):
         "a similar question",
         {"ttl_days": 30, "min_score": 0.5},
     )
+    recall = events[0]
+    assert isinstance(recall, AgentMemoryRecall)
+    assert recall.question == "a similar question"
+    assert recall.hits == [
+        {
+            "memory_id": "m1",
+            "question": "old question",
+            "source": "vector",
+            "score": 0.72,
+            "combined_score": None,
+            "saved_at": None,
+            "chars": 20,
+        }
+    ]
+    assert recall.chars == len("## Reusable research\nA prior conclusion.")
+    assert recall.duration_ms is not None
 
 
 @pytest.mark.asyncio
-async def test_stream_local_agent_skips_prior_research_without_a_user(monkeypatch):
+async def test_stream_local_agent_reports_a_query_without_a_user(monkeypatch):
     sdk = FakeSDK(result=_result("answer"))
     monkeypatch.setattr(agent_runtime, "load_local_config", lambda: _config(research_memory=True))
     monkeypatch.setattr(agent_runtime, "_load_sdk", lambda: sdk)
 
-    def unexpected(*_args, **_kwargs):
-        raise AssertionError("no user should not query research memory")
-
-    monkeypatch.setattr(agent_runtime, "prior_research_block", unexpected)
-
-    await _collect(_payload(user_id=None))
+    events = await _collect(_payload(user_id=None))
 
     assert sdk.runtimes[0].config.kwargs["system_prompt"] == "system"
+    assert isinstance(events[0], AgentMemoryRecall)
+    assert events[0].skipped_reason == "no_user"
+    assert events[0].hits == []
 
 
 @pytest.mark.asyncio
@@ -876,12 +900,14 @@ async def test_stream_local_agent_survives_a_research_lookup_failure(monkeypatch
     def broken(*_args, **_kwargs):
         raise RuntimeError("memory offline")
 
-    monkeypatch.setattr(agent_runtime, "prior_research_block", broken)
+    monkeypatch.setattr(agent_runtime, "recall_research", broken)
 
     events = await _collect(_payload())
 
     assert isinstance(events[-1], AgentCompleted)
-    assert all(isinstance(event, AgentDelta) for event in events[:-1])
+    assert isinstance(events[0], AgentMemoryRecall)
+    assert events[0].error == "RuntimeError: memory offline"
+    assert all(isinstance(event, AgentDelta) for event in events[1:-1])
     assert sdk.runtimes[0].config.kwargs["system_prompt"] == "system"
 
 

@@ -108,6 +108,43 @@ class AgentUsageUpdate:
 
 
 @dataclass
+class AgentMemoryRecall:
+    """The pre-run lookup of saved research conclusions.
+
+    Emitted once per turn, before the first model request, whether or not it
+    found anything: without it a trace cannot tell a miss from a lookup that
+    never ran.
+    """
+
+    question: str = ""
+    hits: list[dict[str, Any]] = field(default_factory=list)
+    floor: float = 0.5
+    ttl_days: int = 30
+    candidates: int = 0
+    skipped_low_score: int = 0
+    skipped_stale: int = 0
+    skipped_invalid: int = 0
+    skipped_reason: str | None = None
+    error: str | None = None
+    chars: int = 0
+    duration_ms: int | None = None
+
+
+@dataclass
+class AgentMemorySave:
+    """The post-turn write of one research conclusion."""
+
+    action: str = "skipped"
+    question: str = ""
+    memory_id: str | None = None
+    sources: int = 0
+    chars: int = 0
+    reason: str | None = None
+    error: str | None = None
+    duration_ms: int | None = None
+
+
+@dataclass
 class AgentRunEnded:
     stop_reason: str | None = None
 
@@ -130,6 +167,8 @@ AgentEvent = (
     | AgentModelResponse
     | AgentContextCompressed
     | AgentUsageUpdate
+    | AgentMemoryRecall
+    | AgentMemorySave
     | AgentRunEnded
     | AgentError
 )

@@ -168,8 +168,10 @@ X-Accel-Buffering: no
 
 事件分两类：
 
-- **持久化事件**：`message.delta`、`tool.call`、`tool.result`、`message.completed`、`error`。写入 `agent_run_events`，可重放；每帧带 `id: <seq>`，`seq` 在该 run 内单调递增，从 1 开始。
+- **持久化事件**：`message.delta`、`tool.call`、`tool.result`、`memory.recall`、`memory.save`、`message.completed`、`error`。写入 `agent_run_events`，可重放；每帧带 `id: <seq>`，`seq` 在该 run 内单调递增，从 1 开始。
 - **合成事件**：`meta`（订阅建立时由服务端生成）、`done`（订阅收尾）。它们不落库，没有 `id`。
+
+`memory.recall` 在第一次模型请求之前发出，`memory.save` 在 `done` 之后发出（见 4.4）；两者都同时写入同名 `memory` span，供 Trace 页查看。
 
 正常顺序示例：
 
@@ -187,24 +189,46 @@ data: {
 }
 
 id: 1
-event: tool.call
-data: {"run_id":"uuid","conversation_id":"uuid","seq":1,"message_id":"uuid","tool_call_id":"call_1","name":"search_memories","iteration":1,"status":"running","arguments":{...},"raw_arguments":"{...}","arguments_error":null,"started_at":"...","truncated":false}
+event: memory.recall
+data: {"run_id":"uuid","conversation_id":"uuid","seq":1,"message_id":"uuid","question":"用户问题（截断到 200 字）","hits":[{"memory_id":"uuid","question":"之前的问题","source":"exact | vector","score":0.74,"combined_score":0.37,"saved_at":"2026-11-04T16:08:00+00:00","chars":1180}],"floor":0.5,"ttl_days":30,"candidates":2,"skipped_low_score":0,"skipped_stale":0,"skipped_invalid":0,"skipped_reason":null,"error":null,"chars":2750,"duration_ms":86}
 
 id: 2
-event: message.delta
-data: {"run_id":"uuid","conversation_id":"uuid","seq":2,"message_id":"uuid","delta":"增量文本"}
+event: tool.call
+data: {"run_id":"uuid","conversation_id":"uuid","seq":2,"message_id":"uuid","tool_call_id":"call_1","name":"search_memories","iteration":1,"status":"running","arguments":{...},"raw_arguments":"{...}","arguments_error":null,"started_at":"...","truncated":false}
 
 id: 3
-event: tool.result
-data: {"run_id":"uuid","conversation_id":"uuid","seq":3,"message_id":"uuid","tool_call_id":"call_1","name":"search_memories","iteration":1,"status":"completed","content":"...","is_error":false,"duration_ms":42,"finished_at":"...","truncated":false}
+event: message.delta
+data: {"run_id":"uuid","conversation_id":"uuid","seq":3,"message_id":"uuid","delta":"增量文本"}
 
 id: 4
+event: tool.result
+data: {"run_id":"uuid","conversation_id":"uuid","seq":4,"message_id":"uuid","tool_call_id":"call_1","name":"search_memories","iteration":1,"status":"completed","content":"...","is_error":false,"duration_ms":42,"finished_at":"...","truncated":false}
+
+id: 5
 event: message.completed
-data: {"run_id":"uuid","conversation_id":"uuid","seq":4,"message_id":"uuid","message":{...完整 assistant 行...}}
+data: {"run_id":"uuid","conversation_id":"uuid","seq":5,"message_id":"uuid","message":{...完整 assistant 行...}}
 
 event: done
-data: {"run_id":"uuid","conversation_id":"uuid","status":"completed","last_seq":4,"usage":{...}}
+data: {"run_id":"uuid","conversation_id":"uuid","status":"completed","last_seq":5,"usage":{...}}
+
+id: 6
+event: memory.save
+data: {"run_id":"uuid","conversation_id":"uuid","seq":6,"message_id":"uuid","action":"added | updated | skipped | failed","question":"用户问题（截断到 200 字）","memory_id":"uuid","sources":3,"chars":1820,"reason":null,"error":null,"duration_ms":410}
 ```
+
+`memory.recall` 的字段含义：
+
+| 字段 | 含义 |
+|---|---|
+| `hits[]` | 实际注入本轮上下文的结论；`source=exact` 表示问题完全一致（按 `question_key` 命中），`source=vector` 表示语义召回 |
+| `score` / `combined_score` | 语义分和 mem0 混合分（`(semantic + bm25 + entity) / max_possible`）。阈值只比较 `score`；`combined_score` 仅供排查 |
+| `floor` / `ttl_days` | 本轮生效的相似度下限和有效期 |
+| `candidates` | 相似度检索返回的候选数（不含问题完全一致的命中） |
+| `skipped_low_score` / `skipped_stale` / `skipped_invalid` | 分别因低于阈值、超过 TTL、元数据不完整被丢弃的数量 |
+| `skipped_reason` | 没有执行检索的原因：`disabled`、`no_user`、`no_question`、`memory_unavailable` |
+| `chars` | 注入系统提示的字符数；0 表示本轮没有注入 |
+
+`memory.save` 的 `action`：`added`（新增）、`updated`（同一问题覆盖旧结论）、`skipped`（`reason` 说明原因，如 `no_sources`、`no_user`、`no_answer`）、`failed`（`error` 带异常类型与消息）。`done` 先于 `memory.save` 发出，慢速 embedding 不会阻塞本轮回复；客户端可以忽略该事件。
 
 失败、取消或中断时，不发送 `message.completed`，顺序为：悬挂工具补发的 `tool.result(status="aborted")` → `error` → `done`。`done` 不是成功信号，必须读 `status`。
 
@@ -433,7 +457,7 @@ X-Request-ID: <rid>
 | `id` | BIGINT | Identity PK |
 | `run_id` | UUID | FK `agent_runs.id`，`ON DELETE CASCADE` |
 | `seq` | BIGINT | run 内单调递增 |
-| `event_type` | VARCHAR(32) | CHECK `message.delta/tool.call/tool.result/message.completed/error` |
+| `event_type` | VARCHAR(32) | CHECK `message.delta/tool.call/tool.result/memory.recall/memory.save/message.completed/error` |
 | `payload` | JSONB | 事件载荷，含 `run_id`、`conversation_id`、`seq` |
 | `created_at` | TIMESTAMPTZ | 写入时间 |
 

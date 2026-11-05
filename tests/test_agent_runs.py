@@ -35,10 +35,12 @@ from app.agent.events import (  # noqa: E402
     AgentCompleted,
     AgentDelta,
     AgentLoopError,
+    AgentMemoryRecall,
     AgentToolCall,
     AgentToolResult,
     AgentUsageUpdate,
 )
+from app.agent.research_memory import ResearchSave  # noqa: E402
 from app.agent.runner import AgentRunManager, RunConfig  # noqa: E402
 from app.agent.schemas import ConversationMessageOut, ConversationOut  # noqa: E402
 from app.core.auth import require_auth  # noqa: E402
@@ -384,7 +386,9 @@ async def test_manager_persists_ordered_events_and_completes():
     assert len(seqs) == len(set(seqs))
     stored_events = repo.events[run.id]
     assert [event.seq for event in stored_events] == list(range(1, len(stored_events) + 1))
-    assert stored_events[-1].event_type == "message.completed"
+    # The post-turn memory write lands after the reply, and therefore after
+    # "done" for subscribers; it is persisted so the trace can show it.
+    assert [event.event_type for event in stored_events[-2:]] == ["message.completed", "memory.save"]
 
     message = repo.messages[stored.assistant_message_id]
     assert message.content == "hello"
@@ -496,11 +500,17 @@ async def test_manager_uses_transport_aggregate_when_no_per_call_events():
 async def test_manager_saves_research_memory_after_completion(monkeypatch):
     saved = []
 
-    def fake_remember(payload, content, entries):
+    def fake_save(payload, content, entries):
         saved.append((payload, content, entries))
-        return "mem-1"
+        return ResearchSave(
+            action="added",
+            question=payload["message"],
+            memory_id="mem-1",
+            sources=1,
+            chars=180,
+        )
 
-    monkeypatch.setattr(agent_runner, "remember_research", fake_remember)
+    monkeypatch.setattr(agent_runner, "save_research", fake_save)
 
     async def executor(_payload, _request_id, *, cancel_event=None, max_seconds=None):
         yield AgentToolCall(
@@ -542,6 +552,56 @@ async def test_manager_saves_research_memory_after_completion(monkeypatch):
     assert content == "answer"
     assert entries[0]["name"] == "WebFetch"
     assert entries[0]["status"] == "completed"
+
+    event_types = [event.event_type for event in repo.events[run.id]]
+    assert event_types[-1] == "memory.save"
+    save_event = repo.events[run.id][-1].payload
+    assert save_event["action"] == "added"
+    assert save_event["memory_id"] == "mem-1"
+    assert save_event["sources"] == 1
+    assert save_event["duration_ms"] is not None
+    span = repo.spans[(run.id, "memory:save")]
+    assert span["span_type"] == "memory"
+    assert span["status"] == "completed"
+    assert span["attributes"]["action"] == "added"
+
+
+@pytest.mark.asyncio
+async def test_manager_persists_the_memory_recall_before_the_reply():
+    async def executor(_payload, _request_id, *, cancel_event=None, max_seconds=None):
+        yield AgentMemoryRecall(
+            question="which model?",
+            hits=[{"memory_id": "mem-old", "source": "vector", "score": 0.74, "combined_score": 0.37}],
+            floor=0.5,
+            ttl_days=30,
+            candidates=3,
+            skipped_low_score=1,
+            skipped_stale=1,
+            chars=64,
+            duration_ms=9,
+        )
+        yield AgentDelta("answer")
+        yield AgentCompleted(metadata={"finish_reason": "stop"})
+
+    repo = FakeRepo()
+    run = repo.add_run(_run(request_payload={"message": "which model?", "user_id": "user-1"}))
+    manager = AgentRunManager(_config(), repo=repo, executor=executor)
+
+    manager.submit(run.id)
+    await manager.wait(run.id, timeout=2)
+    await manager.shutdown()
+
+    event_types = [event.event_type for event in repo.events[run.id]]
+    assert event_types.index("memory.recall") < event_types.index("message.delta")
+    recall = next(event.payload for event in repo.events[run.id] if event.event_type == "memory.recall")
+    assert recall["question"] == "which model?"
+    assert recall["hits"][0]["memory_id"] == "mem-old"
+    assert recall["skipped_low_score"] == 1
+    assert recall["chars"] == 64
+    assert recall["duration_ms"] == 9
+    span = repo.spans[(run.id, "memory:recall")]
+    assert span["span_type"] == "memory"
+    assert span["attributes"]["floor"] == 0.5
 
 
 @pytest.mark.asyncio

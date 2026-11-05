@@ -1,9 +1,10 @@
 """Capture agent execution spans for offline evaluation.
 
-Spans are a neutral structure (agent / llm / tool) persisted per background
-run. They are written from the runner thread, never from the event loop, and a
-write failure is logged instead of failing the run. The SDK stays untouched:
-``runtime._bridge_event`` only forwards the events the SDK already emits.
+Spans are a neutral structure (agent / llm / tool / memory) persisted per
+background run. They are written from the runner thread, never from the event
+loop, and a write failure is logged instead of failing the run. The SDK stays
+untouched: ``runtime._bridge_event`` only forwards the events the SDK already
+emits.
 """
 
 from __future__ import annotations
@@ -15,12 +16,14 @@ import os
 import re
 from collections import defaultdict, deque
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from app.agent.events import (
     AgentContextCompressed,
     AgentError,
+    AgentMemoryRecall,
+    AgentMemorySave,
     AgentModelRequest,
     AgentModelResponse,
     AgentRunEnded,
@@ -292,6 +295,10 @@ class SpanRecorder:
             self._on_tool_call(event)
         elif isinstance(event, AgentToolResult):
             self._on_tool_result(event)
+        elif isinstance(event, AgentMemoryRecall):
+            self._on_memory_recall(event)
+        elif isinstance(event, AgentMemorySave):
+            self._on_memory_save(event)
 
     def _on_run_event(self, event: Any) -> None:
         if isinstance(event, AgentRunEnded) and isinstance(event.stop_reason, str):
@@ -445,6 +452,72 @@ class SpanRecorder:
         self._write(**span)
 
     # --------------------------------------------------------------- helpers
+
+    def _on_memory_recall(self, event: AgentMemoryRecall) -> None:
+        """Record the pre-run lookup as a finished span.
+
+        The lookup completes before the first model request, so there is no
+        later event to close it; both timestamps are derived from the measured
+        duration and the span is written in its terminal state.
+        """
+
+        ended_at = utcnow()
+        started_at = ended_at - timedelta(milliseconds=max(0, event.duration_ms or 0))
+        self._write(
+            span_id="memory:recall",
+            span_type="memory",
+            name="memory.recall",
+            status="failed" if event.error else "completed",
+            started_at=started_at,
+            ended_at=ended_at,
+            duration_ms=event.duration_ms,
+            input={"question": _bounded(_redact(event.question), self.options.max_bytes)},
+            output={
+                "hits": _bounded(_redact(event.hits), self.options.max_bytes),
+                "chars": event.chars,
+            },
+            attributes={
+                "floor": event.floor,
+                "ttl_days": event.ttl_days,
+                "candidates": event.candidates,
+                "skipped_low_score": event.skipped_low_score,
+                "skipped_stale": event.skipped_stale,
+                "skipped_invalid": event.skipped_invalid,
+                "skipped_reason": event.skipped_reason,
+            },
+            error=event.error,
+        )
+
+    def _on_memory_save(self, event: AgentMemorySave) -> None:
+        """Record the post-turn write. A skip is a completed decision."""
+
+        ended_at = utcnow()
+        started_at = ended_at - timedelta(milliseconds=max(0, event.duration_ms or 0))
+        self._write(
+            span_id="memory:save",
+            span_type="memory",
+            name="memory.save",
+            status="failed" if event.error else "completed",
+            started_at=started_at,
+            ended_at=ended_at,
+            duration_ms=event.duration_ms,
+            input={
+                "question": _bounded(_redact(event.question), self.options.max_bytes),
+                "sources": event.sources,
+            },
+            output={
+                "action": event.action,
+                "memory_id": event.memory_id,
+                "sources": event.sources,
+                "chars": event.chars,
+            },
+            attributes={
+                "action": event.action,
+                "reason": event.reason,
+                "memory_id": event.memory_id,
+            },
+            error=event.error,
+        )
 
     def _llm_span_id(self, seq: int | None, iteration: int) -> str:
         if seq is not None:

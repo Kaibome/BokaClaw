@@ -56,10 +56,10 @@ run 起止这些评测所需的信息在运行结束后不可得，因此无法�
 | --- | --- | --- |
 | `id` | bigint identity | 主键 |
 | `run_id` | uuid FK | → `agent_runs.id`，级联删除 |
-| `span_id` | text | `agent` / `llm:{event.seq}` / `tool:{tool_call_id}` |
+| `span_id` | text | `agent` / `llm:{event.seq}` / `tool:{tool_call_id}` / `memory:recall` / `memory:save` |
 | `parent_span_id` | text | 默认 `agent` |
-| `span_type` | text | `agent` / `llm` / `tool` |
-| `name` | text | `agent.turn`、`llm.turn.3`、工具名 |
+| `span_type` | text | `agent` / `llm` / `tool` / `memory` |
+| `name` | text | `agent.turn`、`llm.turn.3`、工具名、`memory.recall`、`memory.save` |
 | `status` | text | `running/completed/failed/aborted/interrupted` |
 | `iteration` | int | ReAct 轮次，可空 |
 | `started_at` / `ended_at` | timestamptz | 时间 |
@@ -74,7 +74,9 @@ run 起止这些评测所需的信息在运行结束后不可得，因此无法�
 - `INDEX (run_id, started_at)` 供按运行回放。
 - `CHECK` 约束限定 `span_type` / `status`。
 
-树形结构固定为两层：`agent` → `llm` / `tool`。不建嵌套 tool span。
+树形结构固定为两层：`agent` → `llm` / `tool` / `memory`。不建嵌套 tool span。
+
+`memory` span 记录研究记忆的两端：`memory:recall` 在第一次模型请求前写出（`input.question`、`output.hits`、`attributes` 里的 `floor` / `ttl_days` / 候选数与各跳过计数），`memory:save` 在 `done` 之后写出（`attributes.action` 为 `added`/`updated`/`skipped`/`failed`）。两者都是一次写出的终态 span，没有后续事件来关闭它们。
 
 ### 3.1 数据裁剪
 

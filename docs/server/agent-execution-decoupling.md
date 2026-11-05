@@ -136,14 +136,16 @@ queued ──▶ cancelled                 # 启动前取消，不经过 running
 
 ### 3.4 事件类型
 
-持久化事件只有五种，写入 `agent_run_events`：
+持久化事件只有七种，写入 `agent_run_events`：
 
 | 事件 | 何时产生 | 是否带 `id: <seq>` |
 | --- | --- | --- |
+| `memory.recall` | run 开始后、第一次模型请求前的研究记忆检索（无论命中与否） | 是 |
 | `message.delta` | 模型流式文本增量，按批次合并后写入 | 是 |
 | `tool.call` | 模型请求一次工具调用 | 是 |
 | `tool.result` | 工具调用结算（`completed`、`failed` 或 `aborted`） | 是 |
 | `message.completed` | 助手消息成功落库 | 是 |
+| `memory.save` | 成功 run 的 `done` 之后写入研究记忆（`added`/`updated`/`skipped`/`failed`） | 是 |
 | `error` | 失败、取消或中断的终态错误 | 是 |
 
 非持久化事件由服务端合成：
@@ -566,7 +568,10 @@ CREATE TABLE agent_run_events (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT uq_agent_run_events_run_seq UNIQUE (run_id, seq),
     CONSTRAINT ck_agent_run_events_type CHECK (
-        event_type IN ('message.delta', 'tool.call', 'tool.result', 'message.completed', 'error')
+        event_type IN (
+            'message.delta', 'tool.call', 'tool.result', 'memory.recall', 'memory.save',
+            'message.completed', 'error'
+        )
     )
 );
 
