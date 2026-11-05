@@ -111,6 +111,7 @@ Content-Type: application/json
 - `agent_id`：透传给执行层，用于记忆作用域。
 - `run_id`：已废弃的 mem0 记忆作用域字段，不再表示执行标识；执行的 run id 由服务端生成并在 `meta` 中返回。
 - `client_run_id`：客户端自带的关联标识，仅用于日志排查，不参与去重。
+- `metadata`：随 run 持久化到 `agent_runs.request_payload.metadata`，同时写入本轮用户消息。普通对话由 Agent 页面发起时不带该字段，run 不会被任何 case 绑定；评测回归由 Eval 页面的 `Run eval` 流水线发起（先按 case 输入跑 Agent，再评测），请求体附加 `{"eval_case_id": "<case>"}`。该值也会出现在 span 根节点 `input.eval_case_id`，`POST /evals` 据此校验 run 与所选 golden 是否一致，不一致返回 409 `eval_case_mismatch`。
 - `stream`：`false` 返回 JSON，`true` 返回 SSE。默认 `false`，Dashboard 固定传 `true`。
 
 执行语义：

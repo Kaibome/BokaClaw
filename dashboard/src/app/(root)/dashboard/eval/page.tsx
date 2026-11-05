@@ -4,13 +4,20 @@ import {
   Suspense,
   useCallback,
   useEffect,
+  useRef,
   useState,
   type FormEvent,
 } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { format, formatDistanceToNow } from "date-fns";
-import { FlaskConical, FolderCog, RefreshCw, XCircle } from "lucide-react";
+import {
+  FlaskConical,
+  FolderCog,
+  Loader2,
+  RefreshCw,
+  XCircle,
+} from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -30,14 +37,18 @@ import { EmptyState } from "@/components/self-hosted/empty-state";
 import { getErrorMessage } from "@/lib/error-message";
 import { useApiQuery } from "@/hooks/use-api-query";
 import { api } from "@/utils/api";
-import { EVAL_ENDPOINTS } from "@/utils/api-endpoints";
+import { startAgentRun } from "@/utils/agent-run";
+import { AGENT_ENDPOINTS, EVAL_ENDPOINTS } from "@/utils/api-endpoints";
 import {
+  AgentRun,
   EvalConfig,
   EvalGolden,
+  EvalGoldenDetail,
   EvalMetricResult,
   EvalRunDetail,
   EvalRunItem,
   EvalStatus,
+  RunStatus,
 } from "@/types/api";
 
 const POLL_MS = 1500;
@@ -46,6 +57,28 @@ const HISTORY_LIMIT = 50;
 
 const isTerminal = (status: EvalStatus) =>
   status === "completed" || status === "failed" || status === "cancelled";
+
+const isRunTerminal = (status: RunStatus) =>
+  status === "completed" ||
+  status === "failed" ||
+  status === "cancelled" ||
+  status === "interrupted";
+
+const getRunStatusClassName = (status: RunStatus) => {
+  switch (status) {
+    case "completed":
+      return "border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900/40 dark:bg-emerald-950/40 dark:text-emerald-300";
+    case "failed":
+      return "border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-900/40 dark:bg-rose-950/40 dark:text-rose-300";
+    case "cancelled":
+    case "interrupted":
+      return "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900/40 dark:bg-amber-950/40 dark:text-amber-300";
+    case "running":
+      return "border-sky-200 bg-sky-50 text-sky-700 dark:border-sky-900/40 dark:bg-sky-950/40 dark:text-sky-300";
+    case "queued":
+      return "border-neutral-200 bg-neutral-50 text-neutral-700 dark:border-neutral-800 dark:bg-neutral-900/40 dark:text-neutral-300";
+  }
+};
 
 const getStatusClassName = (status: EvalStatus) => {
   switch (status) {
@@ -271,9 +304,6 @@ function EvalDetailCard({
 
 function EvalPageInner() {
   const searchParams = useSearchParams();
-  const [runId, setRunId] = useState(
-    () => searchParams.get("run_id")?.trim() ?? "",
-  );
   const [caseId, setCaseId] = useState(
     () => searchParams.get("eval_case_id")?.trim() ?? "",
   );
@@ -281,9 +311,19 @@ function EvalPageInner() {
   const [activeEvalId, setActiveEvalId] = useState<string | null>(null);
   const [detail, setDetail] = useState<EvalRunDetail | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
+  const [phase, setPhase] = useState<"idle" | "running" | "evaluating">("idle");
   const [cancelling, setCancelling] = useState(false);
   const [pollError, setPollError] = useState("");
+  const [agentRunId, setAgentRunId] = useState<string | null>(null);
+  const [agentRunError, setAgentRunError] = useState("");
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const { data: config } = useApiQuery<EvalConfig>(
     async () => {
@@ -381,37 +421,88 @@ function EvalPageInner() {
     };
   }, [activeEvalId, refetchHistory]);
 
+  // The eval API only accepts terminal runs, so the run started for this eval
+  // must finish before it can be scored.
+  const waitForRunTerminal = async (id: string) => {
+    const startedAt = Date.now();
+    while (mountedRef.current) {
+      const res = await api.get<AgentRun>(AGENT_ENDPOINTS.RUN(id));
+      if (isRunTerminal(res.data.status)) {
+        return { status: res.data.status, errorCode: res.data.error_code };
+      }
+      if (Date.now() - startedAt > POLL_TIMEOUT_MS) {
+        throw new Error(
+          "Timed out waiting for the agent run to finish. Open Trace to check it.",
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+    }
+    throw new Error("The eval page was closed before the run finished.");
+  };
+
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const trimmedRun = runId.trim();
     const trimmedCase = caseId.trim();
-    if (!trimmedRun || !trimmedCase) {
-      toast({
-        title: "Run ID and eval case are required",
-        variant: "destructive",
-      });
+    if (!trimmedCase) {
+      toast({ title: "Eval case is required", variant: "destructive" });
       return;
     }
-    setSubmitting(true);
+    if (phase !== "idle") return;
+
+    setPhase("running");
     setPollError("");
+    setAgentRunId(null);
+    setAgentRunError("");
     try {
+      // 1. Load the full golden input (the list API only returns a preview).
+      const goldenRes = await api.get<EvalGoldenDetail>(
+        EVAL_ENDPOINTS.GOLDEN_BY_ID(trimmedCase),
+      );
+      const golden = goldenRes.data;
+
+      // 2. Run the case in a new conversation, tagged with this case.
+      const newRunId = await startAgentRun({
+        message: golden.input,
+        metadata: { eval_case_id: golden.eval_case_id },
+      });
+      if (!mountedRef.current) return;
+      setAgentRunId(newRunId);
+
+      // 3. Wait for the run to reach a terminal status.
+      const run = await waitForRunTerminal(newRunId);
+      if (!mountedRef.current) return;
+      if (run.status !== "completed") {
+        const suffix = run.errorCode ? ` (${run.errorCode})` : "";
+        setAgentRunError(`Agent run ${run.status}${suffix}.`);
+        toast({
+          title: "Agent run did not complete",
+          description: "No eval was queued. Open Trace for details.",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      // 4. Score the completed run against the same golden.
+      setPhase("evaluating");
       const res = await api.post<EvalRunItem>(EVAL_ENDPOINTS.BASE, {
-        run_id: trimmedRun,
-        eval_case_id: trimmedCase,
+        run_id: newRunId,
+        eval_case_id: golden.eval_case_id,
         use_llm_judge: useJudge,
       });
+      if (!mountedRef.current) return;
       setDetail(null);
       setDetailOpen(true);
       setActiveEvalId(res.data.id);
       void refetchHistory();
     } catch (err) {
+      if (!mountedRef.current) return;
       toast({
-        title: "Failed to start eval",
+        title: "Failed to run eval",
         description: getErrorMessage(err),
         variant: "destructive",
       });
     } finally {
-      setSubmitting(false);
+      if (mountedRef.current) setPhase("idle");
     }
   };
 
@@ -495,7 +586,7 @@ function EvalPageInner() {
             Eval
           </h1>
           <p className="text-sm text-onSurface-default-secondary">
-            Score one persisted agent run against a golden case using its
+            Run a golden case through the agent, then score the result using its
             captured spans.
           </p>
         </div>
@@ -531,47 +622,27 @@ function EvalPageInner() {
       <Card className="border-memBorder-primary">
         <CardContent className="p-4">
           <form className="space-y-4" onSubmit={submit}>
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-              <div className="space-y-1">
-                <Label htmlFor="eval-run">Run ID</Label>
-                <Input
-                  id="eval-run"
-                  placeholder="33ddd007-183a-4f6d-a1ad-698c6c5719e2"
-                  value={runId}
-                  onChange={(event) => setRunId(event.target.value)}
-                  required
-                />
-              </div>
-              <div className="space-y-1">
-                <Label htmlFor="eval-case">Eval case</Label>
-                <Input
-                  id="eval-case"
-                  list="eval-case-options"
-                  placeholder="minimax-pricing-golden-01"
-                  value={caseId}
-                  onChange={(event) => setCaseId(event.target.value)}
-                  required
-                />
-                <datalist id="eval-case-options">
-                  {goldens.map((golden) => (
-                    <option
-                      key={golden.eval_case_id}
-                      value={golden.eval_case_id}
-                    >
-                      {golden.input_preview}
-                    </option>
-                  ))}
-                </datalist>
-                {goldens.length === 0 && (
-                  <p className="text-xs text-onSurface-default-tertiary">
-                    No goldens in the database yet; seed them with{" "}
-                    <code className="font-mono">
-                      scripts/seed_eval_goldens.py
-                    </code>
-                    .
-                  </p>
-                )}
-              </div>
+            <div className="space-y-1">
+              <Label htmlFor="eval-case">Eval case</Label>
+              <Input
+                id="eval-case"
+                list="eval-case-options"
+                placeholder="minimax-pricing-golden-01"
+                value={caseId}
+                onChange={(event) => setCaseId(event.target.value)}
+                required
+              />
+              <datalist id="eval-case-options">
+                {goldens.map((golden) => (
+                  <option key={golden.eval_case_id} value={golden.eval_case_id}>
+                    {golden.input_preview}
+                  </option>
+                ))}
+              </datalist>
+              <p className="text-xs text-onSurface-default-tertiary">
+                Runs this case&apos;s golden input in a new conversation, waits
+                for the run to finish, then evaluates that run.
+              </p>
             </div>
 
             <div className="flex items-start gap-2">
@@ -607,14 +678,52 @@ function EvalPageInner() {
               </p>
             )}
 
-            <div className="flex justify-end">
+            {agentRunError && (
+              <p className="text-xs text-onSurface-danger-primary">
+                {agentRunError}
+              </p>
+            )}
+
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex flex-wrap items-center gap-2">
+                {phase !== "idle" && (
+                  <Badge
+                    variant="outline"
+                    className={getRunStatusClassName("running")}
+                  >
+                    {phase === "running" ? "running agent" : "evaluating"}
+                  </Badge>
+                )}
+                {agentRunId && (
+                  <Link
+                    href={`/dashboard/trace?run_id=${agentRunId}`}
+                    className="text-xs text-onSurface-default-secondary underline underline-offset-2 hover:text-onSurface-default-primary"
+                  >
+                    View trace
+                  </Link>
+                )}
+              </div>
               <Button
                 type="submit"
-                disabled={submitting || config?.enabled === false}
+                disabled={phase !== "idle" || config?.enabled === false}
               >
-                {submitting ? "Queuing…" : "Run eval"}
+                {phase !== "idle" && (
+                  <Loader2 className="mr-1.5 size-4 animate-spin" />
+                )}
+                {phase === "running"
+                  ? "Running agent…"
+                  : phase === "evaluating"
+                    ? "Queuing eval…"
+                    : "Run eval"}
               </Button>
             </div>
+
+            {goldens.length === 0 && (
+              <p className="text-xs text-onSurface-default-tertiary">
+                No goldens in the database yet; seed them with{" "}
+                <code className="font-mono">scripts/seed_eval_goldens.py</code>.
+              </p>
+            )}
           </form>
         </CardContent>
       </Card>

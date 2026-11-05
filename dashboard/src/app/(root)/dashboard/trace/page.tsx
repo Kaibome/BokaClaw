@@ -568,20 +568,23 @@ function TracePageInner() {
                 <SpanDetailFields span={selectedSpan}>
                   {selectedSpan.span_type === "agent" && (
                     <div className="space-y-2">
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        className="w-full justify-start gap-1.5"
-                        onClick={() =>
-                          router.push(
-                            `/dashboard/eval?run_id=${encodeURIComponent(selectedSpan.run_id)}`,
-                          )
-                        }
-                      >
-                        <FlaskConical className="size-4" />
-                        Evaluate this run
-                      </Button>
+                      {typeof selectedSpan.input.eval_case_id === "string" &&
+                        selectedSpan.input.eval_case_id.length > 0 && (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="w-full justify-start gap-1.5"
+                            onClick={() =>
+                              router.push(
+                                `/dashboard/eval?eval_case_id=${encodeURIComponent(String(selectedSpan.input.eval_case_id))}`,
+                              )
+                            }
+                          >
+                            <FlaskConical className="size-4" />
+                            Evaluate this case
+                          </Button>
+                        )}
                       <Button
                         type="button"
                         variant="outline"

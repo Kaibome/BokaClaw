@@ -28,7 +28,8 @@
 ### 1.2 目标
 
 1. 在 ACTIVITY 下新增 **Eval** 页面（`/dashboard/eval`）。
-2. 页面填写 `run_id` 与 `eval_case_id`，可选勾选 LLM judge，提交后触发评测。
+2. 页面选择 `eval_case_id`，可选勾选 LLM judge；点击 Run eval 后先按该 case 的 input
+   跑一次 Agent，再评测这次 run。
 3. 评测在独立容器中异步执行；页面轮询任务状态并展示：
    - 总体通过/失败；
    - 每个指标的分数、阈值、通过与否、理由；
@@ -123,7 +124,8 @@
 
 ### 3.3 请求时序
 
-1. 用户在页面填写 `run_id`、选择 `eval_case_id`，可选勾选 judge，点击 Eval。
+1. 用户在页面选择 `eval_case_id`，可选勾选 judge，点击 Run eval；页面先按该 case 的
+   input 新建会话跑一次 Agent，轮询到 run 终态后才继续。
 2. `POST /evals` 校验 run 存在、终态、有 span；校验 golden 存在；校验 case id 与 run
    metadata 一致；校验 judge 开关；检查是否已有同目标的活动任务。
 3. 通过后把 golden 固化成 `golden_snapshot`（含 hash），插入 `eval_runs(status='queued')`，
@@ -258,7 +260,7 @@ queued ──claim──▶ running ──成功/指标完成──▶ completed
 4. `SELECT count(*) FROM agent_run_spans WHERE run_id = :id` > 0；否则 `eval_no_spans`。
 5. `eval_goldens` 中存在 `eval_case_id`；否则 `eval_golden_not_found`。
 6. run 的 `request.metadata.eval_case_id` 非空且与请求不同 → `eval_case_mismatch`
-   （防止用错误的参考数据打分）。
+   （防止用错误的参考数据打分）。tag 由 Dashboard Eval 页面的 Run eval 流水线写入（先按 case 输入跑 Agent，再评测）；普通对话不带该字段。
 7. `use_llm_judge=true` 时：
    - `EVAL_JUDGE_ENABLED=true` 且 `EVAL_JUDGE_API_KEY` 非空，否则 `eval_judge_disabled` /
      `eval_judge_unavailable`。
@@ -800,17 +802,17 @@ python -m app.eval.cli \
 `dashboard/src/app/(root)/dashboard/eval/page.tsx`，客户端组件：
 
 ```
-Eval                                  [Case management]
-从已结束的 agent run 生成 deepeval 评分
+Eval                                  [Case management] [Refresh]
+先按 golden case 跑一次 Agent，再对这次 run 打分
 
-┌─ New evaluation ─────────────────────────────────────────────┐
-│ Run ID *        [33ddd007-…                         ]         │
-│ Eval case *     [minimax-pricing-golden-01        ▼ ]         │
-│                 MiniMax pricing · tools: WebSearch, WebFetch │
-│ [ ] Use LLM judge (deepseek-chat) · sends run content to the │
-│     judge; costs apply                                       │
-│                                            [Run evaluation]  │
-└──────────────────────────────────────────────────────────────┘
+┌─ New evaluation ──────────────────────────────────────────────────┐
+│ Eval case *   [minimax-pricing-golden-01                 ▼ ]      │
+│               用该 case 的 golden input 新建会话并打 tag，        │
+│               run 结束后自动提交评测                              │
+│ [ ] Use LLM judge (deepseek-chat) · sends run content to the judge│
+│                                                                   │
+│ [running agent] [View trace]                       [Run eval]     │
+└───────────────────────────────────────────────────────────────────┘
 
 ┌─ Result dialog（点击历史行或提交后打开）──────────────────────┐
 │ completed · FAILED OVERALL · 12.1s · $0.0051 · deepseek-chat │
@@ -827,38 +829,59 @@ Eval                                  [Case management]
 └──────────────────────────────────────────────────────────────┘
 ```
 
+表单只保留 Eval case、Use the LLM judge 和 Run eval 三个元素；Run ID 与独立的
+「Run case input」按钮均已移除，跑 Agent 与提交评测由同一个按钮串联。
+
 ### 10.3 URL 与状态
 
-- 支持 `/dashboard/eval?run_id=<uuid>&eval_case_id=<case>` 预填，来自 Trace 页的
-  「Evaluate」按钮。
+**Run eval 是一条流水线。** 点击后依次完成「按 case 输入跑一次 Agent」和「评测这次 run」：
+
+1. `GET /evals/goldens/{eval_case_id}` 取完整 `input`（列表接口只有截断预览）；
+2. `POST /agent`，`conversation_id=null`（每次新建会话，保证历史为空）、
+   `message=golden.input`、`metadata={"eval_case_id": ...}`；
+3. 读取 SSE 第一条 `meta` 拿到 `run_id` 后立即断开 reader，后台 run 继续执行；
+4. 轮询 `GET /agent/runs/{run_id}` 直到终态；期间按钮显示 `Running agent…`，
+   状态行显示 `running agent` 徽标与 `View trace` 链接；
+5. 只有 `completed` 的 run 才提交 `POST /evals {run_id, eval_case_id, use_llm_judge}`；
+   其他终态（failed / cancelled / interrupted）提示「Agent run did not complete」，
+   保留 Trace 链接且不入队评测；
+6. 提交成功后打开结果 Dialog，轮询 `GET /evals/{id}`；`Run eval` 恢复可用。
+
+表单不再接收 `run_id`，只保留 Eval case、Use the LLM judge 与 Run eval。
+Trace 页的「Evaluate this case」按钮在 agent span 的 `input.eval_case_id` 非空时出现，
+跳转 `/dashboard/eval?eval_case_id=<case>` 预填该 case。
+
 - 使用 `useSearchParams()`，页面必须用 `<Suspense>` 包裹（Next.js 15 构建要求）。
 - 页面本地状态：
 
   ```ts
-  const [runId, setRunId] = useState("");
-  const [evalCaseId, setEvalCaseId] = useState("");
+  const [caseId, setCaseId] = useState("");
   const [useJudge, setUseJudge] = useState(false);
   const [activeEvalId, setActiveEvalId] = useState<string | null>(null);
   const [detail, setDetail] = useState<EvalRunDetail | null>(null);
-  const [submitting, setSubmitting] = useState(false);
-  const pollTokenRef = useRef(0);
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [phase, setPhase] = useState<"idle" | "running" | "evaluating">("idle");
+  const [agentRunId, setAgentRunId] = useState<string | null>(null);
+  const [agentRunError, setAgentRunError] = useState("");
+  const [pollError, setPollError] = useState("");
+  const mountedRef = useRef(true);
   ```
 
 - `useApiQuery` 加载 `/evals/config`、`/evals/goldens`、`/evals?limit=50`；它本身不轮询。
-- 提交成功后设置 `activeEvalId` 并启动轮询；重新运行、切换历史行时递增 `pollTokenRef`，
-  旧请求的响应直接丢弃。
+- 提交成功后设置 `activeEvalId` 并启动轮询；页面卸载时停止 Agent 轮询，且不再入队评测。
 
 ### 10.4 轮询
 
 ```ts
-const TERMINAL = new Set(["completed", "failed", "cancelled"]);
 const POLL_MS = 1500;
 const MAX_POLL_MS = 15 * 60 * 1000;
 ```
 
-- `setTimeout` 链式调用（不是 `setInterval`），避免慢请求堆叠。
-- 终态停止；超过 15 分钟停止并提示「任务仍在后台运行，可稍后刷新」。
-- 页面卸载时清理 timer；`pollTokenRef` 防止旧响应覆盖新选择。
+- Agent run：`Run eval` 启动 run 后每 1.5s 轮询 `GET /agent/runs/{id}`，直到终态；
+  `mountedRef` 在页面卸载时停止轮询，且不再提交评测。
+- Eval 任务：`activeEvalId` 变化后用 `setTimeout` 链式轮询（不是 `setInterval`），
+  避免慢请求堆叠；终态停止。
+- 两者都设 15 分钟上限，超时后停止并提示「任务仍在后台运行，可稍后刷新」。
 - `running + cancel_requested_at` 显示「取消中」，继续轮询直到终态。
 
 ### 10.5 结果展示
@@ -903,9 +926,9 @@ export const EVAL_ENDPOINTS = {
 
 - `trace/page.tsx` 用 `useSearchParams` 读取 `run_id`，作为初始过滤条件；同样需要
   `<Suspense>`（或把读取逻辑放进子组件）。
-- agent span 详情增加 `Evaluate` 按钮，跳转
-  `/dashboard/eval?run_id=<run_id>&eval_case_id=<run metadata 中的 case>`；没有 case 时只带
-  run_id。
+- agent span 详情的 `Evaluate this case` 按钮只在 span `input.eval_case_id` 非空时显示，
+  跳转 `/dashboard/eval?eval_case_id=<case>` 预填 case；Eval 页面会按该 case 重新跑一次
+  Agent 再评测，不再直接评测当前 run。
 - 顺手修正该文件中的无效类名 `border-memBorderPrimary` → `border-memBorder-primary`。
 
 ### 10.9 无新依赖
