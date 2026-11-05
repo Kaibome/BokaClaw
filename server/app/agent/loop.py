@@ -192,10 +192,10 @@ def _handle_upstream_event(event_name: str, data: str) -> AgentEvent | None:
             payload = json.loads(data)
         except json.JSONDecodeError:
             payload = {}
-        metadata = {key: payload[key] for key in ("usage", "finish_reason", "run_id") if key in payload}
+        metadata = {key: payload[key] for key in ("usage", "finish_reason", "run_id", "context") if key in payload}
         nested = payload.get("metadata")
         if isinstance(nested, dict):
-            for key in ("usage", "finish_reason", "run_id"):
+            for key in ("usage", "finish_reason", "run_id", "context"):
                 if key in nested and key not in metadata:
                     metadata[key] = nested[key]
         return AgentCompleted(metadata=metadata)
@@ -259,6 +259,8 @@ async def _parse_json_fallback(response: httpx.Response) -> AsyncIterator[AgentE
     metadata: dict[str, Any] = {"finish_reason": payload.get("finish_reason", "stop")}
     if "usage" in payload:
         metadata["usage"] = payload["usage"]
+    if "context" in payload:
+        metadata["context"] = payload["context"]
     yield AgentCompleted(metadata=metadata)
 
 

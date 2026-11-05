@@ -3,21 +3,9 @@ import { AlertCircle, RotateCcw } from "lucide-react";
 import { RunIdBadge } from "@/components/agent/run-id-badge";
 import { ToolTrace } from "@/components/agent/tool-trace";
 import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
+import { cn, formatTokens } from "@/lib/utils";
 import type { ChatMessageView } from "@/hooks/use-agent-chat";
 import type { RunUsage } from "@/types/api";
-
-function formatTokens(value: number): string {
-  if (value >= 1_000_000) {
-    const millions = value / 1_000_000;
-    return `${millions >= 10 ? Math.round(millions) : millions.toFixed(1).replace(/\.0$/, "")}M`;
-  }
-  if (value >= 1_000) {
-    const thousands = value / 1_000;
-    return `${thousands >= 100 ? Math.round(thousands) : thousands.toFixed(1).replace(/\.0$/, "")}k`;
-  }
-  return String(value);
-}
 
 function readUsage(metadata: ChatMessageView["metadata"]): RunUsage | null {
   const value = metadata?.usage;

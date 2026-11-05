@@ -200,6 +200,7 @@ JSON response instead. Requests are rate limited to 30/minute per IP.
 | `AGENT_REQUEST_TIMEOUT_SECONDS` | `60` | Timeout for one model call. |
 | `AGENT_MAX_RETRIES` | `2` | Model client retries. |
 | `AGENT_CONTEXT_MAX_TOKENS` | `32000` | Token budget for the in-process runtime's model view; `0` / `off` disables compression. |
+| `AGENT_CONTEXT_WINDOW` | `AGENT_CONTEXT_MAX_TOKENS` | Model context window shown in the dashboard context meter (display only, not sent to the SDK); `0` / `off` hides the meter. |
 | `AGENT_CONTEXT_KEEP_RECENT_TOKENS` | half the budget | Recent tokens kept verbatim by compression. |
 | `AGENT_CONTEXT_COMPRESSION` | `summary` | `summary` (model summary, truncation fallback) or `truncate` (drop only). |
 | `AGENT_COMPRESSION_MODEL` | `AGENT_MODEL` | Model used only for compression summaries. Empty reuses the agent model; point it at a cheaper model to cut summary cost. |

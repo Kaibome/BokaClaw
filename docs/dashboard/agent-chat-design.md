@@ -209,7 +209,7 @@ event: message.completed
 data: {"run_id":"uuid","conversation_id":"uuid","seq":5,"message_id":"uuid","message":{...完整 assistant 行...}}
 
 event: done
-data: {"run_id":"uuid","conversation_id":"uuid","status":"completed","last_seq":5,"usage":{...}}
+data: {"run_id":"uuid","conversation_id":"uuid","status":"completed","last_seq":5,"usage":{...},"context":{...}}
 
 id: 6
 event: memory.save
@@ -232,7 +232,7 @@ data: {"run_id":"uuid","conversation_id":"uuid","seq":6,"message_id":"uuid","act
 
 失败、取消或中断时，不发送 `message.completed`，顺序为：悬挂工具补发的 `tool.result(status="aborted")` → `error` → `done`。`done` 不是成功信号，必须读 `status`。
 
-助手消息的 `metadata` 会写入本次执行的 `run_id`（`agent_runs.id`）、`usage`（token 用量快照），以及中断时的 `run_status`、`error_code` 和 `tool_trace`。dashboard 从消息行读取 `metadata.run_id`，在助手消息下方显示短 id 并提供一键复制完整 UUID；该字段随 `/conversations/{id}` 和历史消息一起返回，刷新页面后仍可复制。
+助手消息的 `metadata` 会写入本次执行的 `run_id`（`agent_runs.id`）、`usage`（token 用量快照）、`context`（上下文窗口用量快照），以及中断时的 `run_status`、`error_code` 和 `tool_trace`。dashboard 从消息行读取 `metadata.run_id`，在助手消息下方显示短 id 并提供一键复制完整 UUID；该字段随 `/conversations/{id}` 和历史消息一起返回，刷新页面后仍可复制。
 
 `usage` 快照同时出现在 `done` payload、助手消息 `metadata.usage` 和 `GET /agent/runs/{id}` 响应中：
 
@@ -263,6 +263,21 @@ data: {"run_id":"uuid","conversation_id":"uuid","seq":6,"message_id":"uuid","act
 - `unavailable`：旧 run 没有 `usage_breakdown`；`pending`：run 尚未终态。
 
 `usage` 是同一快照的展开形式；`usage_breakdown` 保留原始分桶数据。历史 run 的 `usage_coverage` 为 `unavailable`，dashboard 不显示 0。
+
+`context` 快照同样出现在 `done` payload、助手消息 `metadata.context` 和 `GET /agent/runs/{id}` 响应中：
+
+```json
+{
+  "used_tokens": 12300,
+  "window_tokens": 131072,
+  "budget_tokens": 32000
+}
+```
+
+- `used_tokens`：本次 run 最后一次 `agent_loop` 模型调用上报的 `prompt_tokens`。压缩调用只发 `context_compressed`，不计入；不包含输出 token，也不取峰值。没有有效值时整个 `context` 键省略（`done` 中不出现，run 快照中为 `null`），dashboard 隐藏指示器。
+- `window_tokens`：模型真实上下文窗口，取自 `AGENT_CONTEXT_WINDOW`；未配置时回退压缩预算 `AGENT_CONTEXT_MAX_TOKENS`。两者都关闭时为 `null`。
+- `budget_tokens`：压缩预算 `AGENT_CONTEXT_MAX_TOKENS`，用于 tooltip 说明；压缩关闭时为 `null`。
+- 百分比不序列化，由 dashboard 用 `used_tokens / window_tokens` 计算，避免两处取整不一致。
 
 - `cached_tokens` / `cache_miss_tokens` / `cache_hit_rate` 是**可选**字段，只在至少一次调用返回了缓存计数时出现；`cache_hit_rate = cached / (cached + miss)`。provider 差异在 `agent-loop/src/bokaclaw_agent/providers/openai_compatible.py` 统一拍平：DeepSeek 的 `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`、OpenAI 的 `prompt_tokens_details.cached_tokens`（缺失 miss 时按 `prompt - cached` 推导）、`completion_tokens_details.reasoning_tokens`。
 - Dashboard 展示：Agent 消息的 usage tooltip 追加 `cache hit N% · X cached / Y uncached`；Trace 页 Tokens 卡片在有缓存数据时显示 `cache hit N%`；llm span 的 `attributes.usage` 是 provider 原始使用量，含缓存与推理 token 明细。
@@ -348,7 +363,7 @@ X-Request-ID: <rid>
 
 - 正常返回 HTTP 200 + `Content-Type: text/event-stream`；
 - 至少发送 `event: message.delta` + `data: {"delta": "..."}`；
-- 可选发送 `event: message.completed`，服务端只读取 `usage`、`finish_reason`、`run_id` 等元数据；
+- 可选发送 `event: message.completed`，服务端只读取 `usage`、`finish_reason`、`run_id`、`context` 等元数据；
 - 可选发送 `event: error`，服务端转换后继续向浏览器发送统一错误事件；
 - 也接受非 SSE JSON `{"content": "..."}` 作为单次返回兜底，便于早期实现；
 - 执行层不需要访问 Postgres，服务端会把本轮完整上下文传过去。
@@ -802,7 +817,7 @@ export class SseParser {
 │ · 会话 B       │                          user 气泡       │
 │ · ...         │  (内部 ScrollArea，自动滚到底部)          │
 │               ├──────────────────────────────────────────┤
-│               │ [Textarea ......................] [↑/■]  │
+│               │ [Textarea ...] [12.3k / 128k · 10%] [↑/■]│
 └───────────────┴──────────────────────────────────────────┘
 ```
 
@@ -832,6 +847,7 @@ export class SseParser {
 - Enter 发送，Shift+Enter 换行；用 `event.nativeEvent.isComposing` 兼容中文输入法；
 - `maxLength={32000}`；
 - streaming 时发送按钮切换为 Stop（`Square` 图标）：已有 `run_id` 时调用 `POST /agent/runs/{id}/cancel` 并继续消费到 `error(agent_cancelled)` + `done`；仅在 `meta` 之前还没有 `run_id` 时才本地 abort 连接；
+- 上下文指示器：`ContextMeter` 位于输入行 `flex items-end gap-2` 中、`Textarea` 之后、发送/停止按钮之前。仅当 `used_tokens > 0` 且 `window_tokens > 0` 时渲染，文本为 `${used} / ${window} · ${percent}%`（`percent = Math.round(used / window * 100)`，小于 1% 显示 `<1%`，不截断到 100%）。`≥ 90%` 使用 `text-onSurface-danger-primary`，否则 `text-onSurface-default-tertiary`；`typo-caption-sm shrink-0 whitespace-nowrap pb-3` 使其与 36px 高的按钮中线对齐。hover 或键盘 focus（`tabIndex={0}` + `aria-label`）通过 `Tooltip` 展示 used / window / compression budget 明细，`budget_tokens` 为 `null` 时显示 `disabled`；≥90% 额外提示接近窗口上限。无数据时返回 `null`，不占位；
 - 工具轨迹：助手气泡下方渲染 `ToolTrace`，默认只展示最新一条工具调用；条目多于一条时顶部提供 `Show all N tool calls` 下拉按钮展开全部（再点变为 `Show latest only`）。每行按 `tool_call_id` 展示工具名、状态（Running / Completed / Failed / Aborted）与耗时；展开后显示 ARGUMENTS / OUTPUT 与截断提示。
 
 ### 7.6 状态机
@@ -851,6 +867,7 @@ cancelRequested: boolean;
 activeRunId: string | null;
 error: string | null;
 isStreaming: boolean; // 派生：run 未终态且 (发送中或存在 activeRunId)
+contextUsage: ContextUsage | null; // 派生：最后一条非 streaming 助手消息的 context
 ```
 
 内部 refs 还保存 `lastSeqRef`（已接收的最大 `seq`）、`epochRef`（订阅代数，丢弃旧 reader）、`staleRunIdsRef`（该会话已终态的 run，避免重复订阅）、连接/轮询定时器与 `AbortController`。
@@ -864,7 +881,8 @@ isStreaming: boolean; // 派生：run 未终态且 (发送中或存在 activeRun
 - `tool.call` / `tool.result`：按 `tool_call_id` 在助手消息的 `metadata.tool_trace` 中 upsert；结果到达时保留已有调用参数；
 - `message.completed`：替换为完整消息行并更新 `updated_at`；工具轨迹优先采用服务端 `metadata.tool_trace`；
 - `error`：显示内联错误；`agent_not_configured` 在消息区提示“Agent execution is not configured yet. Set AGENT_MODEL and AGENT_API_KEY (or OPENAI_API_KEY) on the API server, or AGENT_LOOP_MOCK=true for local UI work.”，不能只弹 toast；`agent_cancelled` 不显示为错误；
-- `done`：按 `payload.status` 进入终态（`completed` / `failed` / `cancelled` / `interrupted`），不能把 `done` 当成功信号；
+- `done`：按 `payload.status` 进入终态（`completed` / `failed` / `cancelled` / `interrupted`），不能把 `done` 当成功信号；`payload.context` 同时写入助手消息 `metadata.context` 与视图的 `context`；
+- 上下文派生：`contextUsage` 不单独存 state，而是用 `useMemo` 从 `messages` 末尾向前找第一条「助手且非 streaming」消息，返回其 `context ?? null`。因此新 run 流式期间继续显示上一轮的值，run 结束后立即更新；失败/取消的 run 没有 context 时隐藏，不回退显示更早 run 的值；轮询到终态时用 `GET /agent/runs/{id}` 的 `context` 回填，避免错过 `done`；
 - `stop()`：有 `run_id` 时调用取消接口并保留连接，继续消费部分文本与终态；只有尚无 `run_id` 时本地 abort 并把占位标为 `cancelled`；
 - 断线重连：`1/2/4/8/15s` 退避，`after_seq=lastSeqRef.current`，连续 8 次失败改为 5 秒轮询 `GET /agent/runs/{id}`；完整算法见 [`agent-execution-decoupling.md`](./agent-execution-decoupling.md) 第 6 节；
 - 切换会话：`GET /conversations/{id}`，加载期间显示 `Skeleton`；若返回 `active_run`，插入占位并从 `after_seq=0` 重放；

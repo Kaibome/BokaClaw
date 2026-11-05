@@ -11,7 +11,7 @@ if _SERVER_DIR not in sys.path:
     sys.path.insert(0, _SERVER_DIR)
 
 import app.agent.loop as agent_loop  # noqa: E402
-from app.agent.events import AgentToolCall, AgentToolResult  # noqa: E402
+from app.agent.events import AgentCompleted, AgentToolCall, AgentToolResult  # noqa: E402
 
 
 def _parse(event_name, payload):
@@ -106,3 +106,25 @@ def test_tool_result_serializes_non_string_content_and_derives_status():
 
 def test_unknown_events_are_still_ignored():
     assert _parse("model.thinking", {"text": "..."}) is None
+
+
+def test_message_completed_passes_context_from_top_level():
+    context = {"used_tokens": 1234, "window_tokens": 131_072, "budget_tokens": 32_000}
+    event = _parse(
+        "message.completed",
+        {"finish_reason": "stop", "run_id": "run-1", "context": context},
+    )
+
+    assert isinstance(event, AgentCompleted)
+    assert event.metadata["context"] == context
+
+
+def test_message_completed_passes_context_from_nested_metadata():
+    context = {"used_tokens": 1234, "window_tokens": 131_072, "budget_tokens": 32_000}
+    event = _parse(
+        "message.completed",
+        {"metadata": {"finish_reason": "stop", "context": context}},
+    )
+
+    assert isinstance(event, AgentCompleted)
+    assert event.metadata["context"] == context

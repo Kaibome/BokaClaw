@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "@/components/ui/use-toast";
 import { getErrorMessage } from "@/lib/error-message";
 import { ApiStreamError, api, getStream, postStream } from "@/utils/api";
@@ -11,6 +11,7 @@ import type {
   AgentRun,
   ChatMessage,
   ConnectionState,
+  ContextUsage,
   Conversation,
   ConversationDetail,
   RunStatus,
@@ -26,6 +27,7 @@ export interface ChatMessageView extends ChatMessage {
   runStatus?: RunStatus;
   reconnecting?: boolean;
   cancelRequested?: boolean;
+  context?: ContextUsage;
 }
 
 export interface SendResult {
@@ -94,6 +96,7 @@ interface DonePayload extends BasePayload {
   status?: RunStatus;
   last_seq?: number;
   usage?: RunUsage;
+  context?: ContextUsage | null;
 }
 
 const TOOL_TRACE_STATUSES: ToolTraceStatus[] = [
@@ -236,8 +239,32 @@ function upsertConversation(
   );
 }
 
+function readContextUsage(raw: unknown): ContextUsage | null {
+  if (!raw || typeof raw !== "object") return null;
+  const value = raw as Partial<ContextUsage>;
+  if (
+    typeof value.used_tokens !== "number" ||
+    !Number.isFinite(value.used_tokens) ||
+    value.used_tokens <= 0
+  ) {
+    return null;
+  }
+
+  const positive = (candidate: unknown): number | null =>
+    typeof candidate === "number" && Number.isFinite(candidate) && candidate > 0
+      ? candidate
+      : null;
+
+  return {
+    used_tokens: value.used_tokens,
+    window_tokens: positive(value.window_tokens),
+    budget_tokens: positive(value.budget_tokens),
+  };
+}
+
 function toView(message: ChatMessage): ChatMessageView {
   const toolTrace = normalizeToolTrace(message.metadata?.tool_trace);
+  const context = readContextUsage(message.metadata?.context);
   const view: ChatMessageView = { ...message };
 
   if (message.role === "assistant") {
@@ -253,6 +280,7 @@ function toView(message: ChatMessage): ChatMessageView {
   }
 
   if (toolTrace) view.toolTrace = toolTrace;
+  if (context) view.context = context;
   return view;
 }
 
@@ -885,7 +913,9 @@ export function useAgentChat() {
                       ? { run_id: payload.run_id }
                       : {}),
                     ...(payload?.usage ? { usage: payload.usage } : {}),
+                    ...(payload?.context ? { context: payload.context } : {}),
                   },
+                  context: payload?.context ?? message.context,
                   streaming: false,
                   reconnecting: false,
                   runStatus: finalStatus,
@@ -1066,6 +1096,17 @@ export function useAgentChat() {
 
       const run = response.data;
       if (!isActiveStatus(run.status)) {
+        // The live `done` event may have been missed while polling. Backfill
+        // the context meter from the run snapshot before closing.
+        const context = readContextUsage(run.context);
+        if (context) {
+          const assistantId = assistantIdRef.current;
+          setMessages((previous) =>
+            previous.map((message) =>
+              message.id === assistantId ? { ...message, context } : message,
+            ),
+          );
+        }
         runStatusRef.current = run.status;
         setRunStatus(run.status);
         finishRun(run.status);
@@ -1739,6 +1780,17 @@ export function useAgentChat() {
   const isStreaming =
     !isTerminalStatus(runStatus) && (isSending || activeRunId !== null);
 
+  // Latest completed turn owns the meter: skip the in-flight optimistic bubble
+  // so the previous value stays visible until the new run reports.
+  const contextUsage = useMemo<ContextUsage | null>(() => {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      if (message.role !== "assistant" || message.streaming) continue;
+      return message.context ?? null;
+    }
+    return null;
+  }, [messages]);
+
   return {
     conversations,
     activeId,
@@ -1752,6 +1804,7 @@ export function useAgentChat() {
     cancelRequested,
     activeRunId,
     error,
+    contextUsage,
     send,
     stop,
     selectConversation,

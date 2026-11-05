@@ -166,6 +166,7 @@ def clean_agent_env(monkeypatch):
         "AGENT_REQUEST_TIMEOUT_SECONDS",
         "AGENT_MAX_RETRIES",
         "AGENT_CONTEXT_MAX_TOKENS",
+        "AGENT_CONTEXT_WINDOW",
         "AGENT_CONTEXT_KEEP_RECENT_TOKENS",
         "AGENT_CONTEXT_COMPRESSION",
         "AGENT_CONTEXT_DEBUG",
@@ -416,6 +417,45 @@ def test_context_budgets_can_be_overridden(monkeypatch):
     assert config.context_keep_recent_tokens == 2000
     assert config.context_compression == "truncate"
     assert config.tool_result_max_chars == 1000
+
+
+def test_context_window_defaults_to_the_compression_budget(monkeypatch):
+    monkeypatch.setattr(agent_runtime, "_current_llm_config", lambda: {})
+    monkeypatch.setenv("AGENT_MODEL", "m")
+    monkeypatch.setenv("AGENT_API_KEY", "k")
+
+    config = agent_runtime.load_local_config()
+
+    assert config is not None
+    assert config.context_max_tokens == 32_000
+    assert config.context_window_tokens == 32_000
+
+
+def test_context_window_can_be_overridden_independently(monkeypatch):
+    monkeypatch.setattr(agent_runtime, "_current_llm_config", lambda: {})
+    monkeypatch.setenv("AGENT_MODEL", "m")
+    monkeypatch.setenv("AGENT_API_KEY", "k")
+    monkeypatch.setenv("AGENT_CONTEXT_MAX_TOKENS", "8000")
+    monkeypatch.setenv("AGENT_CONTEXT_WINDOW", "131072")
+
+    config = agent_runtime.load_local_config()
+
+    assert config is not None
+    assert config.context_max_tokens == 8000
+    assert config.context_window_tokens == 131072
+
+
+def test_context_window_can_be_disabled(monkeypatch):
+    monkeypatch.setattr(agent_runtime, "_current_llm_config", lambda: {})
+    monkeypatch.setenv("AGENT_MODEL", "m")
+    monkeypatch.setenv("AGENT_API_KEY", "k")
+    monkeypatch.setenv("AGENT_CONTEXT_WINDOW", "off")
+
+    config = agent_runtime.load_local_config()
+
+    assert config is not None
+    assert config.context_max_tokens == 32_000
+    assert config.context_window_tokens is None
 
 
 def test_compression_model_defaults_to_the_agent_model(monkeypatch):
@@ -806,6 +846,77 @@ async def test_stream_local_agent_emits_final_answer(monkeypatch):
     assert len(runtime.tools) == 2
     assert runtime.closed is True
     assert runtime.config.kwargs["model"].kwargs["model"] == "test-model"
+
+
+def _model_response(prompt_tokens, iteration=1):
+    return types.SimpleNamespace(
+        type="model_response",
+        iteration=iteration,
+        data={"usage": {"prompt_tokens": prompt_tokens, "completion_tokens": 10}},
+    )
+
+
+@pytest.mark.asyncio
+async def test_stream_local_agent_reports_context_from_last_model_response(monkeypatch):
+    sdk = FakeSDK(result=_result("done"))
+    sdk.events = [
+        _model_response(1000, iteration=1),
+        # A compression summary call must not become the context numerator.
+        types.SimpleNamespace(
+            type="context_compressed",
+            iteration=1,
+            data={"usage": {"prompt_tokens": 9000}, "model_calls": 1},
+        ),
+        _model_response(2500, iteration=2),
+    ]
+    monkeypatch.setattr(
+        agent_runtime,
+        "load_local_config",
+        lambda: _config(context_max_tokens=32_000, context_window_tokens=131_072),
+    )
+    monkeypatch.setattr(agent_runtime, "_load_sdk", lambda: sdk)
+
+    events = await _collect(_payload())
+
+    completed = events[-1]
+    assert isinstance(completed, AgentCompleted)
+    assert completed.metadata["context"] == {
+        "used_tokens": 2500,
+        "window_tokens": 131_072,
+        "budget_tokens": 32_000,
+    }
+
+
+@pytest.mark.asyncio
+async def test_stream_local_agent_omits_context_without_usage(monkeypatch):
+    sdk = FakeSDK(result=_result("done"))
+    sdk.events = [types.SimpleNamespace(type="model_response", iteration=1, data={"usage": {}})]
+    monkeypatch.setattr(agent_runtime, "load_local_config", lambda: _config())
+    monkeypatch.setattr(agent_runtime, "_load_sdk", lambda: sdk)
+
+    events = await _collect(_payload())
+
+    assert "context" not in events[-1].metadata
+
+
+@pytest.mark.asyncio
+async def test_stream_local_agent_context_window_falls_back_to_budget(monkeypatch):
+    sdk = FakeSDK(result=_result("done"))
+    sdk.events = [_model_response(1234)]
+    monkeypatch.setattr(
+        agent_runtime,
+        "load_local_config",
+        lambda: _config(context_max_tokens=8000),
+    )
+    monkeypatch.setattr(agent_runtime, "_load_sdk", lambda: sdk)
+
+    events = await _collect(_payload())
+
+    assert events[-1].metadata["context"] == {
+        "used_tokens": 1234,
+        "window_tokens": 8000,
+        "budget_tokens": 8000,
+    }
 
 
 @pytest.mark.asyncio

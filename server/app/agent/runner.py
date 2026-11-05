@@ -41,7 +41,7 @@ from app.agent.loop import stream_agent
 from app.agent.payloads import attach_trace, should_persist_reply, tool_call_payload, tool_result_payload
 from app.agent.repo import RunRepository, utcnow
 from app.agent.research_memory import ResearchSave, save_research
-from app.agent.schemas import ActiveRunOut, AgentRunOut
+from app.agent.schemas import ActiveRunOut, AgentRunOut, ContextUsageOut
 from app.agent.spans import SpanOptions, SpanRecorder
 from app.agent.store import serialize_message
 from app.agent.trace import ToolTrace
@@ -785,19 +785,17 @@ class AgentRunManager:
                     partial_metadata=final_metadata,
                 )
 
-        self.publish(
-            run.id,
-            (
-                "done",
-                {
-                    "run_id": str(run.id),
-                    "conversation_id": str(run.conversation_id),
-                    "status": status,
-                    "last_seq": writer.last_seq,
-                    "usage": usage,
-                },
-            ),
-        )
+        done_payload: dict[str, Any] = {
+            "run_id": str(run.id),
+            "conversation_id": str(run.conversation_id),
+            "status": status,
+            "last_seq": writer.last_seq,
+            "usage": usage,
+        }
+        context = _context_payload(final_metadata.get("context"))
+        if context is not None:
+            done_payload["context"] = context
+        self.publish(run.id, ("done", done_payload))
 
         if status == "completed":
             # Save the conclusion after the client already received "done" so a
@@ -935,6 +933,11 @@ class AgentRunManager:
                     "status": status,
                     "last_seq": writer.last_seq,
                     "usage": usage_snapshot_from_metadata(writer.metadata),
+                    **(
+                        {"context": context}
+                        if (context := _context_payload(writer.metadata.get("context"))) is not None
+                        else {}
+                    ),
                 },
             ),
         )
@@ -1124,6 +1127,11 @@ def serialize_run(run: AgentRun) -> AgentRunOut:
         usage_breakdown=dict(run.usage_breakdown or {}),
         usage_coverage=usage["coverage"],
         usage=usage,
+        context=(
+            ContextUsageOut(**context)
+            if (context := _context_payload((run.partial_metadata or {}).get("context"))) is not None
+            else None
+        ),
     )
 
 
@@ -1140,6 +1148,29 @@ def serialize_active_run(run: AgentRun) -> ActiveRunOut:
 
 def _str_or_none(value: Any) -> str | None:
     return str(value) if value is not None else None
+
+
+def _context_payload(value: Any) -> dict[str, Any] | None:
+    """Normalize a context snapshot before persisting or publishing it.
+
+    ``used_tokens`` is required and must be a positive integer; the optional
+    denominators are dropped when they are not usable numbers. Returning
+    ``None`` keeps the key out of ``done`` and the run snapshot.
+    """
+    if not isinstance(value, dict):
+        return None
+    used = value.get("used_tokens")
+    if not isinstance(used, int) or isinstance(used, bool) or used <= 0:
+        return None
+
+    def positive_int(raw: Any) -> int | None:
+        return raw if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0 else None
+
+    return {
+        "used_tokens": used,
+        "window_tokens": positive_int(value.get("window_tokens")),
+        "budget_tokens": positive_int(value.get("budget_tokens")),
+    }
 
 
 def _seconds_since(moment: datetime | None) -> float:

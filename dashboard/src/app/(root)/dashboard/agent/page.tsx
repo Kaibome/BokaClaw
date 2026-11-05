@@ -29,6 +29,7 @@ export default function AgentPage() {
     isLoadingMessages,
     isStreaming,
     cancelRequested,
+    contextUsage,
     error,
     send,
     stop,
@@ -134,6 +135,7 @@ export default function AgentPage() {
               onStop={() => void stop()}
               isStreaming={isStreaming}
               cancelRequested={cancelRequested}
+              contextUsage={contextUsage}
             />
           </div>
         </Card>

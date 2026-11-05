@@ -95,6 +95,12 @@ export interface RunUsage {
   warnings?: string[];
 }
 
+export interface ContextUsage {
+  used_tokens: number;
+  window_tokens: number | null;
+  budget_tokens: number | null;
+}
+
 export interface AgentRun {
   id: string;
   conversation_id: string;
@@ -115,6 +121,7 @@ export interface AgentRun {
   unknown_usage_calls?: number;
   usage_coverage?: UsageCoverage;
   usage?: RunUsage | null;
+  context?: ContextUsage | null;
 }
 
 export type SpanType = "agent" | "llm" | "tool" | "memory";

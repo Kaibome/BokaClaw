@@ -127,7 +127,7 @@ queued ──▶ cancelled                 # 启动前取消，不经过 running
 
 | run 终态 | 消息 status | 消息 metadata 追加 |
 | --- | --- | --- |
-| `completed` | `completed` | 执行器 metadata（`usage`、`finish_reason`、`run_id` 等）与 `tool_trace` |
+| `completed` | `completed` | 执行器 metadata（`usage`、`finish_reason`、`run_id`、`context` 等）与 `tool_trace` |
 | `failed` | `failed` | `{"error_code": "<code>"}` 与 `tool_trace` |
 | `cancelled` | `cancelled` | `{"error_code": "agent_cancelled"}` 与 `tool_trace` |
 | `interrupted` | `failed` | `{"run_status": "interrupted", "error_code": "agent_interrupted"}` 与 `tool_trace` |
@@ -313,6 +313,7 @@ queued ──▶ cancelled                 # 启动前取消，不经过 running
 
 - 只在 `completed` 终态产生，且该 run 还没有 `message.completed` 事件时追加。
 - `message` 是最终落库的助手消息；若消息未落库则没有该键。
+- 远程执行器的 `message.completed` 只有 `usage`、`finish_reason`、`run_id`、`context` 这些 metadata 会被透传（顶层或 `message.metadata` 嵌套均可）；`context` 形如 `{"used_tokens": 12300, "window_tokens": 131072, "budget_tokens": 32000}`，同时出现在 `done` payload 和 `GET /agent/runs/{id}` 响应中，远端不发送时 dashboard 隐藏上下文指示器。
 
 #### `error`
 

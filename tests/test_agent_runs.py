@@ -450,6 +450,32 @@ async def test_manager_persists_token_usage_from_per_call_events():
 
 
 @pytest.mark.asyncio
+async def test_manager_persists_context_usage():
+    repo = FakeRepo()
+    run = repo.add_run(_run())
+    context = {"used_tokens": 12_345, "window_tokens": 131_072, "budget_tokens": 32_000}
+
+    async def executor(_payload, _request_id, *, cancel_event=None, max_seconds=None):
+        yield AgentDelta("hi")
+        yield AgentCompleted(metadata={"finish_reason": "stop", "context": context})
+
+    manager = AgentRunManager(_config(), repo=repo, executor=executor)
+    manager.submit(run.id)
+    subscription = await manager.open_subscription(run.id, 0)
+    assert subscription is not None
+    await manager.wait(run.id, timeout=2)
+    items = await _collect_until_done(subscription)
+    await manager.shutdown()
+
+    stored = repo.runs[run.id]
+    assert stored.status == "completed"
+    assert stored.partial_metadata["context"] == context
+    assert items[-1][1]["context"] == context
+    message = repo.messages[stored.assistant_message_id]
+    assert message.meta["context"] == context
+
+
+@pytest.mark.asyncio
 async def test_manager_marks_coverage_unknown_without_usage():
     repo = FakeRepo()
     run = repo.add_run(_run())
@@ -875,6 +901,29 @@ def test_malformed_run_id_is_404(background_client):
 
     assert response.status_code == 404
     assert response.json()["code"] == "agent_run_not_found"
+
+
+def test_run_snapshot_exposes_context_usage(background_client):
+    repo = FakeRepo()
+    context = {"used_tokens": 12_345, "window_tokens": 131_072, "budget_tokens": 32_000}
+    run = repo.add_run(_run(status="completed", partial_metadata={"context": context}))
+    background_client.app.state.agent_runs = AgentRunManager(_config(), repo=repo)
+
+    response = background_client.get(f"/agent/runs/{run.id}")
+
+    assert response.status_code == 200
+    assert response.json()["context"] == context
+
+
+def test_run_snapshot_context_is_null_for_old_runs(background_client):
+    repo = FakeRepo()
+    run = repo.add_run(_run(status="completed"))
+    background_client.app.state.agent_runs = AgentRunManager(_config(), repo=repo)
+
+    response = background_client.get(f"/agent/runs/{run.id}")
+
+    assert response.status_code == 200
+    assert response.json()["context"] is None
 
 
 def test_run_snapshot_exposes_status_and_cursor(background_client):

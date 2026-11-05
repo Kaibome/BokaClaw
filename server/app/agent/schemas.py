@@ -86,6 +86,12 @@ class RunUsageOut(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class ContextUsageOut(BaseModel):
+    used_tokens: int
+    window_tokens: int | None = None
+    budget_tokens: int | None = None
+
+
 class AgentRunOut(BaseModel):
     id: str
     conversation_id: str
@@ -107,6 +113,7 @@ class AgentRunOut(BaseModel):
     usage_breakdown: dict[str, Any] = Field(default_factory=dict)
     usage_coverage: str = "unavailable"
     usage: RunUsageOut | None = None
+    context: ContextUsageOut | None = None
 
 
 class RunCancelOut(BaseModel):

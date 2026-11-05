@@ -154,6 +154,9 @@ class LocalAgentConfig:
     max_seconds: float
     final_answer_on_max_iterations: bool = True
     context_max_tokens: Optional[int] = None
+    # Display-only denominator for the dashboard context meter. Not passed to
+    # the SDK; ``None`` hides the meter when no window is configured.
+    context_window_tokens: Optional[int] = None
     context_keep_recent_tokens: Optional[int] = None
     context_compression: str = "summary"
     tool_result_max_chars: Optional[int] = None
@@ -233,6 +236,9 @@ def load_local_config() -> Optional[LocalAgentConfig]:
         api_key = "local"
 
     context_max_tokens = _env_budget("AGENT_CONTEXT_MAX_TOKENS", 32_000)
+    # The real model window is a display concern; fall back to the compression
+    # budget so the dashboard has a denominator without extra configuration.
+    context_window_tokens = _env_budget("AGENT_CONTEXT_WINDOW", context_max_tokens)
     context_keep_recent_tokens = _env_optional_int("AGENT_CONTEXT_KEEP_RECENT_TOKENS")
     if context_keep_recent_tokens is not None:
         # Keep the SDK config valid even when the environment is misconfigured:
@@ -259,6 +265,7 @@ def load_local_config() -> Optional[LocalAgentConfig]:
         max_seconds=max(1.0, _env_float("AGENT_LOOP_MAX_SECONDS", 300.0)),
         final_answer_on_max_iterations=_env_flag("AGENT_FINAL_ANSWER_ON_MAX_ITERATIONS", True),
         context_max_tokens=context_max_tokens,
+        context_window_tokens=context_window_tokens,
         context_keep_recent_tokens=context_keep_recent_tokens,
         context_compression=_env_compression_mode("AGENT_CONTEXT_COMPRESSION"),
         tool_result_max_chars=_env_budget("AGENT_TOOL_RESULT_MAX_CHARS", 16_000),
@@ -744,7 +751,42 @@ def build_runtime(
     return sdk.AgentRuntime(agent_config, tools=tools, on_event=on_event)
 
 
-def _completion_metadata(payload: Dict[str, Any], result: Any) -> Dict[str, Any]:
+def _response_prompt_tokens(event: Any) -> Optional[int]:
+    """Prompt tokens of one agent-loop model response, when the provider reports them."""
+    event_type = getattr(getattr(event, "type", None), "value", getattr(event, "type", None))
+    if event_type != "model_response":
+        return None
+    data = getattr(event, "data", None)
+    if not isinstance(data, dict):
+        return None
+    value = normalize_usage(data.get("usage")).get("prompt_tokens")
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
+def _context_metadata(used_tokens: Optional[int], config: Optional[LocalAgentConfig]) -> Optional[Dict[str, Any]]:
+    """Build the dashboard context object, or ``None`` when usage is unknown."""
+    if not isinstance(used_tokens, int) or isinstance(used_tokens, bool) or used_tokens <= 0:
+        return None
+    budget = config.context_max_tokens if config is not None else None
+    window = config.context_window_tokens if config is not None else None
+    if window is None:
+        # Directly constructed configs (tests, callers) may skip the env
+        # fallback; keep the meter usable by treating the budget as the window.
+        window = budget
+    return {
+        "used_tokens": used_tokens,
+        "window_tokens": window,
+        "budget_tokens": budget,
+    }
+
+
+def _completion_metadata(
+    payload: Dict[str, Any],
+    result: Any,
+    *,
+    config: Optional[LocalAgentConfig] = None,
+    used_tokens: Optional[int] = None,
+) -> Dict[str, Any]:
     metadata: Dict[str, Any] = {}
     usage = getattr(result, "usage", None)
     if usage:
@@ -754,6 +796,9 @@ def _completion_metadata(payload: Dict[str, Any], result: Any) -> Dict[str, Any]
         metadata["finish_reason"] = stop_reason
     if payload.get("run_id"):
         metadata["run_id"] = payload["run_id"]
+    context = _context_metadata(used_tokens, config)
+    if context is not None:
+        metadata["context"] = context
     return metadata
 
 
@@ -836,7 +881,15 @@ async def stream_local_agent(
         except RuntimeError:  # pragma: no cover - the loop is already closed
             pass
 
+    # The last reported prompt size is the run's context occupancy at the end.
+    # Compression calls emit ``context_compressed``, not ``model_response``, so
+    # they never overwrite it.
+    last_prompt_tokens: Dict[str, Optional[int]] = {"value": None}
+
     def on_event(event: Any) -> None:
+        tokens = _response_prompt_tokens(event)
+        if tokens is not None:
+            last_prompt_tokens["value"] = tokens
         _bridge_event(event, put, model=getattr(config, "model", None))
 
     runtime = build_runtime(sdk, config, payload, on_event=on_event)
@@ -931,7 +984,14 @@ async def stream_local_agent(
             elif kind == "usage":
                 yield value
             elif kind == "completed":
-                yield AgentCompleted(metadata=_completion_metadata(payload, value))
+                yield AgentCompleted(
+                    metadata=_completion_metadata(
+                        payload,
+                        value,
+                        config=config,
+                        used_tokens=last_prompt_tokens["value"],
+                    )
+                )
             elif kind in {"tool_call", "tool_result"}:
                 yield value
             elif kind in {

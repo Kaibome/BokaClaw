@@ -598,6 +598,25 @@
 
 ---
 
+## P-18 上下文窗口用量不可见：只有累计 token，没有「已用 / 窗口」
+
+- **状态**：已解决
+- **发现时间**：2026-11-05
+- **解决时间**：2026-11-05
+- **场景**：Agent 对话页只在每条助手消息下方显示本次 run 的累计 token（`usage`），发送区没有任何上下文窗口指示；用户无法判断当前对话距离模型窗口上限还有多远。
+- **证据**：
+  - `server/app/agent/runtime.py` 的 `LocalAgentConfig` 只有压缩预算 `context_max_tokens`（`AGENT_CONTEXT_MAX_TOKENS`，默认 32,000），没有「模型真实窗口」概念；
+  - 每次模型调用的真实输入量在 SDK `model_response.usage.prompt_tokens` 中，但此前只进入 usage 汇总与 span，未随 `done` / 助手消息元数据 / run 快照暴露；
+  - `server/app/agent/runner.py` 的 `done` payload 只有 `usage`；`serialize_run` 没有上下文字段；dashboard `chat-composer.tsx` 的输入行只有 Textarea 与发送/停止按钮。
+- **根因**：服务端把「压缩预算」与「模型上下文窗口」混为一谈，且没有把最后一次主循环调用的 prompt 大小从事件桥接层提升为 run 级指标；前端因此拿不到分子与分母。
+- **解决措施**：
+  - 服务端：新增仅用于展示的 `AGENT_CONTEXT_WINDOW`（未设置回退 `AGENT_CONTEXT_MAX_TOKENS`，`0/off` 隐藏指示器），不传给 SDK；在 SSE 桥接的 `on_event` 中记录最后一次 `model_response` 的 `prompt_tokens`（压缩调用只发 `context_compressed`，不会污染），随 `AgentCompleted.metadata.context` → `done.context` / 助手消息 `metadata.context` / `agent_runs.partial_metadata.context` 三处透传；`AgentRunOut` 增加 `context`；远程执行器 `message.completed` 白名单加入 `context`（顶层与嵌套 metadata）；
+  - Dashboard：`done` 与轮询终态回填 `context`，用 `useMemo` 从最后一条非 streaming 助手消息派生 `contextUsage`；`chat-composer.tsx` 新增 `ContextMeter`，在发送/停止按钮左侧显示 `12.3k / 128k · 10%`，hover / 键盘 focus 展示 used / window / budget，≥90% 转警示色，无数据时隐藏。
+- **解决后效果**：`context.used_tokens` 等于本 run 最后一次 `agent_loop` 模型调用的 `prompt_tokens`，百分比由前端计算；旧 run 与取消 run 无 `context`，指示器保持隐藏。验证：server `test_agent_runtime.py` / `test_agent_upstream.py` / `test_agent_runs.py` / `test_agent_router.py` 共 116 passed；dashboard `tsc --noEmit`、Prettier、`next build` 通过。真实 run 的页面复测（含 ≥90% 警示色与刷新恢复）待执行。
+- **可复用结论**：「预算」和「窗口」是两个分母：压缩预算决定何时摘要，模型窗口决定何时真正溢出，展示层必须用后者。把分子定义成「最后一次主循环调用的 prompt_tokens」比累计值或峰值更能反映 run 结束时的上下文占用；从 bridge 闭包取数不需要改 SDK 公共 API，也不需要数据库迁移。
+
+---
+
 ## 变更记录
 
 | 日期 | 变更 |
@@ -626,6 +645,8 @@
 | 2026-11-05 | 追加 P-14：修复 `RunEventWriter` 缓冲未 flush 导致短回答 run 被误判 `agent_protocol_error`；`_run_worker` 在 `_completion_state()` 前 flush，回归测试转绿 |
 | 2026-11-05 | 追加 P-15：分析 run `bf25efa8` 「记忆检索未触发」——实际已注入（日志 + `llm:2` system prompt 第 679 字符起 2750 字符注入块），不可见因自动检索无 span/事件；同时定位阈值口径问题：mem0 混合分在有 BM25 命中时除以 2，`_fresh_entry` 拿混合分比固定 0.5 导致召回随候选池漂移；结论写入候选修复，代码未改 |
 | 2026-11-05 | P-15 修复：检索改用 `explain=True` 的 `score_details.semantic_score` 比阈值（`combined_score` 仅展示），新增 `memory.recall` / `memory.save` 持久化事件与 `memory` span（迁移 012 扩展 CHECK 约束，Trace 页支持该类型）；真实 run `ed65c268` 验证两条 semantic≈0.72 / combined≈0.36 的结论正常注入、保存走 `updated`；server agent 相关 102 passed，迁移往返与 ruff/tsc 通过；P-15 改为已解决 |
+| 2026-11-05 | 追加 P-18：新增 `AGENT_CONTEXT_WINDOW`（回退压缩预算），把最后一次 `model_response.prompt_tokens` 作为 `context.used_tokens` 随 `done` / 助手消息 metadata / run 快照透传（远程执行器白名单同步），Dashboard 在发送按钮左侧显示 `used / window · percent` 并支持 tooltip 与 ≥90% 警示；server 相关 116 passed，`tsc` / Prettier / `next build` 通过，真实 run 页面复测待执行 |
 | 2026-11-05 | 追加 P-16：模型接口实际返回了缓存计数字段，但 provider `_parse_usage` 的 3-key 白名单在入口丢弃；拍平 DeepSeek/OpenAI 两种缓存口径与 `reasoning_tokens`，usage meter/`/traces`/Dashboard 增加命中率展示；真实 run `0d6e0f33` 命中率 66% |
 | 2026-11-05 | P-07 注入块改为只鼓励复用：删除「when the facts may have changed, verify them with WebSearch/WebFetch」的复核句，改为「Reuse one when it answers the current question instead of repeating the same web research」（`server/app/agent/research_memory.py:_render_block`，同步 `server/README.md` 与 `tests/test_agent_research_memory.py`，相关 81 passed）。真实复测 `2105fac8`：同题 3 次 WebFetch + 1 次 search_memories、45,656 tokens / 9.3s；对照删除前 `410fcaba`（3 次工具 / 27,782 tokens）——删掉复核提示后模型仍会重抓，说明是否检索由基础 prompt 与结论缺口（上次结论里 Mate 90 Pro 价格缺失）决定，单靠这一句无法消除重复抓取；下一步要控 token 应先降 `AGENT_TOOL_RESULT_MAX_CHARS`（当前 16,000 字符/条） |
+| 2026-11-05 | 上下文压缩预算实测：`AGENT_CONTEXT_MAX_TOKENS` 由默认 32,000 调到 64,000 后复跑同题（`410fcaba`：5 calls / 27,782 tokens / 0 次压缩 / 8.1s），但该 run 命中了同题研究记忆（`source=exact`）因而未触及阈值，不能作为阈值效果对照；32k 基线 `da4d25f2` 为 14 calls / 118,842 tokens / 4 次压缩 / 40.1s |
 | 2026-11-05 | 追加 P-17：压缩摘要改用独立便宜的模型——`AgentConfig.compression_model` + `AgentRuntime(compression_provider=...)`，server 新增 `AGENT_COMPRESSION_MODEL/API_KEY/BASE_URL`；`.env` 配 `deepseek-chat`（非思考别名，实测 0 reasoning tokens）；agent-loop 167 passed，server agent runtime 62 passed，镜像重建并重启验证 |
