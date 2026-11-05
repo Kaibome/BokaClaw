@@ -34,8 +34,10 @@ from app.agent.events import (
     AgentRunStarted,
     AgentToolCall,
     AgentToolResult,
+    AgentUsageUpdate,
 )
 from app.agent.research_memory import prior_research_block
+from app.agent.usage import RunUsageMeter, meter_context, normalize_usage
 
 logger = logging.getLogger(__name__)
 
@@ -432,6 +434,13 @@ def _iteration(event: Any, data: dict[str, Any]) -> int:
         return 0
 
 
+def _as_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _model_request_event(
     data: dict[str, Any],
     iteration: int,
@@ -476,6 +485,8 @@ def _bridge_event(event: Any, put: Callable[[str, Any], None], *, model: str | N
 
     if event_type == "context_compressed":
         for_debug = data
+        usage = normalize_usage(for_debug.get("usage"))
+        model_calls = _as_int(for_debug.get("model_calls"))
         _context_debug(
             "context_compressed session=%s iteration=%s before_tokens=%s after_tokens=%s "
             "dropped_messages=%s summarized=%s fallback=%s",
@@ -487,25 +498,61 @@ def _bridge_event(event: Any, put: Callable[[str, Any], None], *, model: str | N
             for_debug.get("summarized"),
             for_debug.get("fallback"),
         )
+        if model_calls or usage:
+            put(
+                "usage",
+                AgentUsageUpdate(
+                    source="compression",
+                    phase="response",
+                    iteration=_iteration(event, data),
+                    usage=usage,
+                    calls=max(1, model_calls),
+                    unknown_calls=_as_int(for_debug.get("usage_unknown_calls")),
+                ),
+            )
         if _span_capture_enabled():
             put(
                 "span_context_compressed",
                 AgentContextCompressed(
                     iteration=_iteration(event, data),
                     stats=dict(for_debug),
+                    usage=usage or None,
+                    model_calls=model_calls,
+                    usage_unknown_calls=_as_int(for_debug.get("usage_unknown_calls")),
                 ),
             )
         return
 
     if event_type in {"run_started", "model_request", "model_response", "run_ended", "error"}:
-        if not _span_capture_enabled():
-            return
         iteration = _iteration(event, data)
         seq = getattr(event, "seq", None)
         try:
             seq = int(seq) if seq is not None else None
         except (TypeError, ValueError):
             seq = None
+
+        # Usage must reach the runner even when span capture is off, so it is
+        # emitted before the gate below.
+        usage: dict[str, int] = {}
+        if event_type == "model_request":
+            put("usage", AgentUsageUpdate(source="agent_loop", phase="request", iteration=iteration, seq=seq))
+        elif event_type == "model_response":
+            usage = normalize_usage(data.get("usage"))
+            put(
+                "usage",
+                AgentUsageUpdate(
+                    source="agent_loop",
+                    phase="response",
+                    iteration=iteration,
+                    usage=usage,
+                    calls=1,
+                    unknown_calls=0 if usage else 1,
+                    seq=seq,
+                ),
+            )
+
+        if not _span_capture_enabled():
+            return
         if event_type == "run_started":
             value = data.get("input")
             put(
@@ -527,6 +574,7 @@ def _bridge_event(event: Any, put: Callable[[str, Any], None], *, model: str | N
                     if isinstance(tool_calls, list)
                     else [],
                     finish_reason=finish_reason if isinstance(finish_reason, str) else None,
+                    usage=usage or None,
                     seq=seq,
                 ),
             )
@@ -686,6 +734,7 @@ async def stream_local_agent(
     *,
     cancel_event: threading.Event | None = None,
     max_seconds: float | None = None,
+    usage_meter: RunUsageMeter | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Run one ReAct turn, streaming the SDK's text deltas as they arrive.
 
@@ -704,13 +753,14 @@ async def stream_local_agent(
     sdk = _load_sdk()
     if config.research_memory and payload.get("user_id"):
         try:
-            block = await asyncio.to_thread(
-                prior_research_block,
-                str(payload.get("user_id")),
-                str(payload.get("message") or ""),
-                ttl_days=config.research_memory_ttl_days,
-                min_score=config.research_memory_min_score,
-            )
+            with meter_context(usage_meter):
+                block = await asyncio.to_thread(
+                    prior_research_block,
+                    str(payload.get("user_id")),
+                    str(payload.get("message") or ""),
+                    ttl_days=config.research_memory_ttl_days,
+                    min_score=config.research_memory_min_score,
+                )
         except Exception:
             logger.warning("Prior research lookup failed; continuing without it", exc_info=True)
             block = ""
@@ -740,6 +790,12 @@ async def stream_local_agent(
     runtime = build_runtime(sdk, config, payload, on_event=on_event)
 
     def worker() -> None:
+        # A raw ``threading.Thread`` does not inherit context variables, so the
+        # meter must be bound explicitly for mem0 calls made on this thread.
+        with meter_context(usage_meter):
+            _worker()
+
+    def _worker() -> None:
         try:
             kwargs: Dict[str, Any] = {
                 "session_id": conversation_id,
@@ -820,6 +876,8 @@ async def stream_local_agent(
 
             if kind == "delta":
                 yield AgentDelta(value)
+            elif kind == "usage":
+                yield value
             elif kind == "completed":
                 yield AgentCompleted(metadata=_completion_metadata(payload, value))
             elif kind in {"tool_call", "tool_result"}:

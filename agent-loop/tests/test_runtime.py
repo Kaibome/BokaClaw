@@ -387,6 +387,33 @@ def test_tool_result_truncation_is_off_by_default():
     assert tool_event.data["content"] == "z" * 5000
 
 
+def test_model_response_event_carries_usage_for_each_call():
+    events = []
+    provider = FakeProvider(
+        [
+            ModelResponse(content="ok", finish_reason="stop", usage={"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7})
+        ]
+    )
+    runtime = AgentRuntime(AgentConfig(), provider=provider, on_event=events.append)
+
+    result = runtime.run("hi", session_id="s1")
+
+    response = next(event for event in events if event.type == EventType.MODEL_RESPONSE)
+    assert response.data["usage"] == {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}
+    assert result.usage == {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}
+
+
+def test_model_response_event_reports_empty_usage_when_unavailable():
+    events = []
+    provider = FakeProvider([ModelResponse(content="ok", finish_reason="stop")])
+    runtime = AgentRuntime(AgentConfig(), provider=provider, on_event=events.append)
+
+    runtime.run("hi", session_id="s1")
+
+    response = next(event for event in events if event.type == EventType.MODEL_RESPONSE)
+    assert response.data["usage"] == {}
+
+
 def test_events_are_emitted_in_order():
     events = []
     provider = FakeProvider([ModelResponse(content="ok", finish_reason="stop")])

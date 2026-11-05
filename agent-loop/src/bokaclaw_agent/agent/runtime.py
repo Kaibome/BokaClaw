@@ -305,8 +305,9 @@ class AgentRuntime:
                     # the model receives.
                     tools_tokens = estimate_tokens(json.dumps(tool_specs, ensure_ascii=False, default=str))
                     compressed = compressor.compress(messages, tools_tokens=tools_tokens)
-                    if compressed.changed:
-                        messages = compressed.messages
+                    if compressed.changed or compressed.stats.get("model_calls"):
+                        if compressed.changed:
+                            messages = compressed.messages
                         self._emit(
                             EventType.CONTEXT_COMPRESSED,
                             session_id,
@@ -336,6 +337,7 @@ class AgentRuntime:
                         "content": response.content,
                         "tool_calls": [call.model_dump() for call in response.tool_calls],
                         "finish_reason": response.finish_reason,
+                        "usage": dict(response.usage),
                     },
                 )
 
@@ -471,6 +473,7 @@ class AgentRuntime:
                     content=response.content,
                     tool_calls=[],
                     finish_reason=response.finish_reason or "stop",
+                    usage=dict(response.usage),
                 )
                 self._emit(
                     EventType.MODEL_RESPONSE,
@@ -480,6 +483,7 @@ class AgentRuntime:
                         "content": final.content,
                         "tool_calls": [],
                         "finish_reason": final.finish_reason,
+                        "usage": dict(final.usage),
                     },
                 )
                 assistant = assistant_message(final)
@@ -537,6 +541,7 @@ class AgentRuntime:
                     content=response.content,
                     tool_calls=[],
                     finish_reason=response.finish_reason or "stop",
+                    usage=dict(response.usage),
                 )
                 self._emit(
                     EventType.MODEL_RESPONSE,
@@ -546,6 +551,7 @@ class AgentRuntime:
                         "content": final.content,
                         "tool_calls": [],
                         "finish_reason": final.finish_reason,
+                        "usage": dict(final.usage),
                     },
                 )
                 assistant = assistant_message(final)
@@ -663,8 +669,9 @@ class AgentRuntime:
         messages = context.build()
         if compressor is not None:
             compressed = compressor.compress(messages, tools_tokens=0)
-            if compressed.changed:
-                messages = compressed.messages
+            if compressed.changed or compressed.stats.get("model_calls"):
+                if compressed.changed:
+                    messages = compressed.messages
                 self._emit(
                     EventType.CONTEXT_COMPRESSED,
                     session_id,
@@ -784,6 +791,7 @@ class AgentRuntime:
         content_parts: list[str] = []
         call_parts: dict[int, dict[str, str]] = {}
         finish_reason: str | None = None
+        call_usage: dict[str, int] = {}
 
         for chunk in self._stream_complete(messages, use_tools=use_tools, **model_kwargs):
             if chunk.content:
@@ -798,12 +806,14 @@ class AgentRuntime:
                 entry["arguments"] += delta.arguments
             if chunk.finish_reason:
                 finish_reason = chunk.finish_reason
+            self._merge_usage(call_usage, chunk.usage)
             self._merge_usage(usage, chunk.usage)
 
         return ModelResponse(
             content="".join(content_parts) or None,
             tool_calls=self._tool_calls_from_parts(call_parts),
             finish_reason=finish_reason,
+            usage=call_usage,
         )
 
     def _stream_complete(

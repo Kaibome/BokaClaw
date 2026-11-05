@@ -77,6 +77,7 @@ class AgentModelResponse:
     content: str = ""
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     finish_reason: str | None = None
+    usage: dict[str, int] | None = None
     seq: int | None = None
 
 
@@ -84,6 +85,26 @@ class AgentModelResponse:
 class AgentContextCompressed:
     iteration: int = 0
     stats: dict[str, Any] = field(default_factory=dict)
+    usage: dict[str, int] | None = None
+    model_calls: int = 0
+    usage_unknown_calls: int = 0
+
+
+@dataclass
+class AgentUsageUpdate:
+    """One metered model call, emitted independently of span capture.
+
+    A ``phase="request"`` event marks a call that has started but not produced
+    usage yet; it becomes an unknown call if no response is ever seen.
+    """
+
+    source: str = "agent_loop"
+    phase: str = "response"
+    iteration: int = 0
+    usage: dict[str, int] = field(default_factory=dict)
+    calls: int = 1
+    unknown_calls: int = 0
+    seq: int | None = None
 
 
 @dataclass
@@ -108,6 +129,7 @@ AgentEvent = (
     | AgentModelRequest
     | AgentModelResponse
     | AgentContextCompressed
+    | AgentUsageUpdate
     | AgentRunEnded
     | AgentError
 )

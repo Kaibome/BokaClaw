@@ -16,6 +16,7 @@ from app.agent.events import (
     AgentToolResult,
 )
 from app.agent.runtime import is_locally_configured, stream_local_agent
+from app.agent.usage import RunUsageMeter
 
 MOCK_RESPONSE = (
     "你好！我是 BokaClaw Agent 的联调假回复。\n\n"
@@ -192,6 +193,11 @@ def _handle_upstream_event(event_name: str, data: str) -> AgentEvent | None:
         except json.JSONDecodeError:
             payload = {}
         metadata = {key: payload[key] for key in ("usage", "finish_reason", "run_id") if key in payload}
+        nested = payload.get("metadata")
+        if isinstance(nested, dict):
+            for key in ("usage", "finish_reason", "run_id"):
+                if key in nested and key not in metadata:
+                    metadata[key] = nested[key]
         return AgentCompleted(metadata=metadata)
 
     if event_name == "error":
@@ -250,7 +256,10 @@ async def _parse_json_fallback(response: httpx.Response) -> AsyncIterator[AgentE
     if not isinstance(content, str) or not content:
         raise AgentLoopError("agent_protocol_error", "Agent executor JSON response is missing content.")
     yield AgentDelta(content)
-    yield AgentCompleted(metadata={"finish_reason": payload.get("finish_reason", "stop")})
+    metadata: dict[str, Any] = {"finish_reason": payload.get("finish_reason", "stop")}
+    if "usage" in payload:
+        metadata["usage"] = payload["usage"]
+    yield AgentCompleted(metadata=metadata)
 
 
 def _cancelled(cancel_event: threading.Event | None) -> bool:
@@ -263,6 +272,7 @@ async def stream_agent(
     *,
     cancel_event: threading.Event | None = None,
     max_seconds: float | None = None,
+    usage_meter: RunUsageMeter | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Yield deltas from the configured agent executor.
 
@@ -272,13 +282,21 @@ async def stream_agent(
     so a cancelled run stops without waiting for the next model token."""
     config = load_config()
 
+    if usage_meter is not None:
+        usage_meter.set_transport("mock" if config.mock else ("local" if not config.url else "remote"))
+
     if config.mock:
         async for event in _mock_events(cancel_event):
             yield event
         return
 
     if not config.url:
-        async for event in stream_local_agent(payload, cancel_event=cancel_event, max_seconds=max_seconds):
+        async for event in stream_local_agent(
+            payload,
+            cancel_event=cancel_event,
+            max_seconds=max_seconds,
+            usage_meter=usage_meter,
+        ):
             yield event
         return
 

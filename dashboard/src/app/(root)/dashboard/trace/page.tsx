@@ -248,6 +248,13 @@ function TracePageInner() {
           ) / spansWithDuration.length,
         )
       : null;
+  const spansWithTokens = filteredSpans.filter(
+    (span) => typeof span.total_tokens === "number",
+  );
+  const totalTokens = spansWithTokens.reduce(
+    (sum, span) => sum + (span.total_tokens ?? 0),
+    0,
+  );
 
   const loadSpanDetail = async (row: AgentRunSpanSummary) => {
     const requestId = ++detailRequestRef.current;
@@ -416,12 +423,19 @@ function TracePageInner() {
         </Button>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
         {[
           { label: "Runs", value: totalRuns },
           {
             label: "Avg Duration",
             value: averageDuration === null ? "--" : `${averageDuration} ms`,
+          },
+          {
+            label: "Tokens",
+            value:
+              spansWithTokens.length > 0
+                ? totalTokens.toLocaleString("en-US")
+                : "--",
           },
           {
             label: "Errors",

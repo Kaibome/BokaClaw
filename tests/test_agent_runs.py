@@ -31,7 +31,14 @@ if _SERVER_DIR not in sys.path:
 
 import app.routers.agent as agent_router  # noqa: E402
 import app.agent.runner as agent_runner  # noqa: E402
-from app.agent.events import AgentCompleted, AgentDelta, AgentLoopError, AgentToolCall, AgentToolResult  # noqa: E402
+from app.agent.events import (  # noqa: E402
+    AgentCompleted,
+    AgentDelta,
+    AgentLoopError,
+    AgentToolCall,
+    AgentToolResult,
+    AgentUsageUpdate,
+)
 from app.agent.runner import AgentRunManager, RunConfig  # noqa: E402
 from app.agent.schemas import ConversationMessageOut, ConversationOut  # noqa: E402
 from app.core.auth import require_auth  # noqa: E402
@@ -63,6 +70,12 @@ def _run(**overrides):
         "partial_metadata": {},
         "last_seq": 0,
         "attempt": 1,
+        "input_tokens": None,
+        "output_tokens": None,
+        "total_tokens": None,
+        "model_calls": 0,
+        "unknown_usage_calls": 0,
+        "usage_breakdown": {},
         "worker_id": None,
         "heartbeat_at": None,
         "cancel_requested_at": None,
@@ -171,7 +184,18 @@ class FakeRepo:
             run.finished_at = now or _now()
             return True
 
-    def finish(self, run_id, *, status, error_code=None, error_detail=None, partial_content=None, partial_metadata=None, finished_at=None):
+    def finish(
+        self,
+        run_id,
+        *,
+        status,
+        error_code=None,
+        error_detail=None,
+        partial_content=None,
+        partial_metadata=None,
+        usage=None,
+        finished_at=None,
+    ):
         with self._lock:
             run = self.runs.get(uuid.UUID(str(run_id)))
             if run is None or run.status not in ("queued", "running"):
@@ -183,7 +207,27 @@ class FakeRepo:
                 run.partial_content = partial_content
             if partial_metadata is not None:
                 run.partial_metadata = copy.deepcopy(partial_metadata)
+            if usage is not None:
+                run.input_tokens = usage.get("input_tokens")
+                run.output_tokens = usage.get("output_tokens")
+                run.total_tokens = usage.get("total_tokens")
+                run.model_calls = usage.get("model_calls", 0)
+                run.unknown_usage_calls = usage.get("unknown_calls", 0)
+                run.usage_breakdown = copy.deepcopy(usage)
             run.finished_at = finished_at or _now()
+            return True
+
+    def update_usage(self, run_id, usage, now=None):
+        with self._lock:
+            run = self.runs.get(uuid.UUID(str(run_id)))
+            if run is None:
+                return False
+            run.input_tokens = usage.get("input_tokens")
+            run.output_tokens = usage.get("output_tokens")
+            run.total_tokens = usage.get("total_tokens")
+            run.model_calls = usage.get("model_calls", 0)
+            run.unknown_usage_calls = usage.get("unknown_calls", 0)
+            run.usage_breakdown = copy.deepcopy(usage)
             return True
 
     def append_event(self, run_id, seq, event_type, payload, *, partial_content=None, partial_metadata=None):
@@ -350,6 +394,102 @@ async def test_manager_persists_ordered_events_and_completes():
     assert message.meta["run_id"] == str(run.id)
     assert stored.partial_metadata["run_id"] == str(run.id)
     assert items[-1][1]["run_id"] == str(run.id)
+
+
+@pytest.mark.asyncio
+async def test_manager_persists_token_usage_from_per_call_events():
+    repo = FakeRepo()
+    run = repo.add_run(_run())
+
+    async def executor(_payload, _request_id, *, cancel_event=None, max_seconds=None):
+        yield AgentUsageUpdate(source="agent_loop", phase="request", iteration=1)
+        yield AgentUsageUpdate(
+            source="agent_loop",
+            phase="response",
+            iteration=1,
+            usage={"prompt_tokens": 10, "completion_tokens": 3, "total_tokens": 13},
+        )
+        yield AgentUsageUpdate(
+            source="compression",
+            phase="response",
+            iteration=1,
+            usage={"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7},
+            calls=1,
+        )
+        yield AgentDelta("hi")
+        yield AgentCompleted(metadata={"finish_reason": "stop"})
+
+    manager = AgentRunManager(_config(), repo=repo, executor=executor)
+    manager.submit(run.id)
+    subscription = await manager.open_subscription(run.id, 0)
+    assert subscription is not None
+    await manager.wait(run.id, timeout=2)
+    items = await _collect_until_done(subscription)
+    await manager.shutdown()
+
+    stored = repo.runs[run.id]
+    assert stored.status == "completed"
+    assert stored.input_tokens == 15
+    assert stored.output_tokens == 5
+    assert stored.total_tokens == 20
+    assert stored.model_calls == 2
+    assert stored.unknown_usage_calls == 0
+    assert stored.usage_breakdown["coverage"] == "complete"
+    assert stored.usage_breakdown["sources"]["agent_loop"]["total_tokens"] == 13
+    assert stored.usage_breakdown["sources"]["compression"]["total_tokens"] == 7
+
+    done = items[-1][1]
+    assert done["usage"]["coverage"] == "complete"
+    assert done["usage"]["total_tokens"] == 20
+    message = repo.messages[stored.assistant_message_id]
+    assert message.meta["usage"]["total_tokens"] == 20
+
+
+@pytest.mark.asyncio
+async def test_manager_marks_coverage_unknown_without_usage():
+    repo = FakeRepo()
+    run = repo.add_run(_run())
+
+    async def executor(_payload, _request_id, *, cancel_event=None, max_seconds=None):
+        yield AgentUsageUpdate(source="agent_loop", phase="request", iteration=1)
+        yield AgentUsageUpdate(source="agent_loop", phase="response", iteration=1, usage={})
+        yield AgentDelta("hi")
+        yield AgentCompleted(metadata={"finish_reason": "stop"})
+
+    manager = AgentRunManager(_config(), repo=repo, executor=executor)
+    manager.submit(run.id)
+    await manager.wait(run.id, timeout=2)
+    await manager.shutdown()
+
+    stored = repo.runs[run.id]
+    assert stored.total_tokens is None
+    assert stored.model_calls == 1
+    assert stored.unknown_usage_calls == 1
+    assert stored.usage_breakdown["coverage"] == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_manager_uses_transport_aggregate_when_no_per_call_events():
+    repo = FakeRepo()
+    run = repo.add_run(_run())
+
+    async def executor(_payload, _request_id, *, cancel_event=None, max_seconds=None):
+        yield AgentDelta("hi")
+        yield AgentCompleted(
+            metadata={
+                "finish_reason": "stop",
+                "usage": {"prompt_tokens": 30, "completion_tokens": 10, "total_tokens": 40},
+            }
+        )
+
+    manager = AgentRunManager(_config(), repo=repo, executor=executor)
+    manager.submit(run.id)
+    await manager.wait(run.id, timeout=2)
+    await manager.shutdown()
+
+    stored = repo.runs[run.id]
+    assert stored.total_tokens == 40
+    assert stored.usage_breakdown["coverage"] == "aggregate"
 
 
 @pytest.mark.asyncio

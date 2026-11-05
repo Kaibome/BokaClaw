@@ -348,7 +348,9 @@ runtime = AgentRuntime(config, provider=provider, on_event=on_event)
 
 Events: `run_started`, `model_request`, `model_response`, `tool_call`, `tool_result`, `context_compressed`, `run_ended`, `error`. Callback exceptions are logged and never interrupt a run.
 
-`context_compressed` is emitted only when a request was actually rewritten, immediately before the matching `model_request`. Its `data` is `{before_tokens, after_tokens, dropped_messages, summarized, fallback}`. The `seq` rule below applies to it like every other event.
+`context_compressed` is emitted when a request was rewritten **or** when a summarization model call happened, immediately before the matching `model_request`. Its `data` is `{before_tokens, after_tokens, dropped_messages, summarized, fallback}`, plus `{usage, model_calls, usage_unknown_calls}` when a summary call ran. The `seq` rule below applies to it like every other event.
+
+`model_response` always carries `usage` with `prompt_tokens` / `completion_tokens` / `total_tokens` for that one call. An empty object means the endpoint did not report usage — consumers must count it as an unknown call rather than zero tokens. Streaming requests ask for usage via `stream_options.include_usage` and retry once without it if an endpoint rejects the parameter.
 
 Every `AgentEvent` carries a `seq` that starts at `1` for each run and increases monotonically (`run_started` is 1; `run_ended` or `error` is last). Sequence numbers are allocated by this SDK and are independent of any server-side event sequence.
 

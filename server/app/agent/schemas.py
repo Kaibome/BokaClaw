@@ -65,6 +65,27 @@ class ActiveRunOut(BaseModel):
     created_at: datetime
 
 
+class UsageSourceOut(BaseModel):
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+    calls: int = 0
+    unknown_calls: int = 0
+
+
+class RunUsageOut(BaseModel):
+    coverage: str = "unavailable"
+    transport: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+    model_calls: int = 0
+    unknown_calls: int = 0
+    sources: dict[str, UsageSourceOut] = Field(default_factory=dict)
+    unmetered_sources: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
 class AgentRunOut(BaseModel):
     id: str
     conversation_id: str
@@ -78,6 +99,14 @@ class AgentRunOut(BaseModel):
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+    model_calls: int = 0
+    unknown_usage_calls: int = 0
+    usage_breakdown: dict[str, Any] = Field(default_factory=dict)
+    usage_coverage: str = "unavailable"
+    usage: RunUsageOut | None = None
 
 
 class RunCancelOut(BaseModel):

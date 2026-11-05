@@ -203,12 +203,39 @@ event: message.completed
 data: {"run_id":"uuid","conversation_id":"uuid","seq":4,"message_id":"uuid","message":{...完整 assistant 行...}}
 
 event: done
-data: {"run_id":"uuid","conversation_id":"uuid","status":"completed","last_seq":4}
+data: {"run_id":"uuid","conversation_id":"uuid","status":"completed","last_seq":4,"usage":{...}}
 ```
 
 失败、取消或中断时，不发送 `message.completed`，顺序为：悬挂工具补发的 `tool.result(status="aborted")` → `error` → `done`。`done` 不是成功信号，必须读 `status`。
 
-助手消息的 `metadata` 会写入本次执行的 `run_id`（`agent_runs.id`），以及中断时的 `run_status`、`error_code` 和 `tool_trace`。dashboard 从消息行读取 `metadata.run_id`，在助手消息下方显示短 id 并提供一键复制完整 UUID；该字段随 `/conversations/{id}` 和历史消息一起返回，刷新页面后仍可复制。
+助手消息的 `metadata` 会写入本次执行的 `run_id`（`agent_runs.id`）、`usage`（token 用量快照），以及中断时的 `run_status`、`error_code` 和 `tool_trace`。dashboard 从消息行读取 `metadata.run_id`，在助手消息下方显示短 id 并提供一键复制完整 UUID；该字段随 `/conversations/{id}` 和历史消息一起返回，刷新页面后仍可复制。
+
+`usage` 快照同时出现在 `done` payload、助手消息 `metadata.usage` 和 `GET /agent/runs/{id}` 响应中：
+
+```json
+{
+  "coverage": "complete | partial | unknown | none | aggregate | unavailable | pending",
+  "transport": "local | remote | mock | legacy",
+  "input_tokens": 1200,
+  "output_tokens": 300,
+  "total_tokens": 1500,
+  "model_calls": 4,
+  "unknown_calls": 0,
+  "sources": {
+    "agent_loop":       {"input_tokens": 1000, "output_tokens": 280, "total_tokens": 1280, "calls": 3, "unknown_calls": 0},
+    "compression":      {"input_tokens": 120, "output_tokens": 20,  "total_tokens": 140,  "calls": 1, "unknown_calls": 0},
+    "memory_llm":       {"input_tokens": 80,  "output_tokens": 0,   "total_tokens": 80,   "calls": 0, "unknown_calls": 0},
+    "memory_embedding": {"input_tokens": 0,   "output_tokens": 0,   "total_tokens": 0,    "calls": 0, "unknown_calls": 0}
+  }
+}
+```
+
+- `complete`：所有调用都返回了 usage；`partial`：部分调用没有 usage，`total_tokens` 是下界，UI 用 `≥` 展示；
+- `unknown`：有调用但没有任何 usage，token 字段为 `null`，UI 显示“未知”而不是 0；
+- `none`：没有可观测的模型调用（如 mock）；`aggregate`：只在拿不到逐调用数据时使用传输层汇总；
+- `unavailable`：旧 run 没有 `usage_breakdown`；`pending`：run 尚未终态。
+
+`usage` 是同一快照的展开形式；`usage_breakdown` 保留原始分桶数据。历史 run 的 `usage_coverage` 为 `unavailable`，dashboard 不显示 0。
 
 ```text
 event: error

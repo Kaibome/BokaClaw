@@ -6,6 +6,8 @@ from typing import Any, Callable, Dict
 
 from mem0 import Memory
 
+from app.agent.usage import install_memory_metering
+
 _state_lock = threading.RLock()
 _current_config: Dict[str, Any] = {}
 _memory_instance: Memory | None = None
@@ -123,6 +125,14 @@ def initialize_state(default_config: Dict[str, Any]) -> None:
             _current_config = _merge_config(_current_config, overrides)
         _sync_embedding_dims(_current_config)
         _memory_instance = Memory.from_config(_current_config)
+        _install_metering(_memory_instance)
+
+
+def _install_metering(memory: Memory) -> None:
+    try:
+        install_memory_metering(memory)
+    except Exception:  # pragma: no cover - metering must never block startup
+        logging.warning("Could not instrument memory usage accounting", exc_info=True)
 
 
 def update_config(updates: Dict[str, Any]) -> Dict[str, Any]:
@@ -132,6 +142,7 @@ def update_config(updates: Dict[str, Any]) -> Dict[str, Any]:
         _sync_embedding_dims(next_config)
         _current_config = next_config
         _memory_instance = Memory.from_config(next_config)
+        _install_metering(_memory_instance)
         overrides = _load_overrides()
         overrides = _merge_config(overrides, updates)
         _save_overrides(overrides)

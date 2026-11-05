@@ -33,6 +33,7 @@ from app.agent.events import (
     AgentLoopError,
     AgentToolCall,
     AgentToolResult,
+    AgentUsageUpdate,
 )
 from app.agent.loop import stream_agent
 from app.agent.payloads import attach_trace, should_persist_reply, tool_call_payload, tool_result_payload
@@ -42,6 +43,12 @@ from app.agent.schemas import ActiveRunOut, AgentRunOut
 from app.agent.spans import SpanOptions, SpanRecorder
 from app.agent.store import serialize_message
 from app.agent.trace import ToolTrace
+from app.agent.usage import (
+    RunUsageMeter,
+    meter_context,
+    normalize_usage,
+    usage_snapshot_from_metadata,
+)
 from app.models import TERMINAL_RUN_STATUSES, AgentRun
 
 logger = logging.getLogger(__name__)
@@ -413,6 +420,7 @@ class AgentRunManager:
         metadata: dict[str, Any] = {}
         interrupted = False
         spans: SpanRecorder | None = None
+        usage_meter = RunUsageMeter()
 
         try:
             async with self._semaphore:
@@ -446,12 +454,26 @@ class AgentRunManager:
                 heartbeat = asyncio.create_task(self._heartbeat(run_id))
 
                 try:
-                    async for event in self._events(run, metadata):
+                    async for event in self._events(run, metadata, usage_meter):
                         if not writer.available:
                             break
-                        await self._handle_event(writer, spans, trace, metadata, event)
+                        await self._handle_event(writer, spans, trace, metadata, event, usage_meter)
+                    # Deltas are buffered; settle them before judging the reply,
+                    # or a short answer with no tool events looks like no content.
+                    await writer.flush()
                     status, code, detail = self._completion_state(writer, trace)
-                    await self._finalize(run, writer, spans, trace, metadata, status, code, detail, interrupted=False)
+                    await self._finalize(
+                        run,
+                        writer,
+                        spans,
+                        trace,
+                        metadata,
+                        usage_meter,
+                        status,
+                        code,
+                        detail,
+                        interrupted=False,
+                    )
                 except AgentLoopError as exc:
                     status = "cancelled" if exc.code == "agent_cancelled" else "failed"
                     await self._finalize(
@@ -460,6 +482,7 @@ class AgentRunManager:
                         spans,
                         trace,
                         metadata,
+                        usage_meter,
                         status,
                         exc.code,
                         exc.detail,
@@ -476,7 +499,16 @@ class AgentRunManager:
                         else "Agent run was cancelled."
                     )
                     await self._finalize(
-                        run, writer, spans, trace, metadata, status, code, detail, interrupted=interrupted
+                        run,
+                        writer,
+                        spans,
+                        trace,
+                        metadata,
+                        usage_meter,
+                        status,
+                        code,
+                        detail,
+                        interrupted=interrupted,
                     )
                 except Exception as exc:  # pragma: no cover - defensive
                     logger.exception("Agent run %s crashed", run_id)
@@ -486,6 +518,7 @@ class AgentRunManager:
                         spans,
                         trace,
                         metadata,
+                        usage_meter,
                         "failed",
                         "agent_upstream_error",
                         f"Agent run crashed: {exc}",
@@ -514,7 +547,12 @@ class AgentRunManager:
             self._request_ids.pop(run_id, None)
             self._signal_done(run_id)
 
-    async def _events(self, run: AgentRun, metadata: dict[str, Any]) -> AsyncIterator[AgentEvent]:
+    async def _events(
+        self,
+        run: AgentRun,
+        metadata: dict[str, Any],
+        usage_meter: RunUsageMeter | None = None,
+    ) -> AsyncIterator[AgentEvent]:
         executor = self._executor or stream_agent
         kwargs: dict[str, Any] = {"max_seconds": self.config.max_seconds}
         cancel_event = self._cancel_events.get(run.id)
@@ -524,6 +562,12 @@ class AgentRunManager:
             accepts_cancel = False
         if accepts_cancel:
             kwargs["cancel_event"] = cancel_event
+        try:
+            accepts_usage = "usage_meter" in inspect.signature(executor).parameters
+        except (TypeError, ValueError):
+            accepts_usage = False
+        if accepts_usage and usage_meter is not None:
+            kwargs["usage_meter"] = usage_meter
         payload = dict(run.request_payload or {})
         async for event in executor(payload, self._request_ids.get(run.id, ""), **kwargs):
             yield event
@@ -543,11 +587,24 @@ class AgentRunManager:
         trace: ToolTrace,
         metadata: dict[str, Any],
         event: AgentEvent,
+        usage_meter: RunUsageMeter | None = None,
     ) -> None:
         # Span capture runs before the assistant-message guard: a run can lose
         # its message row (deleted conversation) and still be evaluable.
         if not isinstance(event, (AgentDelta, AgentCompleted)):
             await asyncio.to_thread(spans.handle, event)
+        # Usage is metered before the same guard so a lost message row does not
+        # drop the tokens a finished run already spent.
+        if isinstance(event, AgentUsageUpdate) and usage_meter is not None:
+            if event.phase == "request":
+                usage_meter.record_request(event.source)
+            else:
+                usage_meter.record(
+                    event.source,
+                    event.usage,
+                    calls=event.calls,
+                    unknown_calls=event.unknown_calls,
+                )
         assistant_id = writer.assistant_id
         if assistant_id is None:
             return
@@ -590,6 +647,25 @@ class AgentRunManager:
             )
 
     @staticmethod
+    def _resolve_usage(usage_meter: RunUsageMeter, metadata: dict[str, Any]) -> dict[str, Any]:
+        """Prefer per-call usage; fall back to a transport aggregate."""
+
+        snapshot = usage_meter.snapshot()
+        aggregate = metadata.get("usage")
+        if not isinstance(aggregate, dict) or not aggregate:
+            return snapshot
+        if usage_meter.agent_loop_calls == 0:
+            if usage_meter.record_aggregate(aggregate):
+                return usage_meter.snapshot()
+            return snapshot
+        aggregate_total = normalize_usage(aggregate).get("total_tokens") or 0
+        if aggregate_total and aggregate_total != (snapshot.get("total_tokens") or 0):
+            warnings = list(snapshot.get("warnings") or [])
+            warnings.append("transport_usage_mismatch")
+            snapshot["warnings"] = warnings
+        return snapshot
+
+    @staticmethod
     def _completion_state(writer: RunEventWriter, trace: ToolTrace) -> tuple[str, str | None, str | None]:
         if not writer.content.strip() and not trace.has_entries():
             return "failed", "agent_protocol_error", "Agent executor produced no content."
@@ -602,6 +678,7 @@ class AgentRunManager:
         spans: SpanRecorder,
         trace: ToolTrace,
         metadata: dict[str, Any],
+        usage_meter: RunUsageMeter,
         status: str,
         error_code: str | None,
         error_detail: str | None,
@@ -632,6 +709,9 @@ class AgentRunManager:
         elif error_code:
             final_metadata["error_code"] = error_code
         attach_trace(trace, final_metadata)
+
+        usage = self._resolve_usage(usage_meter, metadata)
+        final_metadata["usage"] = usage
 
         # Settle spans before the early returns below: a missing conversation or
         # an already-finalized run must not leave spans marked running.
@@ -666,6 +746,7 @@ class AgentRunManager:
             error_detail=error_detail,
             partial_content=writer.content,
             partial_metadata=final_metadata,
+            usage=usage,
         )
         if not finished:
             return
@@ -706,6 +787,7 @@ class AgentRunManager:
                     "conversation_id": str(run.conversation_id),
                     "status": status,
                     "last_seq": writer.last_seq,
+                    "usage": usage,
                 },
             ),
         )
@@ -713,15 +795,21 @@ class AgentRunManager:
         if status == "completed":
             # Save the conclusion after the client already received "done" so a
             # slow embedding call cannot delay the turn.
+            before = usage_meter.snapshot()
             try:
-                await asyncio.to_thread(
-                    remember_research,
-                    dict(run.request_payload or {}),
-                    writer.content,
-                    trace.snapshot(),
-                )
+                with meter_context(usage_meter):
+                    await asyncio.to_thread(
+                        remember_research,
+                        dict(run.request_payload or {}),
+                        writer.content,
+                        trace.snapshot(),
+                    )
             except Exception:
                 logger.warning("Failed to record research memory for run %s", run.id, exc_info=True)
+            after = usage_meter.snapshot()
+            if after != before:
+                with contextlib.suppress(Exception):
+                    await asyncio.to_thread(self.repo.update_usage, run.id, after)
 
     # -------------------------------------------------------------- recovery
 
@@ -786,6 +874,7 @@ class AgentRunManager:
             error_detail=detail,
             partial_content=writer.content,
             partial_metadata=writer.metadata,
+            usage=usage_snapshot_from_metadata(writer.metadata),
         )
         if not finished:
             return
@@ -823,6 +912,7 @@ class AgentRunManager:
                     "conversation_id": str(run.conversation_id),
                     "status": status,
                     "last_seq": writer.last_seq,
+                    "usage": usage_snapshot_from_metadata(writer.metadata),
                 },
             ),
         )
@@ -831,6 +921,7 @@ class AgentRunManager:
         await asyncio.to_thread(self.repo.settle_open_spans, run.id, "failed")
         writer = RunEventWriter(self, run)
         detail = "Stored run request is missing; it cannot be resumed."
+        usage = {"coverage": "unavailable", "model_calls": 0, "unknown_calls": 0, "sources": {}}
         await writer.write("error", {"code": "agent_protocol_error", "detail": detail, "partial": False})
         await asyncio.to_thread(
             self.repo.finish,
@@ -838,10 +929,20 @@ class AgentRunManager:
             status="failed",
             error_code="agent_protocol_error",
             error_detail=detail,
+            usage=usage,
         )
         self.publish(
             run.id,
-            ("done", {"run_id": str(run.id), "conversation_id": str(run.conversation_id), "status": "failed", "last_seq": writer.last_seq}),
+            (
+                "done",
+                {
+                    "run_id": str(run.id),
+                    "conversation_id": str(run.conversation_id),
+                    "status": "failed",
+                    "last_seq": writer.last_seq,
+                    "usage": usage,
+                },
+            ),
         )
 
     async def _append_cancelled_event(self, run: AgentRun) -> None:
@@ -900,6 +1001,7 @@ class AgentRunManager:
             error_detail=detail,
             partial_content=writer.content,
             partial_metadata=metadata,
+            usage=usage_snapshot_from_metadata(metadata),
         )
         if not finished:
             return
@@ -957,7 +1059,28 @@ def should_persist_metadata_reply(content: str, metadata: dict[str, Any]) -> boo
     return bool(content) or bool(metadata.get("tool_trace"))
 
 
+def _serialize_usage(run: AgentRun) -> dict[str, Any]:
+    breakdown = dict(run.usage_breakdown or {})
+    coverage = "pending" if run.status not in TERMINAL else (breakdown.get("coverage") or "unavailable")
+    usage: dict[str, Any] = {
+        "coverage": coverage,
+        "transport": breakdown.get("transport"),
+        "input_tokens": run.input_tokens,
+        "output_tokens": run.output_tokens,
+        "total_tokens": run.total_tokens,
+        "model_calls": int(run.model_calls or 0),
+        "unknown_calls": int(run.unknown_usage_calls or 0),
+        "sources": breakdown.get("sources") or {},
+    }
+    if breakdown.get("unmetered_sources"):
+        usage["unmetered_sources"] = breakdown["unmetered_sources"]
+    if breakdown.get("warnings"):
+        usage["warnings"] = breakdown["warnings"]
+    return usage
+
+
 def serialize_run(run: AgentRun) -> AgentRunOut:
+    usage = _serialize_usage(run)
     return AgentRunOut(
         id=str(run.id),
         conversation_id=str(run.conversation_id),
@@ -971,6 +1094,14 @@ def serialize_run(run: AgentRun) -> AgentRunOut:
         created_at=run.created_at,
         started_at=run.started_at,
         finished_at=run.finished_at,
+        input_tokens=run.input_tokens,
+        output_tokens=run.output_tokens,
+        total_tokens=run.total_tokens,
+        model_calls=int(run.model_calls or 0),
+        unknown_usage_calls=int(run.unknown_usage_calls or 0),
+        usage_breakdown=dict(run.usage_breakdown or {}),
+        usage_coverage=usage["coverage"],
+        usage=usage,
     )
 
 

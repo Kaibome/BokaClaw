@@ -162,6 +162,18 @@ class AgentRun(Base):
     )
     last_seq: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
     attempt: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    # Model token usage for the whole run. Tokens are NULL when no call returned
+    # usage; the per-source detail lives in ``usage_breakdown``.
+    input_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    total_tokens: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    model_calls: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    unknown_usage_calls: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    usage_breakdown: Mapped[dict] = mapped_column(
+        JSONB,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+    )
     worker_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

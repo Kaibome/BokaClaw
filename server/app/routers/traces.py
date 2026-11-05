@@ -36,8 +36,31 @@ class TraceSpanItem(BaseModel):
     ended_at: datetime | None
     duration_ms: int | None
     error: str | None
+    total_tokens: int | None = None
 
     model_config = {"from_attributes": True}
+
+
+def _span_total_tokens(attributes: object) -> int | None:
+    """Read the run total recorded on a root span.
+
+    The runner stores a usage snapshot (``coverage``/``total_tokens``/sources)
+    on the root span; older spans may carry the raw provider usage instead.
+    """
+
+    if not isinstance(attributes, dict):
+        return None
+    usage = attributes.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    total = usage.get("total_tokens")
+    if isinstance(total, int):
+        return total
+    prompt = usage.get("prompt_tokens")
+    completion = usage.get("completion_tokens")
+    if isinstance(prompt, int) or isinstance(completion, int):
+        return (prompt if isinstance(prompt, int) else 0) + (completion if isinstance(completion, int) else 0)
+    return None
 
 
 class TraceSpanDetail(TraceSpanItem):
@@ -69,7 +92,14 @@ def list_traces(
     else:
         stmt = stmt.order_by(AgentRunSpan.started_at.desc(), AgentRunSpan.id.desc())
 
-    return list(db.execute(stmt.limit(limit)).scalars().all())
+    spans = list(db.execute(stmt.limit(limit)).scalars().all())
+    items: list[TraceSpanItem] = []
+    for span in spans:
+        item = TraceSpanItem.model_validate(span)
+        if span.span_type == "agent":
+            item.total_tokens = _span_total_tokens(span.attributes)
+        items.append(item)
+    return items
 
 
 @router.get("/{span_pk}", response_model=TraceSpanDetail)

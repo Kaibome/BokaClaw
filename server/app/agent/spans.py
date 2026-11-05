@@ -367,6 +367,10 @@ class SpanRecorder:
             "finish_reason": event.finish_reason,
         }
         span["attributes"]["finish_reason"] = event.finish_reason
+        if event.usage:
+            usage = _bounded(_redact(dict(event.usage)), self.options.max_bytes)
+            span["attributes"]["usage"] = usage
+            span["output"]["usage"] = usage
         self._close_span(span, "completed", utcnow())
         self._write(**span)
 

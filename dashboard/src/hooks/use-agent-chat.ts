@@ -14,6 +14,7 @@ import type {
   Conversation,
   ConversationDetail,
   RunStatus,
+  RunUsage,
   ToolTraceEntry,
   ToolTraceStatus,
 } from "@/types/api";
@@ -92,6 +93,7 @@ interface ErrorPayload extends BasePayload {
 interface DonePayload extends BasePayload {
   status?: RunStatus;
   last_seq?: number;
+  usage?: RunUsage;
 }
 
 const TOOL_TRACE_STATUSES: ToolTraceStatus[] = [
@@ -876,11 +878,14 @@ export function useAgentChat() {
             (message.streaming || message.id === assistantIdRef.current)
               ? {
                   ...message,
-                  metadata:
-                    payload?.run_id &&
+                  metadata: {
+                    ...message.metadata,
+                    ...(payload?.run_id &&
                     typeof message.metadata?.run_id !== "string"
-                      ? { ...message.metadata, run_id: payload.run_id }
-                      : message.metadata,
+                      ? { run_id: payload.run_id }
+                      : {}),
+                    ...(payload?.usage ? { usage: payload.usage } : {}),
+                  },
                   streaming: false,
                   reconnecting: false,
                   runStatus: finalStatus,

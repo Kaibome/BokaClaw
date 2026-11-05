@@ -60,6 +60,36 @@ export interface ActiveRun {
   created_at: string;
 }
 
+export type UsageCoverage =
+  | "none"
+  | "complete"
+  | "partial"
+  | "unknown"
+  | "aggregate"
+  | "unavailable"
+  | "pending";
+
+export interface UsageSource {
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  calls: number;
+  unknown_calls: number;
+}
+
+export interface RunUsage {
+  coverage: UsageCoverage;
+  transport?: string | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  total_tokens: number | null;
+  model_calls: number;
+  unknown_calls: number;
+  sources: Record<string, UsageSource>;
+  unmetered_sources?: string[];
+  warnings?: string[];
+}
+
 export interface AgentRun {
   id: string;
   conversation_id: string;
@@ -73,6 +103,13 @@ export interface AgentRun {
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  total_tokens?: number | null;
+  model_calls?: number;
+  unknown_usage_calls?: number;
+  usage_coverage?: UsageCoverage;
+  usage?: RunUsage | null;
 }
 
 export type SpanType = "agent" | "llm" | "tool";
@@ -97,6 +134,7 @@ export interface AgentRunSpanSummary {
   ended_at: string | null;
   duration_ms: number | null;
   error: string | null;
+  total_tokens?: number | null;
 }
 
 export interface AgentRunSpanDetail extends AgentRunSpanSummary {

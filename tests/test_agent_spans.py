@@ -80,6 +80,7 @@ def test_model_request_and_response_form_one_llm_span():
             content="the answer",
             tool_calls=[],
             finish_reason="stop",
+            usage={"prompt_tokens": 12, "completion_tokens": 4, "total_tokens": 16},
             seq=11,
         )
     )
@@ -91,6 +92,8 @@ def test_model_request_and_response_form_one_llm_span():
     assert span["input"]["summary"]["message_count"] == 2
     assert span["output"]["content"] == "the answer"
     assert span["attributes"]["context_compressed"] == {"before_tokens": 100}
+    assert span["attributes"]["usage"] == {"prompt_tokens": 12, "completion_tokens": 4, "total_tokens": 16}
+    assert span["output"]["usage"]["total_tokens"] == 16
 
 
 def test_repeated_iterations_do_not_collide():

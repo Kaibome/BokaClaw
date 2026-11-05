@@ -433,6 +433,47 @@
 
 ---
 
+## P-13 每次 Agent run 的模型 token 消耗无法统计
+
+- **状态**：已解决
+- **发现时间**：2026-11-05
+- **解决时间**：2026-11-05
+- **场景**：需要按 run 汇总「这一轮对话到底调了多少模型 token」，用于成本核对与评测对比。
+- **现象**：`agent_runs` 没有 token 列；API 与 Dashboard 均不展示；只有成功结束的 run 会把 `RunResult.usage` 塞进 `partial_metadata`，失败、取消、超时全部丢失；`llm` span 里也没有 usage，`server/app/eval/adapter.py` 一直读不到该字段。
+- **根因**：
+  1. agent-loop 的流式请求没有设置 `stream_options.include_usage`，多数 OpenAI-compatible 端点因此在流式响应里不返回 usage；
+  2. 每次调用的 usage 没有写入 `MODEL_RESPONSE` 事件，服务端拿不到逐调用数据；
+  3. 压缩摘要调用、mem0 的 LLM 抽取与 embedding 调用都拿到了 `response.usage`，但直接丢弃；
+  4. token 只在最终态写一次，且以「成功 run 的聚合值」形式存在，非成功路径与后置 research 的消耗无处落库。
+- **解决措施**：
+  - agent-loop：`stream_complete()` 默认带 `stream_options={"include_usage": True}`，端点拒绝时只降级一次并记住；`MODEL_RESPONSE` 事件与 `RunResult` 都携带每次调用的 usage；压缩摘要按次累计 `usage` / `model_calls` / `usage_unknown_calls`，视图未变也发事件；
+  - server：新增 `app/agent/usage.py` 的 `RunUsageMeter`（按 `agent_loop` / `compression` / `memory_llm` / `memory_embedding` 分桶、线程安全、`ContextVar` 归因），事件桥接在 span 采样开关之前发 `AgentUsageUpdate`，因此关掉 span 采集也不丢 token；
+  - 持久化：迁移 `011` 给 `agent_runs` 加 `input_tokens` / `output_tokens` / `total_tokens` / `model_calls` / `unknown_usage_calls` / `usage_breakdown`，completed / failed / cancelled 三种终态都落库，后置 research 用 `update_usage` 增量补写；
+  - mem0：包装 `.client.chat.completions.create` / `.client.embeddings.create` 读取 `response.usage`，没有 `.client` 的 provider 只记调用次数，绝不伪造 token；
+  - API/Dashboard：`AgentRunOut.usage`、SSE `done.usage`、消息 `metadata.usage` 统一携带快照；聊天页显示 token 徽标，Trace 页加 Tokens 统计；`coverage=unknown` 显示「未知」，不显示 0。
+- **解决后效果**：
+  - 真实流式 run `57b7a084-f007-42be-8f8f-385675c9d900`：`input=3471 / output=7 / total=3478`、`model_calls=2`、`unknown=1`、`coverage=partial`（fastembed 本地 embedding 无 usage，按未知计数），DB 列与 `GET /agent/runs/{id}` 一致；消息 metadata 与 `done` 事件同值；
+  - 中途取消 run `8e96f24b-1c66-444b-9c44-6450b0a53f06`：三列 `NULL`、`model_calls=2`、`unknown=2`、`coverage=unknown`，已发生调用被记录且没有伪造成 0；
+  - 迁移 `011` 在本地 Postgres 上 `upgrade → downgrade -1 → upgrade` 往返成功；
+  - 测试：server agent 相关 59 passed（`test_run_usage` / `test_agent_runs` / `test_agent_spans` / `test_agent_router`），扩展 100 passed（`test_agent_runtime` / `test_agent_upstream` / `test_agent_trace` / `test_agent_research_memory` / `test_agent_executor`；唯一失败项是容器内 `AGENT_TOOLS_ALLOW_SHELL=true` 导致 `Bash` 被注册，置为 `false` 后通过）；agent-loop 161 passed / 1 skipped；ruff 通过；Dashboard `prettier --check`（改动的 `message-bubble.tsx`）、`tsc --noEmit`、`next build` 通过。
+- **可复用结论**：统计「调用成本」必须按**调用点**埋点，而不是按「成功结果」回填。流式接口默认不返回 usage，要显式请求；拿不到 usage 的调用要计为 unknown 并让展示层区分「0」与「未知」，否则成本表会系统性偏低且无法察觉。
+
+---
+
+## P-14 只有一段短回答的 run 被误判为「没有内容」而失败
+
+- **状态**：已解决
+- **发现时间**：2026-11-05
+- **解决时间**：2026-11-05
+- **场景**：P-13 的 token 持久化测试用「一个 `AgentDelta("hi")` + `AgentCompleted`」的假执行器，不产生工具事件。
+- **现象**：run 落库为 `failed`，`error_code=agent_protocol_error`、`error_detail=Agent executor produced no content.`，但 token 已正确记为 `complete`。
+- **根因**：`RunEventWriter.add_delta()` 只在缓冲区达到时间/字节阈值时落盘，最后一小段回答在循环结束时仍在内存缓冲；`_run_worker` 紧接着调用 `_completion_state(writer, trace)` 读 `writer.content`，看到空字符串就判定协议错误。`_finalize()` 里的 `writer.flush()` 发生在该判断之后，救不回来。真实场景里没有工具调用、回答又短于一帧的 run 同样会中招。
+- **解决措施**：`_run_worker` 在 `_completion_state()` 之前 `await writer.flush()`，先把缓冲中的 delta 计入 `writer.content`；`_finalize()` 原有的 flush 保留（幂等）。
+- **解决后效果**：`tests/test_agent_runs.py::test_manager_persists_token_usage_from_per_call_events` 由 `failed` 变为 `completed`，server agent 相关 59 tests 全绿；真实短回答 run `57b7a084` 正常 completed。
+- **可复用结论**：任何「先缓冲、后判定」的写入器，判定前必须显式 flush；否则判定结果取决于时序，测试里的极短 run 会暴露它，线上则表现为偶发失败。
+
+---
+
 ## 变更记录
 
 | 日期 | 变更 |
@@ -455,3 +496,5 @@
 | 2026-11-05 | Agent 输入区的 Eval case 选择器已回退（组件删除）：评测触发统一放到 Eval 页面，普通 Agent 对话不再携带 `metadata.eval_case_id` |
 | 2026-11-05 | Eval 页面重排 `Run eval` 与 `Run case input`：Run ID 独占一行；下方两列各自带 Eval case 选择框（左列选择被打分的 case，右列选择用哪个 golden 的 input 新建 run），两个按钮同宽、水平对齐、底部对齐（左 `Run eval`、右 `Run case input`）。`Run case input` 流程：取 golden input → 新建会话 `POST /agent`（`metadata.eval_case_id`）→ 读 SSE `meta` 后断开 → 自动填 Run ID 并轮询 `GET /agent/runs/{id}`；run 未终态时两个按钮均禁用，右列显示状态与 Trace 深链；`tsc`、Prettier、`next build` 通过 |
 | 2026-11-05 | Eval 页面改为「一键跑 Agent + 评测」（取代上条双列布局）：删除 Run ID 输入框、第二个 case 选择框与独立 `Run case input` 按钮，只保留 Eval case、Use the LLM judge、Run eval；点击后先按 golden input 新建会话跑 Agent（`metadata.eval_case_id`），轮询到 `completed` 再 `POST /evals`，期间显示 `running agent`/`evaluating` 状态与 Trace 深链，非 completed 不入队评测；Trace 页按钮改为按 span `input.eval_case_id` 跳转并预填 case（无 tag 的 run 不显示）；真实用例验证 run `109f5042` 由页面创建、tag 正确、评测 PASS，`tsc`、Prettier、`next build` 通过 |
+| 2026-11-05 | 追加 P-13：按 run 统计所有可归属模型调用（主循环 / 压缩 / mem0 LLM / embedding）的 input/output/total token，迁移 011 落库，`coverage` 区分 complete/partial/unknown/aggregate/unavailable；真实 run 与取消 run 验证通过，server 59 + 扩展 100 passed，agent-loop 161 passed，Dashboard 构建通过 |
+| 2026-11-05 | 追加 P-14：修复 `RunEventWriter` 缓冲未 flush 导致短回答 run 被误判 `agent_protocol_error`；`_run_worker` 在 `_completion_state()` 前 flush，回归测试转绿 |

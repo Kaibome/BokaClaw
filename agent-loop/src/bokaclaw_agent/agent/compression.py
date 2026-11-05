@@ -63,8 +63,14 @@ class ContextCompressor:
         self._summary: str | None = None
         self._folded_until = 0
         self._summary_error: str | None = None
+        self._call_usage: dict[str, int] = {}
+        self._call_count = 0
+        self._call_unknown = 0
 
     def compress(self, messages: list[dict[str, Any]], *, tools_tokens: int = 0) -> CompressionResult:
+        self._call_usage = {}
+        self._call_count = 0
+        self._call_unknown = 0
         if self.max_tokens is None:
             return CompressionResult(messages)
 
@@ -133,16 +139,25 @@ class ContextCompressor:
 
         view = self._fit_budget(view, budget)
         after = estimate_messages_tokens(view)
+        stats: dict[str, Any] = {
+            "before_tokens": before,
+            "after_tokens": after,
+            "dropped_messages": dropped_count,
+            "summarized": summarized,
+            "fallback": fallback,
+        }
+        if self._call_count:
+            if self._call_usage:
+                stats["usage"] = dict(self._call_usage)
+            stats["model_calls"] = self._call_count
+            stats["usage_unknown_calls"] = self._call_unknown
+        self._call_usage = {}
+        self._call_count = 0
+        self._call_unknown = 0
         return CompressionResult(
             messages=view,
             changed=view != messages,
-            stats={
-                "before_tokens": before,
-                "after_tokens": after,
-                "dropped_messages": dropped_count,
-                "summarized": summarized,
-                "fallback": fallback,
-            },
+            stats=stats,
         )
 
     def _find_cut(self, messages: list[dict[str, Any]], system_end: int, keep_recent: int) -> int:
@@ -185,6 +200,7 @@ class ContextCompressor:
             {"role": "user", "content": "\n\n".join(parts)},
         ]
 
+        self._call_count += 1
         try:
             response = self.provider.complete(
                 request,
@@ -195,6 +211,7 @@ class ContextCompressor:
             )
             response = resolve_awaitable(response)
         except Exception as exc:  # noqa: BLE001 - summarization is best effort
+            self._call_unknown += 1
             self._summary_error = f"{type(exc).__name__}: {exc}"
             logger.warning("Context summarization failed; falling back to truncation: %s", exc)
             return None
@@ -203,15 +220,21 @@ class ContextCompressor:
             try:
                 response = ModelResponse.model_validate(response)
             except Exception as exc:  # noqa: BLE001
+                self._call_unknown += 1
                 self._summary_error = f"invalid summarizer response: {exc}"
                 logger.warning("Context summarization returned an invalid response: %s", exc)
                 return None
         if not isinstance(response, ModelResponse):
+            self._call_unknown += 1
             self._summary_error = f"provider returned {type(response).__name__}"
             logger.warning("Context summarization returned %s, expected ModelResponse", type(response).__name__)
             return None
 
-        self._merge_usage(response.usage)
+        usage = response.usage or {}
+        if not usage:
+            self._call_unknown += 1
+        self._merge_usage(usage)
+        self._merge_into(self._call_usage, usage)
         content = (response.content or "").strip()
         if not content:
             self._summary_error = "empty summary"
@@ -221,9 +244,13 @@ class ContextCompressor:
         return capped
 
     def _merge_usage(self, usage: dict[str, int] | None) -> None:
+        self._merge_into(self.usage, usage)
+
+    @staticmethod
+    def _merge_into(total: dict[str, int], usage: dict[str, int] | None) -> None:
         for key, value in (usage or {}).items():
             if isinstance(value, int):
-                self.usage[key] = self.usage.get(key, 0) + value
+                total[key] = total.get(key, 0) + value
 
     @staticmethod
     def _fit_budget(messages: list[dict[str, Any]], budget: int) -> list[dict[str, Any]]:

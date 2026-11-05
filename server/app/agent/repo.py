@@ -32,6 +32,24 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _usage_columns(usage: dict[str, Any] | None) -> dict[str, Any]:
+    """Map a usage snapshot onto the ``agent_runs`` token columns."""
+
+    if not usage:
+        return {}
+    input_tokens = usage.get("input_tokens")
+    output_tokens = usage.get("output_tokens")
+    total_tokens = usage.get("total_tokens")
+    return {
+        "input_tokens": int(input_tokens) if input_tokens is not None else None,
+        "output_tokens": int(output_tokens) if output_tokens is not None else None,
+        "total_tokens": int(total_tokens) if total_tokens is not None else None,
+        "model_calls": int(usage.get("model_calls") or 0),
+        "unknown_usage_calls": int(usage.get("unknown_calls") or 0),
+        "usage_breakdown": usage,
+    }
+
+
 @dataclass
 class RunContext:
     run: AgentRun
@@ -141,6 +159,9 @@ class RunRepository:
                     cancel_requested_at=func.coalesce(AgentRun.cancel_requested_at, now),
                     finished_at=now,
                     updated_at=now,
+                    model_calls=0,
+                    unknown_usage_calls=0,
+                    usage_breakdown={"coverage": "none", "model_calls": 0, "unknown_calls": 0, "sources": {}},
                 )
             )
             db.commit()
@@ -155,6 +176,7 @@ class RunRepository:
         error_detail: str | None = None,
         partial_content: str | None = None,
         partial_metadata: dict[str, Any] | None = None,
+        usage: dict[str, Any] | None = None,
         finished_at: datetime | None = None,
     ) -> bool:
         """Move an active run to a terminal state. Returns False if another
@@ -173,12 +195,28 @@ class RunRepository:
             values["partial_content"] = partial_content
         if partial_metadata is not None:
             values["partial_metadata"] = partial_metadata
+        values.update(_usage_columns(usage))
         with SessionLocal() as db:
             result = db.execute(
                 update(AgentRun)
                 .where(AgentRun.id == run_id, AgentRun.status.in_(("queued", "running")))
                 .values(**values)
             )
+            db.commit()
+            return result.rowcount > 0
+
+    def update_usage(self, run_id: uuid.UUID, usage: dict[str, Any], now: datetime | None = None) -> bool:
+        """Overwrite a finalized run's usage with a later snapshot.
+
+        Post-run memory writes happen after the terminal state, so the run row
+        already exists; an absolute write avoids double counting.
+        """
+        values = _usage_columns(usage)
+        if not values:
+            return False
+        values["updated_at"] = now or utcnow()
+        with SessionLocal() as db:
+            result = db.execute(update(AgentRun).where(AgentRun.id == run_id).values(**values))
             db.commit()
             return result.rowcount > 0
 

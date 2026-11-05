@@ -15,6 +15,13 @@ from ..core.exceptions import ConfigurationError, ModelError
 from ..core.types import ModelResponse, ModelStreamChunk, ToolCall, ToolCallDelta
 from ..core.utils import parse_tool_arguments
 
+_USAGE_KEYS = ("prompt_tokens", "completion_tokens", "total_tokens")
+
+
+def _mentions_stream_options(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "stream_options" in message or "include_usage" in message
+
 
 class OpenAICompatibleProvider:
     """Call any OpenAI-compatible ``/chat/completions`` endpoint.
@@ -27,6 +34,9 @@ class OpenAICompatibleProvider:
 
     def __init__(self, config: ModelConfig, client: OpenAI | None = None) -> None:
         self.config = config
+        # Some OpenAI-compatible endpoints reject ``stream_options``; disable it
+        # for this provider instance after the first rejection.
+        self._stream_usage_supported = True
         if client is not None:
             self._client = client
             return
@@ -103,9 +113,32 @@ class OpenAICompatibleProvider:
         """
         params = self._build_params(messages, tools=tools, tool_choice=tool_choice, **kwargs)
         params["stream"] = True
+        stream_options_added = False
+        extra_body = self.config.extra_body or {}
+        if (
+            self._stream_usage_supported
+            and "stream_options" not in params
+            and "stream_options" not in extra_body
+        ):
+            params["stream_options"] = {"include_usage": True}
+            stream_options_added = True
 
         try:
-            stream = self._client.chat.completions.create(**params)
+            stream = self._create_stream(params)
+        except Exception as exc:  # noqa: BLE001 - provider errors are normalized
+            # Some OpenAI-compatible servers reject the parameter outright. Retry
+            # once without it, but only before any chunk has been consumed.
+            if not stream_options_added:
+                raise ModelError(f"Model request failed: {exc}") from exc
+            if _mentions_stream_options(exc):
+                self._stream_usage_supported = False
+            params.pop("stream_options", None)
+            try:
+                stream = self._create_stream(params)
+            except Exception as retry_exc:  # noqa: BLE001
+                raise ModelError(f"Model request failed: {retry_exc}") from retry_exc
+
+        try:
             for chunk in stream:
                 parsed = self._parse_stream_chunk(chunk)
                 if parsed is not None:
@@ -114,6 +147,9 @@ class OpenAICompatibleProvider:
             raise
         except Exception as exc:  # noqa: BLE001 - provider errors are normalized
             raise ModelError(f"Model request failed: {exc}") from exc
+
+    def _create_stream(self, params: dict[str, Any]) -> Any:
+        return self._client.chat.completions.create(**params)
 
     @staticmethod
     def _parse_arguments(raw_arguments: Any) -> tuple[dict[str, Any], str | None, str | None]:
@@ -186,9 +222,9 @@ class OpenAICompatibleProvider:
     def _parse_usage(usage_obj: Any) -> dict[str, int]:
         if usage_obj is None:
             return {}
-        return {
-            key: int(getattr(usage_obj, key, 0) or 0) for key in ("prompt_tokens", "completion_tokens", "total_tokens")
-        }
+        if isinstance(usage_obj, dict):
+            return {key: int(usage_obj.get(key) or 0) for key in _USAGE_KEYS}
+        return {key: int(getattr(usage_obj, key, 0) or 0) for key in _USAGE_KEYS}
 
     @classmethod
     def _parse_response(cls, response: Any) -> ModelResponse:

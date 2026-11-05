@@ -183,6 +183,66 @@ def test_stream_complete_reassembles_tool_call_fragments(mocker):
     assert result[1].finish_reason == "tool_calls"
 
 
+def test_stream_complete_requests_usage(mocker):
+    usage = SimpleNamespace(prompt_tokens=1, completion_tokens=2, total_tokens=3)
+    chunks = [
+        _stream_chunk(content="Hi"),
+        SimpleNamespace(choices=[], usage=usage),
+    ]
+    client = mocker.Mock()
+    client.chat.completions.create.return_value = iter(chunks)
+    provider = OpenAICompatibleProvider(ModelConfig(model="test-model", api_key="k"), client=client)
+
+    result = list(provider.stream_complete([{"role": "user", "content": "hi"}]))
+
+    kwargs = client.chat.completions.create.call_args.kwargs
+    assert kwargs["stream_options"] == {"include_usage": True}
+    assert result[-1].usage == {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3}
+
+
+def test_stream_complete_retries_once_without_stream_options(mocker):
+    usage = SimpleNamespace(prompt_tokens=1, completion_tokens=2, total_tokens=3)
+    client = mocker.Mock()
+    client.chat.completions.create.side_effect = [
+        ValueError("Unsupported parameter: stream_options"),
+        iter([_stream_chunk(content="Hi", finish_reason="stop", usage=usage)]),
+    ]
+    provider = OpenAICompatibleProvider(ModelConfig(model="test-model", api_key="k"), client=client)
+
+    result = list(provider.stream_complete([{"role": "user", "content": "hi"}]))
+    assert result[-1].usage["total_tokens"] == 3
+    assert client.chat.completions.create.call_count == 2
+    first = client.chat.completions.create.call_args_list[0].kwargs
+    second = client.chat.completions.create.call_args_list[1].kwargs
+    assert first["stream_options"] == {"include_usage": True}
+    assert "stream_options" not in second
+
+    # Once the endpoint has rejected it, later requests do not try again.
+    client.chat.completions.create.side_effect = None
+    client.chat.completions.create.return_value = iter([_stream_chunk(content="ok")])
+    list(provider.stream_complete([{"role": "user", "content": "again"}]))
+    assert "stream_options" not in client.chat.completions.create.call_args.kwargs
+
+
+def test_stream_complete_does_not_override_extra_body_stream_options(mocker):
+    client = mocker.Mock()
+    client.chat.completions.create.return_value = iter([])
+    provider = OpenAICompatibleProvider(
+        ModelConfig(
+            model="test-model",
+            api_key="k",
+            extra_body={"stream_options": {"include_usage": False}},
+        ),
+        client=client,
+    )
+
+    list(provider.stream_complete([{"role": "user", "content": "hi"}]))
+
+    kwargs = client.chat.completions.create.call_args.kwargs
+    assert "stream_options" not in kwargs
+    assert kwargs["extra_body"] == {"stream_options": {"include_usage": False}}
+
+
 def test_stream_errors_are_wrapped(mocker):
     client = mocker.Mock()
     client.chat.completions.create.side_effect = RuntimeError("rate limited")
