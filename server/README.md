@@ -260,9 +260,10 @@ The exact lookup matters because a long stored conclusion can score below the
 similarity floor against its own question; the vector floor then separates
 paraphrases from unrelated questions. Matches older than
 `AGENT_RESEARCH_MEMORY_TTL_DAYS` or below `AGENT_RESEARCH_MEMORY_MIN_SCORE` are
-dropped; the rest are added to the system prompt with their age and an explicit
-instruction to re-verify facts that may have changed. The block is view-only
-and is not persisted as a message. Memory failures never fail the turn.
+dropped; the rest are added to the system prompt with their age and an
+instruction to reuse the conclusion instead of repeating the same web research.
+The block is view-only and is not persisted as a message. Memory failures never
+fail the turn.
 
 This half applies to the in-process runtime only; a remote executor does not
 receive the block. Saving, however, runs for any completed turn whose trace

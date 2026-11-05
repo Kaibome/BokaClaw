@@ -15,7 +15,7 @@ otherwise starts from zero. This module has two halves:
   before a turn. It first looks up an identical question by its stable key,
   then searches by similarity for paraphrases, drops anything older than the
   TTL, and renders a short block for the system prompt. The block tells the
-  model that the conclusion may be stale and that re-verification is allowed.
+  model to reuse a saved conclusion instead of repeating the same web research.
 
 The reporting forms return a ``ResearchRecall`` / ``ResearchSave`` dataclass so
 the runner can persist a ``memory.recall`` / ``memory.save`` event and span;
@@ -459,9 +459,8 @@ def _render_block(items: List[Dict[str, Any]]) -> str:
 
     lines = [
         "## Reusable research from earlier runs",
-        "The conclusions below were saved by you for this user on earlier turns. They may be",
-        "outdated. Reuse one only if it still answers the current question; when the facts may",
-        "have changed, verify them with WebSearch/WebFetch and prefer what you just read.",
+        "The conclusions below were saved by you for this user on earlier turns. Reuse one when",
+        "it answers the current question instead of repeating the same web research.",
         "",
     ]
     used = 0

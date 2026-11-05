@@ -301,7 +301,7 @@
     - 先用规范化的 `question_key` 调 `get_all` 精确命中「同一问题」，相同问题确定能召回，不再受向量分数影响；
     - 再用当前 `message` 做向量检索召回「不同问法」，只保留相似度不低于 `AGENT_RESEARCH_MEMORY_MIN_SCORE`（默认 0.5）的记忆；
     - 两条路径都只保留 `captured_at` 在 `AGENT_RESEARCH_MEMORY_TTL_DAYS`（默认 30 天）内的记忆，按 id 去重；
-    - 渲染成带「保存日期 / 距今多久 / 可能过期 / 可用 WebSearch/WebFetch 复核」说明的 system prompt 块，最多 3 条、总长约 3,000 字符；该块只进模型视图，不落库为消息；
+    - 渲染成带「保存日期 / 距今多久 / 优先复用、不重复同一轮网页检索」说明的 system prompt 块，最多 3 条、总长约 3,000 字符；该块只进模型视图，不落库为消息；（2026-11-05 起删除「事实可能变化时用 WebSearch/WebFetch 复核」的提示，见变更记录）
     - 检索失败、mem0 未初始化或结果异常时静默回退，不阻断 turn。
   - `runner._finalize()` 在 `done` 事件发出后异步写入记忆，embedding 慢或失败都不影响用户收到终答；恢复路径不重复写入。
   - 新增 `AGENT_RESEARCH_MEMORY`（默认 `true`，总开关）、`AGENT_RESEARCH_MEMORY_TTL_DAYS`、`AGENT_RESEARCH_MEMORY_MIN_SCORE`；远程 `AGENT_LOOP_URL` 执行器不接这层，文档已注明。
@@ -315,7 +315,7 @@
     - 修复后 C 的日志出现 `research memory injected user=... chunk_chars=1520`，注入块包含「saved 2026-11-04, today」、上次结论和来源；模型按提示复核后采用了新结论（Qwen3.8-27B，与上次的 Qwen3-8B 不同）。
     - 效果：**注入链路已验证**，但本次样本的工具调用没有减少（6 → 9），且模型运行间策略波动很大（无注入的 B 只有 3 次），因此「减少重复研究」还不能下结论；需要多次 A/B 对照，并考虑按记忆年龄给出更强的复用指引（如 7 天内同题默认直接回答）。
 - **复测中发现的新问题（2026-11-04，P-08 复测时）**：与 Qwen 完全无关的问题「DeepSeek 官方 API 价格」也命中了旧的 Qwen 结论并注入（`chunk_chars=1520`），说明中文短问句的向量相似度可能普遍高于 0.5，向量路径存在**误注入**；精确路径（`question_key`）不会误命中。后续需要提高阈值、加入实体/关键词过滤，或让模型在注入块里看到相似度分数。
-- **可复用结论**：跨会话复用研究结论，必须把「结论 + 来源 + 抓取时间」一起持久化，并在注入时明确标注年龄和「可复核」；只存一段摘要会让模型无法判断时效与出处。写入用 `infer=False` + 稳定 `question_key` 才能保证原文不被二次改写、同问题不重复堆积。
+- **可复用结论**：跨会话复用研究结论，必须把「结论 + 来源 + 抓取时间」一起持久化，并在注入时明确标注年龄；只存一段摘要会让模型无法判断时效与出处。写入用 `infer=False` + 稳定 `question_key` 才能保证原文不被二次改写、同问题不重复堆积。注入块里的「可复核」提示会显著推高重复抓取（见 2026-11-05 变更记录），需要按「省钱」还是「保鲜」二选一。
 
 ---
 
@@ -627,4 +627,5 @@
 | 2026-11-05 | 追加 P-15：分析 run `bf25efa8` 「记忆检索未触发」——实际已注入（日志 + `llm:2` system prompt 第 679 字符起 2750 字符注入块），不可见因自动检索无 span/事件；同时定位阈值口径问题：mem0 混合分在有 BM25 命中时除以 2，`_fresh_entry` 拿混合分比固定 0.5 导致召回随候选池漂移；结论写入候选修复，代码未改 |
 | 2026-11-05 | P-15 修复：检索改用 `explain=True` 的 `score_details.semantic_score` 比阈值（`combined_score` 仅展示），新增 `memory.recall` / `memory.save` 持久化事件与 `memory` span（迁移 012 扩展 CHECK 约束，Trace 页支持该类型）；真实 run `ed65c268` 验证两条 semantic≈0.72 / combined≈0.36 的结论正常注入、保存走 `updated`；server agent 相关 102 passed，迁移往返与 ruff/tsc 通过；P-15 改为已解决 |
 | 2026-11-05 | 追加 P-16：模型接口实际返回了缓存计数字段，但 provider `_parse_usage` 的 3-key 白名单在入口丢弃；拍平 DeepSeek/OpenAI 两种缓存口径与 `reasoning_tokens`，usage meter/`/traces`/Dashboard 增加命中率展示；真实 run `0d6e0f33` 命中率 66% |
+| 2026-11-05 | P-07 注入块改为只鼓励复用：删除「when the facts may have changed, verify them with WebSearch/WebFetch」的复核句，改为「Reuse one when it answers the current question instead of repeating the same web research」（`server/app/agent/research_memory.py:_render_block`，同步 `server/README.md` 与 `tests/test_agent_research_memory.py`，相关 81 passed）。真实复测 `2105fac8`：同题 3 次 WebFetch + 1 次 search_memories、45,656 tokens / 9.3s；对照删除前 `410fcaba`（3 次工具 / 27,782 tokens）——删掉复核提示后模型仍会重抓，说明是否检索由基础 prompt 与结论缺口（上次结论里 Mate 90 Pro 价格缺失）决定，单靠这一句无法消除重复抓取；下一步要控 token 应先降 `AGENT_TOOL_RESULT_MAX_CHARS`（当前 16,000 字符/条） |
 | 2026-11-05 | 追加 P-17：压缩摘要改用独立便宜的模型——`AgentConfig.compression_model` + `AgentRuntime(compression_provider=...)`，server 新增 `AGENT_COMPRESSION_MODEL/API_KEY/BASE_URL`；`.env` 配 `deepseek-chat`（非思考别名，实测 0 reasoning tokens）；agent-loop 167 passed，server agent runtime 62 passed，镜像重建并重启验证 |

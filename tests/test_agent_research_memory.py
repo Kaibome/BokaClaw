@@ -270,8 +270,8 @@ def test_prior_research_block_keeps_fresh_high_scoring_conclusions(monkeypatch):
     assert "Stale conclusion." not in block
     assert "Weak match." not in block
     assert "A user note." not in block
-    assert "may be" in block
-    assert "verify them with WebSearch/WebFetch" in block
+    assert "Reuse one when" in block
+    assert "verify them with WebSearch/WebFetch" not in block
     call = memory.search_calls[0]
     assert call["filters"] == {"user_id": "user-1", "kind": rm.RESEARCH_KIND}
     assert call["threshold"] == pytest.approx(0.4)
