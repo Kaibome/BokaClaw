@@ -14,21 +14,25 @@ function readUsage(metadata: ChatMessageView["metadata"]): RunUsage | null {
   return typeof usage.coverage === "string" ? (usage as RunUsage) : null;
 }
 
+const USAGE_SUFFIX = "tokens cost this run";
+
 function usageLabel(usage: RunUsage): string | null {
   if (usage.coverage === "pending" || usage.coverage === "unavailable") {
-    return "tokens —";
+    return `${USAGE_SUFFIX} —`;
   }
   if (usage.coverage === "unknown") {
-    return "tokens unknown";
+    return `${USAGE_SUFFIX} unknown`;
   }
   if (usage.coverage === "none") {
-    return "0 tokens";
+    return `0 ${USAGE_SUFFIX}`;
   }
   if (usage.total_tokens === null || usage.total_tokens === undefined) {
-    return "tokens —";
+    return `${USAGE_SUFFIX} —`;
   }
   const total = formatTokens(usage.total_tokens);
-  return usage.coverage === "partial" ? `≥ ${total} tokens` : `${total} tokens`;
+  return usage.coverage === "partial"
+    ? `≥ ${total} ${USAGE_SUFFIX}`
+    : `${total} ${USAGE_SUFFIX}`;
 }
 
 function usageTitle(usage: RunUsage): string {
