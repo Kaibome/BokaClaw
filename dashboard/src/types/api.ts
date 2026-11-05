@@ -225,3 +225,26 @@ export interface EvalGolden {
   expected_tools: string[];
   updated_at: string;
 }
+
+export interface EvalToolCall {
+  name: string;
+  input_parameters?: Record<string, unknown> | null;
+  output?: unknown;
+  reasoning?: string | null;
+  description?: string | null;
+  type?: string | null;
+}
+
+export interface EvalGoldenUpsert {
+  input: string;
+  expected_output: string | null;
+  expected_tools: EvalToolCall[];
+  context: string[];
+  notes: string | null;
+}
+
+export interface EvalGoldenDetail extends EvalGoldenUpsert {
+  eval_case_id: string;
+  created_at: string;
+  updated_at: string;
+}

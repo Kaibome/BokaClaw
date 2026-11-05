@@ -10,7 +10,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -18,7 +18,16 @@ from sqlalchemy.orm import Session
 from app.core.auth import require_admin
 from app.core.db import get_db
 from app.eval.config import load_eval_config
-from app.eval.goldens import GoldenPayload, build_snapshot, get_golden, list_goldens, snapshot_hash
+from app.eval.goldens import (
+    GoldenPayload,
+    ToolCallPayload,
+    build_snapshot,
+    delete_golden,
+    get_golden,
+    list_goldens,
+    snapshot_hash,
+    upsert_golden,
+)
 from app.eval.repo import EvalRepository
 from app.models import EVAL_STATUSES, TERMINAL_RUN_STATUSES, AgentRun, AgentRunSpan, EvalGolden, EvalRun, User
 
@@ -90,6 +99,24 @@ class EvalGoldenItem(BaseModel):
     updated_at: datetime
 
 
+class EvalGoldenUpsert(BaseModel):
+    input: str = Field(min_length=1)
+    expected_output: str | None = None
+    expected_tools: list[ToolCallPayload] = Field(default_factory=list)
+    context: list[str] = Field(default_factory=list)
+    notes: str | None = None
+
+
+class EvalGoldenCreate(EvalGoldenUpsert):
+    eval_case_id: str = Field(min_length=1, max_length=255)
+
+
+class EvalGoldenDetail(EvalGoldenUpsert):
+    eval_case_id: str
+    created_at: datetime
+    updated_at: datetime
+
+
 def _error(status_code: int, code: str, message: str, **extra) -> None:
     raise HTTPException(status_code=status_code, detail={"code": code, "message": message, **extra})
 
@@ -119,6 +146,30 @@ def _item(row: EvalRun, run_status: str) -> EvalRunItem:
         started_at=row.started_at,
         finished_at=row.finished_at,
         cancel_requested_at=row.cancel_requested_at,
+    )
+
+
+def _golden_detail(row: EvalGolden) -> EvalGoldenDetail:
+    return EvalGoldenDetail(
+        eval_case_id=row.eval_case_id,
+        input=row.input,
+        expected_output=row.expected_output,
+        expected_tools=[ToolCallPayload.model_validate(tool) for tool in row.expected_tools or []],
+        context=list(row.context or []),
+        notes=row.notes,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _golden_payload(eval_case_id: str, body: EvalGoldenUpsert) -> GoldenPayload:
+    return GoldenPayload(
+        eval_case_id=eval_case_id,
+        input=body.input,
+        expected_output=body.expected_output,
+        expected_tools=body.expected_tools,
+        context=body.context,
+        notes=body.notes,
     )
 
 
@@ -173,6 +224,59 @@ def get_eval_goldens(
         )
         for row in list_goldens(db, limit=limit)
     ]
+
+
+@router.get("/goldens/{eval_case_id}", response_model=EvalGoldenDetail, response_model_exclude_none=True)
+def get_eval_golden(
+    eval_case_id: str,
+    _auth: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    row = get_golden(db, eval_case_id)
+    if row is None:
+        _error(404, "eval_golden_not_found", f"Golden {eval_case_id!r} does not exist.", eval_case_id=eval_case_id)
+    return _golden_detail(row)
+
+
+@router.post("/goldens", response_model=EvalGoldenDetail, status_code=201, response_model_exclude_none=True)
+def create_eval_golden(
+    body: EvalGoldenCreate,
+    _auth: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    if get_golden(db, body.eval_case_id) is not None:
+        _error(
+            409,
+            "eval_golden_exists",
+            f"Golden {body.eval_case_id!r} already exists.",
+            eval_case_id=body.eval_case_id,
+        )
+    row = upsert_golden(db, _golden_payload(body.eval_case_id, body))
+    return _golden_detail(row)
+
+
+@router.put("/goldens/{eval_case_id}", response_model=EvalGoldenDetail, response_model_exclude_none=True)
+def update_eval_golden(
+    eval_case_id: str,
+    body: EvalGoldenUpsert,
+    _auth: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    if get_golden(db, eval_case_id) is None:
+        _error(404, "eval_golden_not_found", f"Golden {eval_case_id!r} does not exist.", eval_case_id=eval_case_id)
+    row = upsert_golden(db, _golden_payload(eval_case_id, body))
+    return _golden_detail(row)
+
+
+@router.delete("/goldens/{eval_case_id}", status_code=204, response_class=Response)
+def delete_eval_golden(
+    eval_case_id: str,
+    _auth: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> Response:
+    if not delete_golden(db, eval_case_id):
+        _error(404, "eval_golden_not_found", f"Golden {eval_case_id!r} does not exist.", eval_case_id=eval_case_id)
+    return Response(status_code=204)
 
 
 @router.post("", response_model=EvalRunItem, status_code=202)

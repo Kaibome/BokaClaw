@@ -123,6 +123,15 @@ def upsert_golden(db: Session, payload: GoldenPayload) -> EvalGolden:
     return row
 
 
+def delete_golden(db: Session, eval_case_id: str) -> bool:
+    row = db.get(EvalGolden, eval_case_id)
+    if row is None:
+        return False
+    db.delete(row)
+    db.commit()
+    return True
+
+
 def delete_missing_goldens(db: Session, keep: set[str]) -> int:
     stmt = delete(EvalGolden)
     if keep:

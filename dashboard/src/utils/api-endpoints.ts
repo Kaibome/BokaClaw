@@ -36,6 +36,8 @@ export const EVAL_ENDPOINTS = {
   BASE: "/evals",
   CONFIG: "/evals/config",
   GOLDENS: "/evals/goldens",
+  GOLDEN_BY_ID: (evalCaseId: string) =>
+    `/evals/goldens/${encodeURIComponent(evalCaseId)}`,
   BY_ID: (evalId: string) => `/evals/${evalId}`,
   CANCEL: (evalId: string) => `/evals/${evalId}/cancel`,
 } as const;

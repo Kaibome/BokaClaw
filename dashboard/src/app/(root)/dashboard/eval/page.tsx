@@ -10,11 +10,18 @@ import {
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { format, formatDistanceToNow } from "date-fns";
-import { FlaskConical, RefreshCw, XCircle } from "lucide-react";
+import { FlaskConical, FolderCog, RefreshCw, XCircle } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { toast } from "@/components/ui/use-toast";
@@ -126,14 +133,14 @@ function EvalDetailCard({
     detail.status === "running" && detail.cancel_requested_at !== null;
 
   return (
-    <Card className="border-memBorder-primary">
-      <CardHeader className="flex flex-row items-start justify-between gap-4 space-y-0">
+    <div className="space-y-4">
+      <div className="flex items-start justify-between gap-4">
         <div className="space-y-1">
-          <CardTitle className="flex items-center gap-2 text-base">
+          <h3 className="flex items-center gap-2 text-base font-semibold">
             <FlaskConical className="size-4" />
             {detail.eval_case_id}
-          </CardTitle>
-          <p className="text-xs text-onSurface-default-tertiary">
+          </h3>
+          <p className="text-xs break-all text-onSurface-default-tertiary">
             eval {detail.id}
           </p>
         </div>
@@ -157,8 +164,8 @@ function EvalDetailCard({
             </Button>
           )}
         </div>
-      </CardHeader>
-      <CardContent className="space-y-4">
+      </div>
+      <div className="space-y-4">
         <div className="grid grid-cols-2 gap-3 text-sm md:grid-cols-3">
           <div>
             <p className="text-xs text-onSurface-default-tertiary">Overall</p>
@@ -257,8 +264,8 @@ function EvalDetailCard({
             </ul>
           </div>
         )}
-      </CardContent>
-    </Card>
+      </div>
+    </div>
   );
 }
 
@@ -273,6 +280,7 @@ function EvalPageInner() {
   const [useJudge, setUseJudge] = useState(false);
   const [activeEvalId, setActiveEvalId] = useState<string | null>(null);
   const [detail, setDetail] = useState<EvalRunDetail | null>(null);
+  const [detailOpen, setDetailOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [pollError, setPollError] = useState("");
@@ -313,6 +321,24 @@ function EvalPageInner() {
     setActiveEvalId(isTerminal(res.data.status) ? null : id);
     return res.data;
   }, []);
+
+  const openDetail = useCallback(
+    async (id: string) => {
+      setDetailOpen(true);
+      setDetail(null);
+      try {
+        await loadDetail(id);
+      } catch (err) {
+        setDetailOpen(false);
+        toast({
+          title: "Failed to load eval",
+          description: getErrorMessage(err),
+          variant: "destructive",
+        });
+      }
+    },
+    [loadDetail],
+  );
 
   useEffect(() => {
     if (!activeEvalId) return;
@@ -375,6 +401,7 @@ function EvalPageInner() {
         use_llm_judge: useJudge,
       });
       setDetail(null);
+      setDetailOpen(true);
       setActiveEvalId(res.data.id);
       void refetchHistory();
     } catch (err) {
@@ -472,17 +499,25 @@ function EvalPageInner() {
             captured spans.
           </p>
         </div>
-        <Button
-          variant="outline"
-          onClick={() => {
-            void refetchHistory();
-            if (detail) void loadDetail(detail.id);
-          }}
-          disabled={historyLoading}
-        >
-          <RefreshCw className="mr-2 size-4" />
-          Refresh
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button variant="outline" asChild>
+            <Link href="/dashboard/eval/cases">
+              <FolderCog className="mr-2 size-4" />
+              Case management
+            </Link>
+          </Button>
+          <Button
+            variant="outline"
+            onClick={() => {
+              void refetchHistory();
+              if (detail) void loadDetail(detail.id);
+            }}
+            disabled={historyLoading}
+          >
+            <RefreshCw className="mr-2 size-4" />
+            Refresh
+          </Button>
+        </div>
       </div>
 
       {config && !config.enabled && (
@@ -584,21 +619,43 @@ function EvalPageInner() {
         </CardContent>
       </Card>
 
-      {detail && (
-        <EvalDetailCard
-          detail={detail}
-          cancelling={cancelling}
-          onCancel={() => void cancel()}
-        />
-      )}
-      {!detail && activeEvalId && (
-        <Card className="border-memBorderPrimary">
-          <CardContent className="flex items-center gap-2 p-4 text-sm text-onSurface-default-secondary">
-            <RefreshCw className="size-4 animate-spin" />
-            Eval {activeEvalId} is queued. Waiting for the worker…
-          </CardContent>
-        </Card>
-      )}
+      <Dialog
+        open={detailOpen}
+        onOpenChange={(open) => {
+          setDetailOpen(open);
+          if (!open) {
+            setActiveEvalId(null);
+            void refetchHistory();
+          }
+        }}
+      >
+        <DialogContent className="max-h-[90vh] max-w-3xl overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Eval result</DialogTitle>
+            <DialogDescription>
+              {detail
+                ? `${detail.eval_case_id} · ${detail.status}`
+                : activeEvalId
+                  ? `Eval ${activeEvalId} is queued. Waiting for the worker…`
+                  : "Loading eval…"}
+            </DialogDescription>
+          </DialogHeader>
+          {detail ? (
+            <EvalDetailCard
+              detail={detail}
+              cancelling={cancelling}
+              onCancel={() => void cancel()}
+            />
+          ) : (
+            <div className="flex items-center gap-2 py-6 text-sm text-onSurface-default-secondary">
+              <RefreshCw className="size-4 animate-spin" />
+              {activeEvalId
+                ? `Eval ${activeEvalId} is queued. Waiting for the worker…`
+                : "Loading eval…"}
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
 
       <div className="space-y-2">
         <div className="flex items-center justify-between">
@@ -619,27 +676,7 @@ function EvalPageInner() {
               data={history}
               columns={historyColumns}
               getRowKey={(row) => row.id}
-              onRowClick={(row) => {
-                if (row.status === "queued" || row.status === "running") {
-                  setDetail(null);
-                  setActiveEvalId(row.id);
-                  void loadDetail(row.id).catch((err: unknown) => {
-                    toast({
-                      title: "Failed to load eval",
-                      description: getErrorMessage(err),
-                      variant: "destructive",
-                    });
-                  });
-                  return;
-                }
-                void loadDetail(row.id).catch((err: unknown) => {
-                  toast({
-                    title: "Failed to load eval",
-                    description: getErrorMessage(err),
-                    variant: "destructive",
-                  });
-                });
-              }}
+              onRowClick={(row) => void openDetail(row.id)}
             />
           )}
         </Card>

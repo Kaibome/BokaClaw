@@ -40,7 +40,7 @@
 ### 1.3 非目标
 
 - 批量/定时回归评测、CI 门禁、benchmark 集成（`evaluation/` submodule）。
-- Golden 的图形化 CRUD（本期用 seed 脚本，接口与表结构为后续 CRUD 预留）。
+- Golden 的批量导入与版本历史（单条 CRUD 已实现，见 §7.5；seed 脚本仍用于初始导入）。
 - 自动挑选 run、自动生成 golden、在线告警。
 - 修改 `POST /agent` 的 SSE 契约、修改 span 采集结构、修改 `agent-loop/` SDK。
 - 对接 Confident AI 或任何评测结果上传服务。
@@ -352,6 +352,10 @@ WHERE status = 'running'
 | --- | --- | --- | --- |
 | `GET` | `/evals/config` | 200 | 是否启用、judge 是否可用、模型名、golden 数量、租约参数 |
 | `GET` | `/evals/goldens` | 200 | DB 中的 case 列表（id、输入预览、工具名、更新时间） |
+| `GET` | `/evals/goldens/{eval_case_id}` | 200 | 单条 case 完整内容（编辑前读取） |
+| `POST` | `/evals/goldens` | 201 | 新建 case；重复 `eval_case_id` 返回 409 `eval_golden_exists` |
+| `PUT` | `/evals/goldens/{eval_case_id}` | 200 | 覆盖更新已有 case；不存在返回 404 |
+| `DELETE` | `/evals/goldens/{eval_case_id}` | 204 | 删除 case；历史评测保留冻结快照 |
 | `POST` | `/evals` | 202 | 入队；响应为任务摘要 |
 | `GET` | `/evals` | 200 | 历史列表；`limit`、`run_id`、`status`、`eval_case_id` 过滤 |
 | `GET` | `/evals/{eval_id}` | 200 | 任务详情，含指标与错误 |
@@ -612,10 +616,17 @@ docker exec bokaclaw-server python scripts/seed_eval_goldens.py --file /tmp/gold
 - 后续若需要「一个 run 对应多个 case」，把唯一索引中的 `eval_case_id` 去掉即可；
   当前保持一对一，语义更清晰。
 
-### 7.5 未来 CRUD
+### 7.5 Case 管理
 
-预留 `POST/PUT/DELETE /evals/goldens/{eval_case_id}` 与页面管理入口；本期不做，避免把
-Eval 页扩成 CMS。表结构已经支持按 case 更新与快照。
+Eval 页右上角的 **Case management** 进入 `/dashboard/eval/cases`，提供单条 CRUD：
+
+- 列表：`GET /evals/goldens`，列 case id、输入预览、期望工具、更新时间。
+- 新建 / 编辑：`POST /evals/goldens`、`PUT /evals/goldens/{eval_case_id}`；
+  `expected_tools` 以 JSON 数组编辑（如 `[{"name": "WebSearch"}]`），`context` 每行一条。
+- 删除：`DELETE /evals/goldens/{eval_case_id}`，删除前二次确认。
+- 入队时仍会冻结 `golden_snapshot`，所以编辑或删除 case 都不会改写历史评测结果。
+- case id 有 URL 组成部分的限制：UI 中不要使用 `/`；如需支持任意字符，应改为按主键
+  （非路径参数）访问。批量导入/版本历史仍是后续扩展。
 
 ## 8. 指标与 judge 策略
 
@@ -789,7 +800,7 @@ python -m app.eval.cli \
 `dashboard/src/app/(root)/dashboard/eval/page.tsx`，客户端组件：
 
 ```
-Eval
+Eval                                  [Case management]
 从已结束的 agent run 生成 deepeval 评分
 
 ┌─ New evaluation ─────────────────────────────────────────────┐
@@ -801,7 +812,7 @@ Eval
 │                                            [Run evaluation]  │
 └──────────────────────────────────────────────────────────────┘
 
-┌─ Result ─────────────────────────────────────────────────────┐
+┌─ Result dialog（点击历史行或提交后打开）──────────────────────┐
 │ completed · FAILED OVERALL · 12.1s · $0.0051 · deepseek-chat │
 │ Metric                         Score  Threshold  Status       │
 │ AgentLoopDetectionMetric        1.00      1.00    ✓          │
@@ -866,7 +877,8 @@ const MAX_POLL_MS = 15 * 60 * 1000;
 ### 10.6 历史表
 
 复用 `DataTable`，列：创建时间、run id（截断 + 可复制）、case、状态、overall、耗时、费用。
-默认 `limit=50`，不做分页（与 Trace 页一致）；行点击加载详情到上方结果区，不跳页。
+默认 `limit=50`，不做分页（与 Trace 页一致）；行点击后在 Dialog 中加载详情，关闭弹窗
+停止轮询并刷新历史，不跳页。
 状态用现有 Badge 语义色；不新增颜色 token。
 
 ### 10.7 端点和类型
@@ -878,6 +890,7 @@ export const EVAL_ENDPOINTS = {
   BASE: "/evals",
   CONFIG: "/evals/config",
   GOLDENS: "/evals/goldens",
+  GOLDEN_BY_ID: (evalCaseId: string) => `/evals/goldens/${encodeURIComponent(evalCaseId)}`,
   BY_ID: (evalId: string) => `/evals/${evalId}`,
   CANCEL: (evalId: string) => `/evals/${evalId}/cancel`,
 } as const;
@@ -1111,7 +1124,6 @@ router 测试用现有 FastAPI TestClient 模式。
 
 后续扩展：
 
-- Golden CRUD API + 页面管理。
 - 批量评测一个 case 的多个 run，或多 case 对同一 run。
 - 定时回归与质量趋势图。
 - 多租户/按用户隔离（当前 admin 全局）。

@@ -88,7 +88,7 @@ export function MainNav({
                     title: "Eval",
                     url: "/dashboard/eval",
                     icon: FlaskConical,
-                    active: pathname === "/dashboard/eval",
+                    active: pathname.startsWith("/dashboard/eval"),
                   },
                   {
                     title: "Memories",
