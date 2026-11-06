@@ -3,6 +3,14 @@
 from importlib.metadata import PackageNotFoundError, version
 
 from .agent.runtime import AgentRuntime
+from .agent.subagent import (
+    Fact,
+    SubagentOptions,
+    SubagentResult,
+    SubagentSpec,
+    SubagentTask,
+    SubagentTool,
+)
 from .core.config import AgentConfig, ModelConfig
 from .core.exceptions import (
     AgentError,
@@ -49,6 +57,7 @@ __all__ = [
     "AgentRuntime",
     "ConfigurationError",
     "EventType",
+    "Fact",
     "InMemorySessionStore",
     "MaxIterationsExceeded",
     "ModelConfig",
@@ -68,6 +77,11 @@ __all__ = [
     "SessionStore",
     "SessionStoreError",
     "StreamingModelProvider",
+    "SubagentOptions",
+    "SubagentResult",
+    "SubagentSpec",
+    "SubagentTask",
+    "SubagentTool",
     "Tool",
     "ToolArgumentError",
     "ToolCall",

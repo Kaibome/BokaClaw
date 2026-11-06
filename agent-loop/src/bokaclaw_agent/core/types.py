@@ -69,6 +69,14 @@ class ToolResult(BaseModel):
     name: str
     content: str
     is_error: bool = False
+    usage: dict[str, int] = Field(
+        default_factory=dict,
+        description="Token usage produced by the tool, if any (for example a subagent run).",
+    )
+    metadata: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Optional structured details for observers; never sent to the model.",
+    )
 
 
 class RunResult(BaseModel):
@@ -92,6 +100,9 @@ class EventType(str, Enum):
     TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"
     CONTEXT_COMPRESSED = "context_compressed"
+    SUBAGENT_STARTED = "subagent_started"
+    SUBAGENT_EVENT = "subagent_event"
+    SUBAGENT_FINISHED = "subagent_finished"
     RUN_END = "run_ended"
     ERROR = "error"
 

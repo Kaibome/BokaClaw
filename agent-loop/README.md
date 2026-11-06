@@ -170,6 +170,162 @@ async def fetch_price(sku: str) -> float:
 
 Use `await runtime.arun(...)` when calling from an async framework. The synchronous `run()` also handles async tools when it is not already inside an event loop.
 
+## Subagents
+
+A subagent is a second `AgentRuntime` exposed to the parent as an ordinary tool.
+The child has its own system prompt, its own context window, and a hard tool
+allowlist. The parent sees one tool call and one JSON tool result; every
+intermediate child turn and tool output stays inside the child. This keeps a
+noisy search out of the parent context and gives the parent a structured
+conclusion it can cite or verify.
+
+```python
+from bokaclaw_agent import AgentRuntime, SubagentOptions, SubagentSpec
+
+explore = SubagentSpec(
+    name="explore",
+    description=(
+        "Read-only codebase exploration. Use when finding the answer would flood "
+        "this conversation with file contents. Do not use for one known file."
+    ),
+    system_prompt="You explore a repository and report evidence. You cannot modify files.",
+    tool_policy="read_only",
+    default_max_turns=8,
+    default_timeout_seconds=120,
+)
+
+runtime = AgentRuntime(
+    config,
+    tools=[read_file, glob, grep],
+    subagents=[explore],
+    subagent_options=SubagentOptions(max_calls_per_run=4),
+)
+```
+
+The model calls the subagent with a self-contained task packet:
+
+```json
+{
+  "goal": "Find where the retry policy is implemented.",
+  "label": "retry policy",
+  "scope": ["/workspace/src"],
+  "background": "You cannot see the parent conversation. The package root is /workspace.",
+  "questions": ["Which module owns retries?", "What defaults are used?"],
+  "output_format": "JSON object",
+  "constraints": ["Cite file:line for each fact."]
+}
+```
+
+The child receives the rendered packet and, when resuming, its earlier
+transcript. It never receives the parent's messages.
+
+### Task packet
+
+| `SubagentTask` field | Meaning |
+|---|---|
+| `goal` | One-sentence objective. |
+| `label` | Short label for traces and the UI; derived from the goal when empty. |
+| `scope` | Absolute paths, URLs, or data sources the child may inspect. |
+| `background` | Everything the child needs; it cannot see the parent conversation. |
+| `questions` | Numbered questions that define completion. |
+| `output_format` | Required result shape: table, bullets, JSON, and so on. |
+| `constraints` | Extra rules such as read-only. |
+| `max_turns` | Overrides `SubagentSpec.default_max_turns` for this call. |
+| `timeout_seconds` | Overrides `SubagentSpec.default_timeout_seconds`. |
+| `resume` | A `subagent_id` returned earlier in the same run. |
+| `run_in_background` | Reserved; background delegation is rejected in this version. |
+
+### Result envelope
+
+The child's final message is normalized into one JSON object:
+
+| Field | Meaning |
+|---|---|
+| `subagent_id`, `subagent_type` | Identity, and the key used by `resume`. |
+| `status` | `completed`, `partial`, `failed`, `timeout`, or `cancelled`. |
+| `report` | The child's conclusion, capped by `max_result_chars`. |
+| `data` | The parsed JSON answer when the child returned one, otherwise `null`. |
+| `facts` | `{claim, evidence, confidence}` entries for parent verification. |
+| `inferences`, `unknowns` | Conclusions without direct evidence, and gaps the child could not close. |
+| `sources` | Deduplicated paths, URLs, or data sources. |
+| `usage`, `turns`, `isolated_chars` | Child cost, child ReAct steps, and characters of tool output kept out of the parent. |
+| `stop_reason`, `duration_ms`, `truncated`, `error` | Diagnostics. |
+| `resumable` | Whether the child transcript was kept for a later `resume`. |
+
+The delegation ledger (`## Subagent delegations (this run)`) is appended to the
+parent request view after each call, so the parent does not repeat work. When
+`SubagentOptions.verification_policy` is `spot_check` (the default), the ledger
+also tells the parent to verify at least one high-impact fact with a direct tool
+call; `strict` asks it to verify every high-impact fact, and `none` omits the
+instruction.
+
+### Spec and limits
+
+| `SubagentSpec` field | Default | Meaning |
+|---|---|---|
+| `tool_policy` | `"read_only"` | `read_only` exposes `Read`/`ViewImage`/`Glob`/`Grep`/`WebFetch`/`WebSearch`/`search_memories`; `research` adds `save_memory`; `code` exposes every parent tool not excluded; `custom` exposes only `tool_names`. The filter is applied to the child's `ToolRegistry`, so a disallowed tool cannot be called even if the model asks. |
+| `tool_names` | `None` | Allowlist for `tool_policy="custom"` (required in that mode). |
+| `model` | `None` | Child `ModelConfig`; defaults to the parent provider. `subagent_provider_factory` builds providers for specs that set a model. |
+| `default_max_turns` | `8` | Child ReAct step limit. |
+| `default_timeout_seconds` | `120` | Child wall clock. On timeout the parent receives `status="timeout"` and the partial transcript is not resumable. |
+| `max_result_chars` | `8000` | Cap for `report` and for the serialized tool result. |
+| `output_schema` | `None` | Ask for a JSON object and mark a non-JSON answer `partial`. |
+| `resumable` | `True` | Keep the child transcript in memory for `resume` within this run. |
+| `allow_nested` | `False` | Reserved; nested subagents are not registered in this version. |
+
+| `SubagentOptions` field | Default | Meaning |
+|---|---|---|
+| `enabled` | `True` | Register subagent tools at all. |
+| `max_depth` | `2` | A child at this depth gets no subagent tools. |
+| `max_calls_per_run` | `4` | Delegations per parent run, shared across tools. |
+| `max_result_chars` | `8000` | Upper bound applied together with the spec cap. |
+| `default_timeout_seconds` | `120` | Default when a spec does not set one. |
+| `token_budget` | `None` | Stop delegating after the child tokens reported so far reach this budget. |
+| `verification_policy` | `"spot_check"` | `none`, `spot_check`, or `strict`; controls the ledger's verification instruction. |
+
+### Resume, cancellation, and usage
+
+Pass the previous `subagent_id` as `resume` within the same parent run to
+continue the same child transcript instead of starting over. Resume fails with
+a structured `failed` result when the id is unknown, expired, or belongs to a
+different `SubagentSpec`. Cross-run resume is not supported in this version.
+
+The child runs synchronously. A parent `cancel_event` is watched and forwarded
+to the child, so cancelling the parent also stops the child at its next
+checkpoint and returns `status="cancelled"`; the parent then raises
+`RunCancelled` as usual. A child failure, timeout, or cancellation never fails
+the parent by itself — it arrives as an errored tool result the model can react
+to.
+
+Child token usage is merged into the parent `RunResult.usage` and also reported
+on the `ToolResult.usage` and in `subagent_finished`. Consumers that sum usage
+must count it once.
+
+### Events
+
+Subagent activity emits three additional events:
+
+- `subagent_started` — `{subagent_id, subagent_type, label, goal, depth, resume,
+  parent_tool_call_id, model, tool_names}`. `parent_tool_call_id` is the parent
+  tool call that opened the child, so an observer can nest the child trace under
+  it; it is empty when the tool was invoked outside a runtime.
+- `subagent_event` — one child event per phase (`model_request`, `model_response`,
+  `tool_call`, `tool_result`, `context_compressed`, `error`), with the child's
+  ids and capped content previews.
+- `subagent_finished` — `{subagent_id, subagent_type, status, turns, usage,
+  isolated_chars, result_chars, duration_ms, resumable, error}`.
+
+They carry the parent run's `session_id` and `seq` like every other event.
+
+`AgentRuntime(..., subagent_task_validator=...)` accepts an optional
+`Callable[[SubagentTask], str | None]`. It runs for every delegation before the
+call budget is charged and before the child starts; returning a message turns
+the call into a structured `failed` result, which lets a host reject task
+packets whose `scope` escapes its allowed workspace.
+
+A runnable scripted-provider example is in
+[`examples/subagent.py`](examples/subagent.py); it needs no API key or database.
+
 ## Sessions and resume
 
 Pass the same `session_id` to resume a conversation:
@@ -359,7 +515,7 @@ def on_event(event):
 runtime = AgentRuntime(config, provider=provider, on_event=on_event)
 ```
 
-Events: `run_started`, `model_request`, `model_response`, `tool_call`, `tool_result`, `context_compressed`, `run_ended`, `error`. Callback exceptions are logged and never interrupt a run.
+Events: `run_started`, `model_request`, `model_response`, `tool_call`, `tool_result`, `context_compressed`, `subagent_started`, `subagent_event`, `subagent_finished`, `run_ended`, `error`. Callback exceptions are logged and never interrupt a run.
 
 `context_compressed` is emitted when a request was rewritten **or** when a summarization model call happened, immediately before the matching `model_request`. Its `data` is `{before_tokens, after_tokens, dropped_messages, summarized, fallback}`, plus `{usage, model_calls, usage_unknown_calls}` when a summary call ran. The `seq` rule below applies to it like every other event.
 
@@ -377,6 +533,9 @@ Every `AgentEvent` carries a `seq` that starts at `1` for each run and increases
 - Tool calls returned in one model turn are executed sequentially, in order.
 - One active run per session is recommended. Concurrent writers are serialised by a row lock and `UNIQUE(session_id, seq)`, but turn ordering is not guaranteed.
 - Text content only; multimodal `content` parts are not supported.
+- Subagents run synchronously, one at a time, with a read-oriented tool
+  allowlist by default. Background delegation, parallel children, nested
+  delegation, and cross-run resume are reserved for later phases.
 - Cancellation is cooperative: it takes effect at the next checkpoint, not in the middle of a model or tool call.
 
 ## Dashboard integration (HTTP contract)

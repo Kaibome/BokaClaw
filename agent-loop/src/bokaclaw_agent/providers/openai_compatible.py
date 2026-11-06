@@ -130,11 +130,7 @@ class OpenAICompatibleProvider:
         params["stream"] = True
         stream_options_added = False
         extra_body = self.config.extra_body or {}
-        if (
-            self._stream_usage_supported
-            and "stream_options" not in params
-            and "stream_options" not in extra_body
-        ):
+        if self._stream_usage_supported and "stream_options" not in params and "stream_options" not in extra_body:
             params["stream_options"] = {"include_usage": True}
             stream_options_added = True
 

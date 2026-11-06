@@ -391,7 +391,11 @@ def test_model_response_event_carries_usage_for_each_call():
     events = []
     provider = FakeProvider(
         [
-            ModelResponse(content="ok", finish_reason="stop", usage={"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7})
+            ModelResponse(
+                content="ok",
+                finish_reason="stop",
+                usage={"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7},
+            )
         ]
     )
     runtime = AgentRuntime(AgentConfig(), provider=provider, on_event=events.append)

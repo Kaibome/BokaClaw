@@ -10,7 +10,7 @@ from collections.abc import Callable, Generator, Iterable, Iterator
 from typing import Any, NoReturn
 from uuid import uuid4
 
-from ..core.config import AgentConfig
+from ..core.config import AgentConfig, ModelConfig
 from ..core.exceptions import (
     AgentError,
     ConfigurationError,
@@ -45,6 +45,14 @@ from .context import (
 )
 from .ledger import ToolLedger
 from .progress import ProgressGuard
+from .subagent import (
+    DelegationLedger,
+    SubagentOptions,
+    SubagentSpec,
+    SubagentTask,
+    SubagentTool,
+    _DelegationState,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +122,11 @@ class AgentRuntime:
         compression_provider: ModelProvider | None = None,
         store: SessionStore | None = None,
         on_event: Callable[[AgentEvent], Any] | None = None,
+        subagents: Iterable[SubagentSpec] = (),
+        subagent_depth: int = 0,
+        subagent_options: SubagentOptions | None = None,
+        subagent_provider_factory: Callable[[ModelConfig], ModelProvider] | None = None,
+        subagent_task_validator: Callable[[SubagentTask], str | None] | None = None,
     ) -> None:
         self.config = config
         if provider is None:
@@ -128,11 +141,66 @@ class AgentRuntime:
         self.on_event = on_event
         self.tools = ToolRegistry(tools)
         self._event_seq = 0
+        self._active_session_id = ""
+        self._active_iteration = 0
+        self._active_cancel_event: threading.Event | None = None
+        self.subagent_options = subagent_options or SubagentOptions()
+        self.subagent_depth = subagent_depth
+        self._delegation_ledger: DelegationLedger | None = None
+        self._delegation_state: _DelegationState | None = None
+        self._subagent_tools: list[SubagentTool] = []
+
+        specs = tuple(subagents)
+        if specs and self.subagent_options.enabled:
+            if self.subagent_depth >= self.subagent_options.max_depth:
+                logger.debug(
+                    "Subagent depth %s reached max_depth %s; no subagent tools registered",
+                    self.subagent_depth,
+                    self.subagent_options.max_depth,
+                )
+            else:
+                self._delegation_ledger = DelegationLedger(
+                    verification_policy=self.subagent_options.verification_policy
+                )
+                delegation_state = _DelegationState()
+                self._delegation_state = delegation_state
+                exclude_names = {spec.name for spec in specs}
+                for spec in specs:
+                    subagent_tool = SubagentTool(
+                        spec,
+                        parent_config=config,
+                        parent_tools=self.tools,
+                        depth=self.subagent_depth,
+                        options=self.subagent_options,
+                        emit=self._emit_subagent,
+                        cancel_event_provider=lambda: self._active_cancel_event,
+                        parent_provider=self.provider,
+                        provider_factory=subagent_provider_factory,
+                        exclude_tool_names=exclude_names,
+                        ledger=self._delegation_ledger,
+                        state=delegation_state,
+                        task_validator=subagent_task_validator,
+                    )
+                    self._subagent_tools.append(subagent_tool)
+                    self.register_tool(subagent_tool.as_tool())
 
     def register_tool(self, item: Tool | Callable[..., Any]) -> Tool:
         """Register a tool after construction and return it."""
 
         return self.tools.register(item)
+
+    def _emit_subagent(self, event_type: EventType, data: dict[str, Any]) -> None:
+        """Attach the current run identity to a subagent event."""
+
+        self._emit(event_type, self._active_session_id, self._active_iteration, data)
+
+    def _start_subagent_run(self) -> None:
+        """Reset run-scoped delegation limits and the delegation ledger."""
+
+        if self._delegation_state is not None:
+            self._delegation_state.reset()
+        if self._delegation_ledger is not None:
+            self._delegation_ledger.clear()
 
     def _resolve_compression_provider(self) -> ModelProvider:
         """Return the provider used for context summaries.
@@ -256,6 +324,10 @@ class AgentRuntime:
 
         user_messages = normalize_input(input)
         session_id = session_id or uuid4().hex
+        self._start_subagent_run()
+        self._active_session_id = session_id
+        self._active_iteration = 0
+        self._active_cancel_event = cancel_event
         context = ContextManager(
             self.config.system_prompt,
             self.config.max_history_messages,
@@ -314,6 +386,7 @@ class AgentRuntime:
 
             for iteration in range(1, self.config.max_iterations + 1):
                 iterations = iteration
+                self._active_iteration = iteration
                 # Cooperative cancellation: before each ReAct iteration.
                 check_cancelled(iteration)
                 messages = context.build()
@@ -394,6 +467,10 @@ class AgentRuntime:
                     )
                     result = self.tools.invoke(call, error_mode=self.config.tool_error_mode)
                     tool_results.append(result)
+                    if result.usage:
+                        # A tool may run a child agent; its token usage belongs to
+                        # the parent run's total as well as to the tool result.
+                        self._merge_usage(usage, result.usage)
                     if ledger is not None:
                         ledger.record(call, result)
                     if guard is not None:
@@ -412,20 +489,20 @@ class AgentRuntime:
                         result.content,
                         self.config.tool_result_max_chars,
                     )
-                    self._emit(
-                        EventType.TOOL_RESULT,
-                        session_id,
-                        iteration,
-                        {
-                            "tool_call_id": result.tool_call_id,
-                            "name": result.name,
-                            "content": view_content,
-                            "truncated": truncated,
-                            "original_chars": len(result.content),
-                            "is_error": result.is_error,
-                            "status": "failed" if result.is_error else "completed",
-                        },
-                    )
+                    event_data = {
+                        "tool_call_id": result.tool_call_id,
+                        "name": result.name,
+                        "content": view_content,
+                        "truncated": truncated,
+                        "original_chars": len(result.content),
+                        "is_error": result.is_error,
+                        "status": "failed" if result.is_error else "completed",
+                    }
+                    if result.usage:
+                        event_data["usage"] = dict(result.usage)
+                    if result.metadata:
+                        event_data["metadata"] = result.metadata
+                    self._emit(EventType.TOOL_RESULT, session_id, iteration, event_data)
                     message = tool_message(result)
                     context.append(message)
                     new_messages.append(message)
@@ -616,6 +693,10 @@ class AgentRuntime:
                 {"error": str(exc), "type": type(exc).__name__},
             )
             raise
+        finally:
+            self._active_session_id = ""
+            self._active_iteration = 0
+            self._active_cancel_event = None
 
     async def arun(
         self,
@@ -738,6 +819,10 @@ class AgentRuntime:
             parts.append(guard_notice)
         if ledger is not None:
             rendered = ledger.render(self.config.fact_ledger_max_chars)
+            if rendered:
+                parts.append(rendered)
+        if self._delegation_ledger is not None:
+            rendered = self._delegation_ledger.render()
             if rendered:
                 parts.append(rendered)
         if not parts:

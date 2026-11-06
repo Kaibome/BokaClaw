@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import json
 import re
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Callable, get_type_hints
 
@@ -32,6 +33,11 @@ _RESERVED_PARAMETER_NAMES = {
 _SECTION_HEADER = re.compile(r"^\s*([A-Z][A-Za-z ]*)\s*:\s*$")
 _ARGS_HEADERS = {"args", "arguments", "parameters"}
 _GOOGLE_ARG_LINE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:\([^)]*\))?\s*:\s*(.*)$")
+
+# Set while a tool runs so nested work (for example a subagent tool) can record
+# which parent tool call opened it. Context-local, so concurrent runs do not
+# leak into each other.
+CURRENT_TOOL_CALL_ID: ContextVar[str] = ContextVar("bokaclaw_tool_call_id", default="")
 
 
 def _parse_docstring(func: Callable[..., Any]) -> tuple[str | None, dict[str, str]]:
@@ -231,10 +237,24 @@ class Tool:
         except TypeError as exc:
             raise ToolArgumentError(f"Invalid arguments for tool {self.name!r}: {exc}") from exc
 
+        token = CURRENT_TOOL_CALL_ID.set(tool_call_id)
         try:
             value = resolve_awaitable(self.func(**kwargs))
         except Exception as exc:  # noqa: BLE001 - all tool failures are normalized
             raise ToolExecutionError(f"Tool {self.name!r} failed: {exc}") from exc
+        finally:
+            CURRENT_TOOL_CALL_ID.reset(token)
+
+        # Tools that need to attach usage or observer metadata (subagents, for
+        # example) return a ToolResult directly. Fill the identity fields the
+        # caller supplied when the tool left them blank.
+        if isinstance(value, ToolResult):
+            update: dict[str, Any] = {}
+            if not value.tool_call_id:
+                update["tool_call_id"] = tool_call_id
+            if not value.name:
+                update["name"] = self.name
+            return value.model_copy(update=update) if update else value
 
         return ToolResult(
             tool_call_id=tool_call_id,
@@ -260,6 +280,12 @@ class ToolRegistry:
 
     def get(self, name: str) -> Tool | None:
         return self._tools.get(name)
+
+    @property
+    def tools(self) -> tuple[Tool, ...]:
+        """Return the registered tools in registration order."""
+
+        return tuple(self._tools.values())
 
     def specs(self) -> list[dict[str, Any]]:
         return [tool.to_openai_spec() for tool in self._tools.values()]
