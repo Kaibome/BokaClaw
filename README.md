@@ -1,280 +1,470 @@
-<p align="center">
-  <a href="https://github.com/mem0ai/mem0">
-    <img src="docs/images/banner-sm.png" width="800px" alt="BokaClaw - The Memory Layer for Personalized AI">
-  </a>
-</p>
+# BokaClaw
 
-<p align="center">
-  <a href="https://luma.com/mem0-oxfm">
-    <img src="docs/images/halloween-happy-hour.png" width="450px" alt="Mem0 OSS Halloween Happy Hour: The People Who Read the Source. Tuesday, Oct 27, 5:00 PM, San Francisco. Costumes encouraged.">
-  </a>
-  <br>
-  <a href="https://luma.com/mem0-oxfm"><strong>🎃 Register here →</strong></a> · Contributors get priority
-</p>
+> 自托管的 AI Agent 工作台：持久记忆、ReAct 运行时、沙箱工具、链路追踪与离线评测，运行在你自己的基础设施上。
 
+BokaClaw 在 [Mem0](https://github.com/mem0ai/mem0) 的记忆层之上，补齐了一个完整的 Agent 应用闭环：Next.js 控制台负责交互与运营，FastAPI 服务端负责鉴权、会话、执行与观测，`bokaclaw-agent` 负责可嵌入的 ReAct 循环，Postgres + pgvector 同时承载记忆与业务数据。
 
+项目当前处于快速演进阶段，接口与配置项仍可能调整；对外发布的 SDK 为 `bokaclaw-agent`。
 
-<p align="center" style="display: flex; justify-content: center; gap: 20px; align-items: center;">
-  <a href="https://trendshift.io/repositories/11194" target="blank">
-    <img src="https://trendshift.io/api/badge/repositories/11194" alt="mem0ai%2Fmem0 | Trendshift" width="250" height="55"/>
-  </a>
-</p>
+---
 
-<p align="center">
-  <a href="https://mem0.ai">Learn more</a>
-  ·
-  <a href="https://mem0.dev/DiG">Join Discord</a>
-  ·
-  <a href="https://mem0.dev/demo">Demo</a>
-</p>
+## 能力概览
 
-<p align="center">
-  <a href="https://mem0.dev/DiG">
-    <img src="https://img.shields.io/badge/Discord-%235865F2.svg?&logo=discord&logoColor=white" alt="Mem0 Discord">
-  </a>
-  <a href="https://pepy.tech/project/mem0ai">
-    <img src="https://img.shields.io/pypi/dm/mem0ai" alt="Mem0 PyPI - Downloads">
-  </a>
-  <a href="https://github.com/mem0ai/mem0">
-    <img src="https://img.shields.io/github/commit-activity/m/mem0ai/mem0?style=flat-square" alt="GitHub commit activity">
-  </a>
-  <a href="https://pypi.org/project/mem0ai" target="blank">
-    <img src="https://img.shields.io/pypi/v/mem0ai?color=%2334D058&label=pypi%20package" alt="Package version">
-  </a>
-  <a href="https://www.npmjs.com/package/mem0ai" target="blank">
-    <img src="https://img.shields.io/npm/v/mem0ai" alt="Npm package">
-  </a>
-  <a href="https://www.ycombinator.com/companies/mem0">
-    <img src="https://img.shields.io/badge/Y%20Combinator-S24-orange?style=flat-square" alt="Y Combinator S24">
-  </a>
-</p>
+| 模块 | 能力 |
+|---|---|
+| **持久记忆** | 基于 Mem0 的 `add / search / update / delete`，支持 `user_id`、`agent_id`、`run_id` 多级作用域、元数据过滤、历史记录与实体级联删除 |
+| **Agent 运行时** | `bokaclaw-agent`：OpenAI 兼容模型的 ReAct 循环，支持 `run()`、`stream()`、`arun()`、协作式取消、同步/异步工具 |
+| **多轮会话** | 服务端持久化会话与消息；SSE 增量输出；断线重连、事件回放与 `after_seq` 游标 |
+| **工具生态** | 文件读写、Glob/Grep、网页搜索与抓取、PowerShell/Bash、PPTX 生成；工具结果按预算回填模型 |
+| **沙箱执行** | Shell 工具可委派给独立 executor 容器：只读根文件系统、非 root、无外网、仅挂载工作区 |
+| **子代理** | 子 Agent 作为普通工具被调用，拥有独立上下文与工具白名单，结果结构化回传，父上下文只保留结论 |
+| **上下文治理** | Token 预算压缩、滚动摘要、事实账本、步数提示、无进展检测与强制收尾 |
+| **可观测性** | `agent / llm / tool / memory` 四类 span、完整事件流、Token 与成本统计、请求审计日志，Dashboard 可下钻 |
+| **离线评测** | 基于 DeepEval 的 golden case 评测：循环检测、任务完成度、步骤效率、工具正确性、答案相关性 |
+| **多租户与安全** | JWT 登录、`X-API-Key`、首启向导、API Key 管理、按 IP 限流、密钥脱敏、安全响应头 |
 
-<p align="center">
-  <a href="https://mem0.ai/research"><strong>📄 Benchmarking Mem0's token-efficient memory algorithm →</strong></a>
-</p>
+---
 
-## New Memory Algorithm (April 2026)
+## 架构
 
-| Benchmark | Old | New  | Tokens  | Latency p50  |
-| --- | --- | --- | --- | --- |
-| **LoCoMo** | 71.4 | **92.5** | 7.0K  | 0.88s  |
-| **LongMemEval** | 67.8 | **94.4** | 6.8K  | 1.09s  |
-| **BEAM (1M)** | — | **64.1** | 6.7K  | 1.00s  |
-| **BEAM (10M)** | — | **48.6** | 6.9K  | 1.05s  |
+```mermaid
+flowchart LR
+    Browser["浏览器"] --> Dashboard["Dashboard<br/>Next.js 15"]
+    Dashboard -->|"HTTP / SSE"| Server["Server<br/>FastAPI"]
 
-All benchmarks run on the same production-representative model stack. Single-pass retrieval (one call, no agentic loops) at a top_200 retrieval budget. Scores reflect Mem0's managed platform, which includes proprietary optimizations not available in the open-source SDK; open-source users should expect directionally similar gains but not identical numbers.
+    Server --> Manager["AgentRunManager<br/>队列 · 租约 · 事件持久化"]
+    Manager --> Runtime["bokaclaw-agent<br/>ReAct 运行时"]
 
-**What changed:**
-- **Single-pass ADD-only extraction** -- one LLM call, no UPDATE/DELETE. Memories accumulate; nothing is overwritten.
-- **Agent-generated facts are first-class** -- when an agent confirms an action, that information is now stored with equal weight.
-- **Entity linking** -- entities are extracted, embedded, and linked across memories for retrieval boosting.
-- **Multi-signal retrieval** -- semantic, BM25 keyword, and entity matching scored in parallel and fused.
-- **Temporal Reasoning** -- time-aware retrieval that ranks the right dated instance for queries about current state, past events, and upcoming plans.
+    Runtime -->|"OpenAI 兼容协议"| Model["LLM / 压缩模型"]
+    Server -->|"SDK 调用"| Memory["Mem0 记忆层"]
+    Memory --> PG[("Postgres + pgvector")]
 
-See the [migration guide](https://docs.mem0.ai/migration/oss-v2-to-v3) for upgrade instructions. The [evaluation framework](https://github.com/mem0ai/memory-benchmarks) is open-sourced so anyone can reproduce the numbers.
-
-## Research Highlights
-- **92.5 on LoCoMo** -- +21 points over the previous algorithm
-- **94.4 on LongMemEval** -- +27 points, with 98.2 on assistant memory recall
-- **64.1 on BEAM (1M)** -- production-scale memory evaluation at 1M tokens
-- [Read the full paper](https://mem0.ai/research)
-
-# Introduction
-
-[Mem0](https://mem0.ai) ("mem-zero") enhances AI assistants and agents with an intelligent memory layer, enabling personalized AI interactions. It remembers user preferences, adapts to individual needs, and continuously learns over time—ideal for customer support chatbots, AI assistants, and autonomous systems.
-
-### Key Features & Use Cases
-
-**Core Capabilities:**
-- **Multi-Level Memory**: Seamlessly retains User, Session, and Agent state with adaptive personalization
-- **Developer-Friendly**: Intuitive API, cross-platform SDKs, and a fully managed service option
-
-**Applications:**
-- **AI Assistants**: Consistent, context-rich conversations
-- **Customer Support**: Recall past tickets and user history for tailored help
-- **Healthcare**: Track patient preferences and history for personalized care
-- **Productivity & Gaming**: Adaptive workflows and environments based on user behavior
-
-## 🚀 Quickstart Guide <a name="quickstart"></a>
-
-### Sign up as an agent
-
-AI agents can mint a working Mem0 API key in under five seconds — no email, no dashboard, no OTP. Four commands end-to-end:
-
-```bash
-# 1. Install
-npm install -g @mem0/cli      # or: pip install mem0-cli
-
-# 2. Sign up as an agent (replace `claude-code` with your name)
-mem0 init --agent --agent-caller claude-code
-
-# 3. Add a memory
-mem0 add "I am using mem0"
-
-# 4. Search
-mem0 search "am I using mem0"
+    Server -->|"Bash / PowerShell / Monitor"| Executor["Executor<br/>沙箱容器"]
+    Server -->|"span / event"| PG
+    Server -->|"评测任务"| Eval["DeepEval Worker"]
+    Eval --> PG
 ```
 
-The human owner can claim the account later with `mem0 init --email <their-email>` — same key, memories preserved. Full guide: [Sign up as an agent](https://docs.mem0.ai/platform/agent-signup).
+职责边界：
 
-| | Library | Self-Hosted Server | Cloud Platform |
-|---|---------|-------------------|----------------|
-| **Best for** | Testing, prototyping | Teams running on their own infrastructure | Zero-ops production use |
-| **Setup** | `pip install mem0ai` | `docker compose up` | Sign up at [app.mem0.ai](https://app.mem0.ai?utm_source=oss&utm_medium=readme) |
-| **Dashboard** | -- | [Yes](https://docs.mem0.ai/open-source/setup) | Yes |
-| **Auth & API Keys** | -- | Yes | Yes |
-| **Advanced Features** | -- | Teasers | All included |
+- **Dashboard 只和 Server 通信**，从不直接调用模型，也不持有模型密钥。
+- **Server 是唯一的写入方**：会话、消息、run、span、评测结果都由服务端落库。
+- **`bokaclaw-agent` 是进程内库**，不负责排队、重试或跨重启续跑；这些由 Server 的 `AgentRunManager` 承担。
+- **执行与连接解耦**：关闭 SSE 不会取消 run；重连可通过 `GET /agent/runs/{id}/events?after_seq=N` 继续消费。
 
-Just testing? Use the library. Building for a team? Self-hosted. Want zero ops? Cloud.
+---
 
-### Library (pip / npm)
+## 仓库结构
 
-```bash
-pip install mem0ai
-```
+| 目录 | 说明 |
+|---|---|
+| `server/` | FastAPI 服务端：鉴权、记忆 API、Agent 执行、会话、span、评测、Docker 编排 |
+| `dashboard/` | Next.js 15 控制台：Agent 对话、Trace、Eval、Memories、Requests、Entities、配置与密钥 |
+| `agent-loop/` | 独立 Python SDK `bokaclaw-agent`：ReAct 循环、工具、子代理、上下文压缩、会话存储 |
+| `mem0/` | Mem0 Python SDK：记忆、LLM、Embedding、向量库、图存储、重排 |
+| `tests/` | 根目录测试：Mem0 SDK、服务端 Agent、鉴权、Trace、评测等 |
+| `server/app/eval/` | DeepEval 评测适配、指标、golden 数据与后台 worker |
+| `docs/` | 架构与设计文档（Agent 运行时、Dashboard 契约、评测等） |
+| `cli/` | Mem0 CLI（Python / Node），面向 Mem0 Platform 与 OSS |
+| `integrations/` | 各类 Agent / 编辑器集成 |
+| `deepeval/` | DeepEval 4.3.3 源码参考副本，供评测实现对照 |
 
-For enhanced hybrid search with BM25 keyword matching and entity extraction, install with NLP support:
+---
 
-```bash
-pip install mem0ai[nlp]
-python -m spacy download en_core_web_sm
-```
+## 快速开始
 
-Install sdk via npm:
+### 环境要求
 
-```bash
-npm install mem0ai
-```
+- Docker 24+ 与 Docker Compose v2
+- Python 3.10+（运行 SDK、测试与评测）
+- Node.js 18+、pnpm 10+（本地开发 Dashboard）
+- 可选：`hatch`（管理 Python 环境）
 
-### Self-Hosted Server
-
-> **Note:** Self-hosted auth is on by default. Upgrading from a pre-auth build? Set `ADMIN_API_KEY`, register an admin through the wizard, or `AUTH_DISABLED=true` for local dev only. See [upgrade notes](https://docs.mem0.ai/open-source/setup#upgrade-notes).
-
-```bash
-# Recommended: one command — start the stack, create an admin, issue the first API key.
-cd server && make bootstrap
-
-# Manual: start the stack and finish setup via the browser wizard.
-cd server && docker compose up -d    # http://localhost:3000
-```
-
-See the [self-hosted docs](https://docs.mem0.ai/open-source/overview) for configuration.
-
-### Cloud Platform
-
-1. Sign up on [Mem0 Platform](https://app.mem0.ai?utm_source=oss&utm_medium=readme)
-2. Embed the memory layer via SDK or API keys
-3. Using hosted Qdrant vectors? See the [Platform migration guide](https://docs.mem0.ai/migration/oss-to-platform) to import them into Mem0 Platform.
-
-### CLI
-
-Manage memories from your terminal:
+### 一键启动（推荐）
 
 ```bash
-npm install -g @mem0/cli   # or: pip install mem0-cli
-
-mem0 init
-mem0 add "Prefers dark mode and vim keybindings" --user-id alice
-mem0 search "What does Alice prefer?" --user-id alice
+cd server
+cp .env.example .env
 ```
 
-See the [CLI documentation](https://docs.mem0.ai/platform/cli) for the full command reference.
+至少填写：
 
-### Agent Skills
+```dotenv
+POSTGRES_PASSWORD=<强随机密码>
+JWT_SECRET=<openssl rand -base64 48>
+OPENAI_API_KEY=<你的模型与 Embedding Key>
+```
 
-Teach your AI coding assistant (Claude Code, Codex, Cursor, Windsurf, OpenCode, OpenClaw, and any tool that supports the skills standard) how to build with Mem0. Two categories:
-
-**Reference skills — always on** (SDK knowledge loaded into the assistant's context):
+然后启动并完成首次初始化：
 
 ```bash
-npx skills add https://github.com/mem0ai/mem0 --skill mem0
-npx skills add https://github.com/mem0ai/mem0 --skill mem0-cli
-npx skills add https://github.com/mem0ai/mem0 --skill mem0-vercel-ai-sdk
+make bootstrap
 ```
 
-**Pipeline skills — run on demand** (execute an end-to-end workflow in an existing repo):
+该命令会：
+
+1. 启动 Postgres（pgvector）、API 与 Dashboard；
+2. 等待 API 与 Dashboard 就绪；
+3. 创建第一个管理员账号；
+4. 生成第一个 API Key。
+
+> 终端 `=== Ready ===` 区块中的密码与 API Key 只打印一次，请立即保存；API Key 无法再次恢复。
+
+也可以覆盖默认生成的凭据：
 
 ```bash
-npx skills add https://github.com/mem0ai/mem0 --skill mem0-integrate
-npx skills add https://github.com/mem0ai/mem0 --skill mem0-test-integration
-npx skills add https://github.com/mem0ai/mem0 --skill mem0-oss-to-platform
+make bootstrap EMAIL=admin@company.com PASSWORD='strong-password' NAME='Admin'
 ```
 
-Use `/mem0-integrate` to wire Mem0 into an existing repo via a test-first pipeline, then `/mem0-test-integration` to verify. Use `/mem0-oss-to-platform` to migrate an existing project from Mem0 OSS to the hosted Platform SDK. See the [skills catalog](./skills/) or [Vibecoding with Mem0](https://docs.mem0.ai/vibecoding) for the full picture.
+### 浏览器向导
 
-### Basic Usage
+如果不使用 `make bootstrap`，可以自行启动后打开向导：
 
-Mem0 requires an LLM to function, with `gpt-5-mini` from OpenAI as the default. However, it supports a variety of LLMs; for details, refer to our [Supported LLMs documentation](https://docs.mem0.ai/components/llms/overview).
+```bash
+cd server
+make up
+```
 
-Mem0 uses `text-embedding-3-small` from OpenAI as the default embedding model. For best results with hybrid search (semantic + keyword + entity boosting), we recommend using at least [Qwen 600M](https://huggingface.co/Alibaba-NLP/gte-Qwen2-1.5B-instruct) or a comparable embedding model. See [Supported Embeddings](https://docs.mem0.ai/components/embedders/overview) for configuration details.
+访问 <http://localhost:3000>，按向导完成管理员注册与模型配置。
 
-First step is to instantiate the memory:
+### 访问地址
+
+| 服务 | 地址 |
+|---|---|
+| Dashboard | <http://localhost:3000> |
+| REST API | <http://localhost:8888> |
+| OpenAPI 文档 | <http://localhost:8888/docs> |
+| Postgres（宿主机） | `localhost:8432` |
+
+### 带沙箱执行器的四容器栈
+
+默认 Compose 栈不包含 Shell executor。仓库内提供了独立脚本，额外启动只读根文件系统、无外网、仅挂载工作区的 `bokaclaw-executor`：
+
+```bash
+.claude/skills/bokaclaw-docker-stack/scripts/build-images.sh
+.claude/skills/bokaclaw-docker-stack/scripts/start-stack.sh
+```
+
+重建镜像后让容器使用新镜像：
+
+```bash
+RECREATE=1 .claude/skills/bokaclaw-docker-stack/scripts/start-stack.sh
+```
+
+该栈会把 `server/.env` 中的 `AGENT_EXECUTOR_URL` 指向 `http://bokaclaw-executor:8099`。
+
+### 单容器部署
+
+`server/Dockerfile.all-in-one` 把 API、Dashboard 与 PostgreSQL 打进一个镜像，内置本地 fastembed 中文 Embedding 模型，适合单机演示或轻量部署：
+
+```bash
+docker build -f server/Dockerfile.all-in-one -t bokaclaw-all-in-one:test .
+docker run -d --name bokaclaw \
+  -p 3000:3000 -p 8000:8000 \
+  -e POSTGRES_PASSWORD='<strong-password>' \
+  -e JWT_SECRET="$(openssl rand -base64 48)" \
+  -e OPENAI_API_KEY='<your-key>' \
+  -v bokaclaw-data:/var/lib/postgresql/data \
+  bokaclaw-all-in-one:test
+```
+
+### 常用运维命令
+
+```bash
+cd server
+
+make down                    # 停止栈
+make clean                   # 停止并删除数据卷（不可恢复）
+make health                  # 检查 API / Dashboard / Postgres
+make logs                    # 跟踪日志
+make reset-admin-password EMAIL=admin@example.com PASSWORD='new-password'
+make prune-logs              # 清理 30 天前的请求日志
+```
+
+---
+
+## 核心配置
+
+完整变量见 [`server/.env.example`](server/.env.example) 与 [`server/README.md`](server/README.md)。
+
+### 基础
+
+| 变量 | 说明 |
+|---|---|
+| `POSTGRES_PASSWORD` | 必填，Compose 缺少该值会拒绝启动 |
+| `JWT_SECRET` | 启用鉴权时必填，建议 `openssl rand -base64 48` |
+| `OPENAI_API_KEY` | 默认 LLM 与 Embedding 的密钥 |
+| `MEM0_DEFAULT_LLM_PROVIDER` | `openai` / `anthropic` / `gemini` / `deepseek` |
+| `MEM0_DEFAULT_LLM_MODEL` | 默认 `gpt-5-mini` |
+| `MEM0_DEFAULT_EMBEDDER_PROVIDER` | `openai` / `gemini` / `fastembed` |
+| `MEM0_DEFAULT_EMBEDDER_MODEL` | 默认 `text-embedding-3-small` |
+| `MEM0_DEFAULT_EMBEDDING_DIMS` | 需与 Embedding 模型一致；本地 fastembed 常用 512 |
+| `AUTH_DISABLED` | 仅限本地开发，生产环境保持 `false` |
+| `MEM0_TELEMETRY` | 匿名遥测开关，`false` 可退出 |
+
+### Agent
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `AGENT_MODEL` | 复用 Mem0 LLM | 覆盖 Agent 使用的模型 |
+| `AGENT_API_KEY` / `AGENT_BASE_URL` | 复用 Mem0 配置 | 接入 Qwen、vLLM、Ollama、OpenRouter 等兼容端点 |
+| `AGENT_MAX_ITERATIONS` | `10` | 单轮 ReAct 最大步数 |
+| `AGENT_FINAL_ANSWER_ON_MAX_ITERATIONS` | `true` | 步数耗尽时再做一次无工具请求，尽力作答 |
+| `AGENT_CONTEXT_MAX_TOKENS` | `32000` | 模型视图的 Token 预算 |
+| `AGENT_CONTEXT_COMPRESSION` | `summary` | `summary` 摘要压缩 / `truncate` 仅截断 |
+| `AGENT_COMPRESSION_MODEL` | `AGENT_MODEL` | 压缩摘要专用模型，可指向更便宜的模型 |
+| `AGENT_FACT_LEDGER` | `true` | 保留 run 内事实账本，避免压缩后遗忘 |
+| `AGENT_PROGRESS_GUARD` | `true` | 检测无新证据的工具调用，nudge 后强制收尾 |
+| `AGENT_SUBAGENTS_ENABLED` | `false` | 注册 `explore` / `research_agent` 子代理 |
+| `AGENT_DEV_TOOLS` | `true` | 注册文件、搜索、抓取、PPTX 等开发工具 |
+| `AGENT_TOOLS_ALLOW_SHELL` | `false` | 注册 `Bash` / `PowerShell` / `Monitor` |
+| `AGENT_EXECUTOR_URL` | — | 设置后 Shell 工具委派给沙箱 executor |
+| `AGENT_WORKSPACE_ROOT` | `/app/workspace` | 文件工具可访问的唯一根目录 |
+| `AGENT_SUBAGENT_MAX_CALLS_PER_RUN` | `4` | 每次父 run 允许的子代理调用次数 |
+
+> 生产环境不要直接开启进程内 Shell。保留 `AGENT_EXECUTOR_URL` 指向隔离容器，才能获得文件系统与网络的边界。
+
+---
+
+## 使用 Dashboard
+
+登录后可用的页面：
+
+| 页面 | 用途 |
+|---|---|
+| **Agent** | 多轮对话、流式输出、停止生成、上下文用量与 Token 成本、工具调用展开、子代理嵌套展示 |
+| **Requests** | API 调用审计：方法、路径、状态码、耗时、请求 ID |
+| **Trace** | 按 run 查看 `agent / llm / tool / memory` span，下钻查看输入输出、耗时、错误与子代理层级 |
+| **Eval** | 管理 golden case，发起评测，查看指标、通过率、成本与对应的 Agent run |
+| **Memories** | 浏览、搜索、过滤、删除记忆；查看记忆历史 |
+| **Entities** | 汇总所有 `user_id` / `agent_id` / `run_id`，支持级联删除 |
+| **Configuration** | 运行时覆盖 LLM 与 Embedder，持久化后重启仍生效 |
+| **API Keys** | 创建、标注、吊销用户级 API Key |
+| **Settings** | 账号资料与密码 |
+
+侧边栏中的 Categories、Webhooks、Analytics、Export 标记为 `PRO`，属于云功能占位，当前自托管栈不提供对应后端能力。
+
+---
+
+## REST API
+
+除健康检查与文档外，默认都需要鉴权：`Authorization: Bearer <JWT>`、`X-API-Key: <key>`，或旧版 `ADMIN_API_KEY`。
+
+| 分组 | 端点 |
+|---|---|
+| 鉴权 | `POST /auth/register`、`POST /auth/login`、`POST /auth/refresh`、`GET/PATCH /auth/me`、`POST /auth/change-password`、`GET /auth/setup-status` |
+| API Key | `GET/POST /api-keys`、`DELETE /api-keys/{key_id}` |
+| 记忆 | `POST/GET /memories`、`GET/PUT/DELETE /memories/{id}`、`GET /memories/{id}/history`、`POST /search`、`POST /reset` |
+| 实体 | `GET /entities`、`DELETE /entities/{type}/{id}` |
+| Agent | `POST /agent`、`GET /agent/runs/{id}`、`GET /agent/runs/{id}/events`、`POST /agent/runs/{id}/cancel` |
+| 会话 | `GET/POST /conversations`、`GET/PUT/DELETE /conversations/{id}`、`GET /conversations/{id}/messages` |
+| 观测 | `GET /requests`、`GET /traces`、`GET /traces/{span_pk}` |
+| 评测 | `POST/GET /evals`、`GET /evals/{id}`、`POST /evals/{id}/cancel`、`GET/POST /evals/goldens`、`GET/PUT/DELETE /evals/goldens/{case_id}` |
+| 配置 | `GET/POST /configure`、`GET /configure/providers`、`POST /generate-instructions` |
+
+### 调用 Agent（SSE）
+
+```bash
+curl -N -X POST http://localhost:8888/agent \
+  -H "X-API-Key: $ADMIN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{
+    "message": "总结一下我保存的发布计划，并列出风险",
+    "stream": true
+  }'
+```
+
+典型事件顺序：
+
+```text
+meta → memory.recall? → (tool.call → tool.result)*
+     → message.delta* → message.completed → done → memory.save?
+```
+
+失败、取消或中断时不会发送 `message.completed`，而是：
+
+```text
+悬挂工具补发 tool.result(status="aborted") → error → done
+```
+
+`done` 不是成功信号，必须读取其中的 `status`。`meta` 最先出现，`done` 最后出现；每个持久化事件都带单调递增的 `id`，可用于重连去重。
+
+### 调用 Agent（一次性 JSON）
+
+去掉 `"stream": true` 即可在 run 完成后返回完整助手消息。
+
+---
+
+## Agent Runtime SDK
+
+`agent-loop/` 可独立安装和嵌入任意 Python 服务：
+
+```bash
+pip install bokaclaw-agent                # 仅内存会话
+pip install "bokaclaw-agent[postgres]"    # 增加 psycopg3 + 连接池
+```
 
 ```python
-from openai import OpenAI
-from mem0 import Memory
+import os
 
-openai_client = OpenAI()
-memory = Memory()
+from bokaclaw_agent import AgentConfig, AgentRuntime, ModelConfig, tool
 
-def chat_with_memories(message: str, user_id: str = "default_user") -> str:
-    # Retrieve relevant memories
-    relevant_memories = memory.search(query=message, filters={"user_id": user_id}, top_k=3)
-    memories_str = "\n".join(f"- {entry['memory']}" for entry in relevant_memories["results"])
 
-    # Generate Assistant response
-    system_prompt = f"You are a helpful AI. Answer the question based on query and memories.\nUser Memories:\n{memories_str}"
-    messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": message}]
-    response = openai_client.chat.completions.create(model="gpt-5-mini", messages=messages)
-    assistant_response = response.choices[0].message.content
+@tool
+def get_weather(city: str) -> str:
+    """Return the current weather for a city.
 
-    # Create new memories from the conversation
-    messages.append({"role": "assistant", "content": assistant_response})
-    memory.add(messages, user_id=user_id)
+    Args:
+        city: The city to look up.
+    """
+    return f"{city}: sunny, 25C"
 
-    return assistant_response
 
-def main():
-    print("Chat with AI (type 'exit' to quit)")
-    while True:
-        user_input = input("You: ").strip()
-        if user_input.lower() == 'exit':
-            print("Goodbye!")
-            break
-        print(f"AI: {chat_with_memories(user_input)}")
+runtime = AgentRuntime(
+    AgentConfig(
+        name="weather-agent",
+        system_prompt="Use tools when they help. Answer concisely.",
+        model=ModelConfig(
+            model="deepseek-chat",
+            api_key=os.environ["DEEPSEEK_API_KEY"],
+            base_url="https://api.deepseek.com/v1",
+        ),
+    ),
+    tools=[get_weather],
+)
 
-if __name__ == "__main__":
-    main()
+result = runtime.run("What's the weather in Beijing?", session_id="user-42")
+print(result.content)
 ```
 
-For detailed integration steps, see the [Quickstart](https://docs.mem0.ai/quickstart) and [API Reference](https://docs.mem0.ai/api-reference).
+主要入口：
 
-## 🔗 Integrations & Demos
+| 方法 | 行为 |
+|---|---|
+| `run(input, session_id=...)` | 阻塞执行一轮 ReAct，返回 `RunResult` |
+| `stream(input, session_id=...)` | 逐段 yield 文本增量，生成器耗尽时返回 `RunResult` |
+| `arun(...)` | `run()` 的异步包装 |
 
-- **ChatGPT with Memory**: Personalized chat powered by Mem0 ([Live Demo](https://mem0.dev/demo))
-- **Browser Extension**: Store memories across ChatGPT, Perplexity, and Claude ([Chrome Extension](https://chromewebstore.google.com/detail/onihkkbipkfeijkadecaafbgagkhglop?utm_source=item-share-cb))
-- **Langgraph Support**: Build a customer bot with Langgraph + Mem0 ([Guide](https://docs.mem0.ai/integrations/langgraph))
-- **CrewAI Integration**: Tailor CrewAI outputs with Mem0 ([Example](https://docs.mem0.ai/integrations/crewai))
+运行时还支持：
 
-## 📚 Documentation & Support
+- `@tool` 自动从类型注解与 docstring 生成 JSON Schema，参数先经 Pydantic 校验；
+- 工具失败默认以 `{"error": ...}` 回填给模型，可按需改为抛出；
+- `cancel_event` 在安全检查点协作式取消，并落库为 `cancelled`；
+- `InMemorySessionStore` 或 `PostgresSessionStore` 持久化会话；
+- 子代理：独立 system prompt、上下文窗口与工具白名单，父级只接收结构化结果；
+- 上下文压缩、事实账本、步数提示、无进展守卫；
+- `on_event` 事件回调，覆盖模型请求、工具调用、压缩、子代理与运行结束。
 
-- Full docs: https://docs.mem0.ai
-- Community: [Discord](https://mem0.dev/DiG) · [X (formerly Twitter)](https://x.com/mem0ai)
-- Contact: founders@mem0.ai
+完整 API、子代理任务包格式、持久化表结构与 HTTP executor 契约见 [`agent-loop/README.md`](agent-loop/README.md)。
 
-## Citation
+---
 
-We now have a paper you can cite:
+## 开发
 
-```bibtex
-@article{mem0,
-  title={Mem0: Building Production-Ready AI Agents with Scalable Long-Term Memory},
-  author={Chhikara, Prateek and Khant, Dev and Aryan, Saket and Singh, Taranjeet and Yadav, Deshraj},
-  journal={arXiv preprint arXiv:2504.19413},
-  year={2025}
-}
+### 服务端
+
+服务端约定使用 Docker 运行，不提供“直接 uvicorn 启动”的路径。
+
+```bash
+cd server
+docker compose up -d --build
+docker compose logs -f mem0
 ```
 
-## ⚖️ License
+数据库迁移在容器启动时执行：
 
-Apache 2.0 — see the [LICENSE](https://github.com/mem0ai/mem0/blob/main/LICENSE) file for details.
+```bash
+docker compose exec mem0 alembic upgrade head
+```
+
+测试（在具备服务端依赖的 Python 环境中，从仓库根目录运行）：
+
+```bash
+pytest tests/ server/tests/
+```
+
+### Agent SDK
+
+```bash
+cd agent-loop
+hatch env create
+hatch run lint
+hatch run format-check
+hatch run test
+```
+
+- Ruff line length **120**，isort `profile = black`；
+- 单元测试不访问网络，使用 `FakeProvider` 与 `InMemorySessionStore`；
+- 真实 Postgres 测试由 `BOKACLAW_AGENT_TEST_DSN` 控制，标记为 `integration`。
+
+### Dashboard
+
+```bash
+cd dashboard
+pnpm install
+pnpm dev          # http://localhost:3000
+pnpm typecheck
+pnpm build
+pnpm lint         # prettier --check .
+```
+
+仅使用 pnpm；API 调用统一走 `src/utils/api.ts` 与 `src/utils/api-endpoints.ts`，不要把 token 写入 `localStorage`。
+
+### 评测
+
+评测代码位于 `server/app/eval/`，独立依赖见 `server/eval-requirements.txt`。根目录的 `eval` hatch 环境把仓库内 `deepeval` 作为源码依赖：
+
+```bash
+hatch run eval:test
+```
+
+---
+
+## 安全模型
+
+- **默认开启鉴权**：Dashboard 使用 JWT，程序化访问使用 `X-API-Key`；`AUTH_DISABLED=true` 只用于本地开发。
+- **工作区约束**：所有文件工具通过 `_resolve()` 解析路径，拒绝 `..` 与符号链接逃逸。
+- **Shell 隔离**：executor 容器只读根文件系统、非 root、丢弃全部 capability、仅内网可达、仅挂载工作区；子进程使用净化后的环境变量。
+- **SSRF 防护**：`WebFetch` / `WebSearch` 默认禁止访问 localhost 与私有网段，可通过 `AGENT_WEB_FETCH_ALLOW_PRIVATE` 显式放开。
+- **敏感信息脱敏**：span 写入前按规则过滤 `sk-*`、`Bearer`、`api_key`、`password`、`token` 等字段。
+- **限流**：Agent 接口默认 30 次/分钟/IP；鉴权接口同样受限。
+- **安全响应头**：Dashboard 设置 `X-Frame-Options: DENY`、`frame-ancestors 'none'`、`nosniff` 与严格 Referrer Policy。
+- **遥测可关闭**：`MEM0_TELEMETRY=false`。
+
+---
+
+## 文档索引
+
+| 主题 | 文档 |
+|---|---|
+| Agent SDK 使用与 API | [`agent-loop/README.md`](agent-loop/README.md) |
+| Agent SDK 架构与分层 | [`docs/agent-loop/architecture.md`](docs/agent-loop/architecture.md) |
+| 运行时行为与终止条件 | [`docs/agent-loop/runtime-behavior.md`](docs/agent-loop/runtime-behavior.md) |
+| 子代理编排设计 | [`docs/agent-loop/subagent-orchestration-design-v2.md`](docs/agent-loop/subagent-orchestration-design-v2.md) |
+| 执行与连接解耦 | [`docs/agent-loop/agent-execution-decoupling.md`](docs/agent-loop/agent-execution-decoupling.md) |
+| Dashboard ↔ Server 契约 | [`docs/dashboard/agent-chat-design.md`](docs/dashboard/agent-chat-design.md) |
+| DeepEval 评测原理 | [`docs/eval/deepeval-architecture.md`](docs/eval/deepeval-architecture.md) |
+| Span 评测设计 | [`docs/eval/agent-span-evaluation.md`](docs/eval/agent-span-evaluation.md) |
+| 构建问题记录 | [`docs/building-problem-record/problem-record.md`](docs/building-problem-record/problem-record.md) |
+| 服务端运维与配置 | [`server/README.md`](server/README.md) |
+
+---
+
+## 贡献
+
+- 提交信息遵循 [Conventional Commits](https://www.conventionalcommits.org/)（`feat:`、`fix:`、`docs:`、`refactor:`、`test:`）。
+- 改动前先阅读目标目录下的 `AGENTS.md`；不同包的 linter、行宽与测试命令不同。
+- 修改公共 API 时同步更新对应 README 与 `docs/`。
+- 不要提交 `.env`、API Key 或任何凭据。
+- 提交前运行受影响包的 lint 与测试。
+
+行为准则见 [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)，安全问题请按 [`SECURITY.md`](SECURITY.md) 私下报告。
+
+---
+
+## License
+
+Apache-2.0，见 [`LICENSE`](LICENSE)。
+
+BokaClaw 基于 [Mem0](https://github.com/mem0ai/mem0) 构建，保留其原始许可证与版权声明。Mem0 是 Mem0, Inc. 的商标；本项目与 Mem0 官方无隶属关系。
