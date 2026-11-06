@@ -176,6 +176,44 @@ export interface ToolTraceEntry {
   truncated?: boolean;
 }
 
+export type SubagentStatus =
+  | "completed"
+  | "partial"
+  | "failed"
+  | "timeout"
+  | "cancelled";
+
+export interface SubagentFact {
+  claim: string;
+  evidence?: string;
+  confidence?: "high" | "medium" | "low";
+}
+
+/**
+ * Structured envelope returned by the SDK's subagent tool. The parent model
+ * receives this as the tool result; the chat renders it as a report instead of
+ * raw JSON.
+ */
+export interface SubagentResult {
+  subagent_id: string;
+  subagent_type: string;
+  status: SubagentStatus;
+  report?: string | null;
+  data?: Record<string, unknown> | null;
+  facts?: SubagentFact[];
+  inferences?: string[];
+  unknowns?: string[];
+  sources?: string[];
+  usage?: Record<string, number>;
+  turns?: number;
+  isolated_chars?: number;
+  stop_reason?: string | null;
+  duration_ms?: number;
+  resumable?: boolean;
+  truncated?: boolean;
+  error?: string | null;
+}
+
 export interface Conversation {
   id: string;
   title: string;

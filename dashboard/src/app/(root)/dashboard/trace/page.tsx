@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { format, formatDistanceToNow } from "date-fns";
 import {
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   FlaskConical,
   RefreshCw,
@@ -182,6 +183,45 @@ const SpanDetailFields = ({
   </div>
 );
 
+const SpanList = ({
+  spans,
+  onSelect,
+}: {
+  spans: AgentRunSpanSummary[];
+  onSelect: (span: AgentRunSpanSummary) => void;
+}) => (
+  <div className="divide-y divide-memBorderPrimary overflow-hidden rounded-md border border-memBorder-primary">
+    {spans.map((span) => (
+      <button
+        key={span.id}
+        type="button"
+        onClick={() => onSelect(span)}
+        className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left transition-colors hover:bg-surface-default-secondary"
+      >
+        <div className="flex min-w-0 items-center gap-2">
+          <Badge
+            variant="outline"
+            className={`w-12 justify-center ${getTypeClassName(span.span_type)}`}
+          >
+            {span.span_type}
+          </Badge>
+          <span className="truncate font-mono text-xs" title={span.name}>
+            {span.name}
+          </span>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <Badge variant="outline" className={getStatusClassName(span.status)}>
+            {span.status}
+          </Badge>
+          <span className="w-16 text-right text-xs text-onSurface-default-tertiary">
+            {formatDuration(span.duration_ms)}
+          </span>
+        </div>
+      </button>
+    ))}
+  </div>
+);
+
 function TracePageInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -195,18 +235,44 @@ function TracePageInner() {
     null,
   );
   const [detailLoading, setDetailLoading] = useState(false);
-  const [childSpans, setChildSpans] = useState<AgentRunSpanSummary[] | null>(
-    null,
-  );
+  // Every span captured for the selected run. Loaded once when the child list
+  // is opened and reused for depth-first navigation, so drilling into nested
+  // subagent spans does not issue another request.
+  const [runSpans, setRunSpans] = useState<AgentRunSpanSummary[] | null>(null);
   const [childrenLoading, setChildrenLoading] = useState(false);
   const [childrenError, setChildrenError] = useState<string | null>(null);
+  // Drill-down path inside the child dialog; the last entry is the open span.
+  const [childStack, setChildStack] = useState<AgentRunSpanSummary[]>([]);
   const [childDetail, setChildDetail] = useState<AgentRunSpanDetail | null>(
     null,
   );
-  const [childDetailOpen, setChildDetailOpen] = useState(false);
   const [childDetailLoading, setChildDetailLoading] = useState(false);
   const detailRequestRef = useRef(0);
   const childDetailRequestRef = useRef(0);
+  const childDetailCacheRef = useRef(new Map<number, AgentRunSpanDetail>());
+
+  const currentChild = childStack[childStack.length - 1] ?? null;
+
+  const childSpans = useMemo(() => {
+    if (!runSpans || !selectedSpan) return null;
+    return runSpans
+      .filter((span) => span.parent_span_id === selectedSpan.span_id)
+      .sort((a, b) => a.started_at.localeCompare(b.started_at));
+  }, [runSpans, selectedSpan]);
+
+  const currentChildSpans = useMemo(() => {
+    if (!runSpans || !currentChild) return [];
+    return runSpans
+      .filter((span) => span.parent_span_id === currentChild.span_id)
+      .sort((a, b) => a.started_at.localeCompare(b.started_at));
+  }, [runSpans, currentChild]);
+
+  const childPath = useMemo(() => {
+    if (!selectedSpan) return "";
+    return [selectedSpan.name, ...childStack.map((span) => span.name)].join(
+      " / ",
+    );
+  }, [selectedSpan, childStack]);
 
   const {
     data: spans = [],
@@ -216,7 +282,9 @@ function TracePageInner() {
   } = useApiQuery<AgentRunSpanSummary[]>(
     async () => {
       const res = await api.get<AgentRunSpanSummary[]>(TRACE_ENDPOINTS.BASE, {
-        params: { limit: TRACE_LIMIT, span_type: "agent" },
+        // Nested agent spans (subagents) hang off a parent tool call; only root
+        // spans represent a run and should consume the list limit.
+        params: { limit: TRACE_LIMIT, span_type: "agent", roots_only: true },
       });
       setLastUpdated(new Date().toISOString());
       return res.data ?? [];
@@ -296,21 +364,32 @@ function TracePageInner() {
   };
 
   const openSpan = async (row: AgentRunSpanSummary) => {
-    setChildSpans(null);
+    setRunSpans(null);
     setChildrenError(null);
+    setChildStack([]);
+    setChildDetail(null);
+    childDetailCacheRef.current.clear();
     await loadSpanDetail(row);
   };
 
-  const openChildSpan = async (child: AgentRunSpanSummary) => {
+  const loadChildDetail = async (child: AgentRunSpanSummary) => {
+    const cached = childDetailCacheRef.current.get(child.id);
+    if (cached) {
+      childDetailRequestRef.current += 1;
+      setChildDetail(cached);
+      setChildDetailLoading(false);
+      return;
+    }
+
     const requestId = ++childDetailRequestRef.current;
     setChildDetail(null);
-    setChildDetailOpen(true);
     setChildDetailLoading(true);
     try {
       const res = await api.get<AgentRunSpanDetail>(
         TRACE_ENDPOINTS.BY_ID(child.id),
       );
       if (requestId === childDetailRequestRef.current) {
+        childDetailCacheRef.current.set(child.id, res.data);
         setChildDetail(res.data);
       }
     } catch (err) {
@@ -320,7 +399,8 @@ function TracePageInner() {
           description: getErrorMessage(err),
           variant: "destructive",
         });
-        setChildDetailOpen(false);
+        setChildStack([]);
+        setChildDetail(null);
       }
     } finally {
       if (requestId === childDetailRequestRef.current) {
@@ -329,24 +409,40 @@ function TracePageInner() {
     }
   };
 
+  const openChildSpan = async (child: AgentRunSpanSummary) => {
+    setChildStack((stack) => [...stack, child]);
+    await loadChildDetail(child);
+  };
+
+  const goBackChildSpan = () => {
+    const next = childStack.slice(0, -1);
+    setChildStack(next);
+    const parent = next[next.length - 1];
+    if (parent) {
+      void loadChildDetail(parent);
+    } else {
+      childDetailRequestRef.current += 1;
+      setChildDetail(null);
+      setChildDetailLoading(false);
+    }
+  };
+
   const toggleChildSpans = async () => {
     if (!selectedSpan) return;
-    if (childSpans !== null) {
-      setChildSpans(null);
+    if (runSpans !== null) {
+      setRunSpans(null);
       return;
     }
     setChildrenLoading(true);
     setChildrenError(null);
     try {
-      // The tree is two levels deep: children of a run's agent span are its
-      // llm/tool calls. Filter by parent so a nested agent span would not leak.
+      // Load every span in the run once. The root's direct children render
+      // immediately and every opened span resolves its own children from this
+      // list, so drilling into subagent spans costs no extra requests.
       const res = await api.get<AgentRunSpanSummary[]>(TRACE_ENDPOINTS.BASE, {
         params: { run_id: selectedSpan.run_id, limit: TRACE_LIMIT },
       });
-      const rows = (res.data ?? [])
-        .filter((span) => span.parent_span_id === selectedSpan.span_id)
-        .sort((a, b) => a.started_at.localeCompare(b.started_at));
-      setChildSpans(rows);
+      setRunSpans(res.data ?? []);
     } catch (err) {
       setChildrenError(getErrorMessage(err));
     } finally {
@@ -582,9 +678,13 @@ function TracePageInner() {
         onOpenChange={(open) => {
           if (!open) {
             detailRequestRef.current += 1;
+            childDetailRequestRef.current += 1;
             setSelectedSpan(null);
-            setChildSpans(null);
+            setRunSpans(null);
             setChildrenError(null);
+            setChildStack([]);
+            setChildDetail(null);
+            childDetailCacheRef.current.clear();
           }
         }}
       >
@@ -632,7 +732,7 @@ function TracePageInner() {
                       >
                         {childrenLoading ? (
                           "Loading child spans…"
-                        ) : childSpans !== null ? (
+                        ) : runSpans !== null ? (
                           <>
                             <ChevronDown className="size-4" />
                             Hide child spans
@@ -661,46 +761,10 @@ function TracePageInner() {
                               No child spans were captured for this run.
                             </p>
                           ) : (
-                            <div className="divide-y divide-memBorderPrimary overflow-hidden rounded-md border border-memBorder-primary">
-                              {childSpans.map((child) => (
-                                <button
-                                  key={child.id}
-                                  type="button"
-                                  onClick={() => void openChildSpan(child)}
-                                  className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left transition-colors hover:bg-surface-default-secondary"
-                                >
-                                  <div className="flex min-w-0 items-center gap-2">
-                                    <Badge
-                                      variant="outline"
-                                      className={`w-12 justify-center ${getTypeClassName(
-                                        child.span_type,
-                                      )}`}
-                                    >
-                                      {child.span_type}
-                                    </Badge>
-                                    <span
-                                      className="truncate font-mono text-xs"
-                                      title={child.name}
-                                    >
-                                      {child.name}
-                                    </span>
-                                  </div>
-                                  <div className="flex shrink-0 items-center gap-2">
-                                    <Badge
-                                      variant="outline"
-                                      className={getStatusClassName(
-                                        child.status,
-                                      )}
-                                    >
-                                      {child.status}
-                                    </Badge>
-                                    <span className="w-16 text-right text-xs text-onSurface-default-tertiary">
-                                      {formatDuration(child.duration_ms)}
-                                    </span>
-                                  </div>
-                                </button>
-                              ))}
-                            </div>
+                            <SpanList
+                              spans={childSpans}
+                              onSelect={(child) => void openChildSpan(child)}
+                            />
                           )}
                         </div>
                       )}
@@ -714,11 +778,11 @@ function TracePageInner() {
       </Sheet>
 
       <Dialog
-        open={childDetailOpen}
+        open={childStack.length > 0}
         onOpenChange={(open) => {
           if (!open) {
             childDetailRequestRef.current += 1;
-            setChildDetailOpen(false);
+            setChildStack([]);
             setChildDetail(null);
             setChildDetailLoading(false);
           }
@@ -726,18 +790,48 @@ function TracePageInner() {
       >
         <DialogContent className="grid max-h-[85vh] max-w-2xl grid-rows-[auto_minmax(0,1fr)] overflow-hidden">
           <DialogHeader>
-            <DialogTitle>Child span detail</DialogTitle>
-            <DialogDescription>
-              Timing, payloads and attributes for the selected child span.
+            <DialogTitle>
+              {currentChild?.name ?? "Child span detail"}
+            </DialogTitle>
+            <DialogDescription className="font-mono text-xs break-all">
+              {childPath}
             </DialogDescription>
           </DialogHeader>
           <div className="min-h-0 overflow-y-auto pr-1">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="-ml-2 mb-2 gap-1"
+              onClick={goBackChildSpan}
+            >
+              <ChevronLeft className="size-4" />
+              Back
+            </Button>
             {childDetailLoading ? (
               <p className="text-sm text-onSurface-default-secondary">
                 Loading span…
               </p>
             ) : childDetail ? (
-              <SpanDetailFields span={childDetail} />
+              <SpanDetailFields span={childDetail}>
+                {runSpans !== null && (
+                  <div className="space-y-1">
+                    <Label className="text-xs text-onSurface-default-tertiary">
+                      Child spans ({currentChildSpans.length})
+                    </Label>
+                    {currentChildSpans.length === 0 ? (
+                      <p className="text-xs text-onSurface-default-tertiary">
+                        This span has no child spans.
+                      </p>
+                    ) : (
+                      <SpanList
+                        spans={currentChildSpans}
+                        onSelect={(child) => void openChildSpan(child)}
+                      />
+                    )}
+                  </div>
+                )}
+              </SpanDetailFields>
             ) : null}
           </div>
         </DialogContent>

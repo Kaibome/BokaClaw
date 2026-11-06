@@ -10,6 +10,10 @@ import {
 } from "lucide-react";
 
 import {
+  parseSubagentResult,
+  SubagentTraceRow,
+} from "@/components/agent/subagent-trace";
+import {
   Collapsible,
   CollapsibleContent,
   CollapsibleTrigger,
@@ -156,9 +160,18 @@ export function ToolTrace({ entries }: { entries: ToolTraceEntry[] }) {
       )}
 
       <div id={listId} className="flex flex-col gap-1">
-        {visible.map((entry) => (
-          <ToolTraceRow key={entry.tool_call_id} entry={entry} />
-        ))}
+        {visible.map((entry) => {
+          const subagent = parseSubagentResult(entry);
+          return subagent ? (
+            <SubagentTraceRow
+              key={entry.tool_call_id}
+              entry={entry}
+              result={subagent}
+            />
+          ) : (
+            <ToolTraceRow key={entry.tool_call_id} entry={entry} />
+          );
+        })}
       </div>
     </div>
   );

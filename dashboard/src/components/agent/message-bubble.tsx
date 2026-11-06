@@ -16,6 +16,14 @@ function readUsage(metadata: ChatMessageView["metadata"]): RunUsage | null {
 
 const USAGE_SUFFIX = "tokens cost this run";
 
+const SOURCE_LABELS: Record<string, string> = {
+  agent_loop: "Agent loop",
+  compression: "Compression",
+  memory_llm: "Memory LLM",
+  memory_embedding: "Memory embedding",
+  subagents: "Subagents",
+};
+
 function usageLabel(usage: RunUsage): string | null {
   if (usage.coverage === "pending" || usage.coverage === "unavailable") {
     return `${USAGE_SUFFIX} —`;
@@ -51,8 +59,9 @@ function usageTitle(usage: RunUsage): string {
     const unknown = detail.unknown_calls
       ? ` (${detail.unknown_calls} unknown)`
       : "";
+    const label = SOURCE_LABELS[source] ?? source;
     lines.push(
-      `${source}: in ${detail.input_tokens} / out ${detail.output_tokens}${unknown}`,
+      `${label}: ${formatTokens(detail.total_tokens)} tokens${unknown}`,
     );
   }
   if (usage.coverage === "partial") {
