@@ -617,6 +617,98 @@
 
 ---
 
+## P-19 子 Agent SDK P1：工具策略、每 run 预算与 resume 语义在实现中错位
+
+- **状态**：已解决
+- **发现时间**：2026-11-06
+- **解决时间**：2026-11-06
+- **场景**：实现 `agent-loop` 子 Agent P1 时，`test_subagent.py` 的超时与父级取消用例失败；复查共享预算与 resume 历史后又发现三处设计到实现的偏差。
+- **证据**：
+  - 超时/取消用例的子工具命名为 `SlowRead`，而 `read_only` 策略白名单不含该名字；子 Agent 收到 `Unknown tool` 后立即进入下一轮，脚本响应提前耗尽，返回 `failed` 而不是 `timeout` / `cancelled`；
+  - `_build_child_runtime` 固定使用 `spec.default_max_turns`，没有使用调用方传入的 `SubagentTask.max_turns`；
+  - `max_calls_per_run`、`token_budget`、resume transcript 原本挂在每个 `SubagentTool` 实例上，多个子 Agent 类型各自计数；同一个 `AgentRuntime` 复用多个 run 时也不会重置，违反「每 run 共享上限」的设计；
+  - token 预算只在 `result.resumable` 分支累加，`resumable=False` 的子 Agent 成本被漏计；
+  - resume 用例把 view-only 的 `[Runtime context ...]` step-budget notice 当成持久化历史，误判消息数量。
+- **根因**：测试夹具使用了策略外的工具名；task 级参数没有透传到 child `AgentConfig`；run 级状态放在了 tool 实例而不是 run 上；测试没有区分持久化消息与模型请求视图。
+- **解决措施**：
+  - 超时/取消用例改用策略内工具名 `Read`；
+  - `_build_child_runtime(subagent_id, max_turns=task.max_turns)`；
+  - 新增 `_DelegationState`（`sessions` / `calls` / `spent_tokens` + 锁），由 `AgentRuntime` 创建并注入所有 `SubagentTool`；`_execute` 开始时 `reset()`，同时 `DelegationLedger.clear()`；
+  - 所有子结果（含不可 resume 的结果）都累加 token 预算；token 与 transcript 分开加锁；
+  - resume 断言过滤 `[Runtime context` 前缀的视图消息；
+  - 新增共享调用预算、跨 run 重置、token 预算三个回归用例，并新增 `examples/subagent.py`。
+- **解决后效果**：`agent-loop` 178 passed / 1 skipped；`ruff check src tests examples` 与 `ruff format --check` 通过；`examples/subagent.py` 可运行，父级只收到一条结构化 JSON 结果。仍未覆盖：后台/并行、嵌套委派、跨 run resume（按设计留到 P2）。
+- **可复用结论**：「每 run」的配额必须绑定到 run，而不是注册给模型的 tool 实例；同一 runtime 会被多个 run 复用。测试工具权限时要用策略内真实工具名，否则测到的是 unknown-tool 路径，超时/取消逻辑根本没有执行。
+
+---
+
+## P-20 子 Agent server P1 接入：父工具调用 id、scope 校验与 usage 上报的协议缺口
+
+- **状态**：已解决
+- **发现时间**：2026-11-06
+- **解决时间**：2026-11-06
+- **场景**：按 v2 设计第 7 节把子 Agent 接入 server（注册 spec、事件桥接、嵌套 span、usage 分桶），要求零 DB 迁移、不新增 `agent_run_events` 类型；实现时发现 SDK 事件与 server 观测需求之间存在三个缺口。
+- **证据**：
+  - `subagent_started` 只带 `subagent_id/type/label/goal/depth/resume`，没有发起委派的父工具调用 id，`SpanRecorder` 无法把子 `agent` span 挂到 `tool:<id>` 下，只能平铺在根 span；
+  - `SubagentTool` 直接执行 `scope`，server 无法在工作区外绝对路径上做准入；若只在 `_resolve()` 层拦截，父模型仍会先付一次子 Agent 调用成本，而且拿不到明确的任务包拒绝原因；
+  - `_bridge_event` 的既有约定是「usage 在 span gate 之前上报」，但子 Agent 的 usage 只存在于 `subagent_finished`；若照搬 span 开关，`AGENT_SPAN_CAPTURE=false` 时子 Agent 成本会从 run usage 中消失；
+  - `agent_run_spans.span_id` 为 `VARCHAR(128)`，`subtool:<subagent_id>:<tool_call_id>` 在长 tool call id 下可能超限。
+- **根因**：SDK 事件按「子 Agent 自身」设计，缺少父级关联键；任务包校验没有宿主扩展点；子 usage 的聚合形态（一次 `finished` 携带全部步数）与主循环的「一次 `model_response` 一次上报」不同，不能直接复用原有分支。
+- **解决措施**：
+  - `tools/registry.py` 新增 `CURRENT_TOOL_CALL_ID` ContextVar，在 `Tool.invoke` 调用函数期间设置并在 `finally` 重置；`subagent_started` 增加 `parent_tool_call_id`（并顺带补 `model` / `tool_names`），server 用它把子 span 挂到父工具 span；
+  - SDK 新增 `subagent_task_validator: Callable[[SubagentTask], str | None]`（`AgentRuntime` → `SubagentTool`），在后台检查之后、调用预算扣减与 `subagent_started` 之前执行；返回消息即转成结构化 `failed` 结果，异常也收敛为失败而不是打断父 run；
+  - server 新增 `app/agent/subagents.py`：两个 spec、返回格式 schema、委派指引，以及按 `AGENT_WORKSPACE_ROOT` 校验绝对路径的 scope validator；非 http/https URL 一律拒绝；
+  - `subagent_finished` 先上报 `AgentUsageUpdate(source="subagents")`（`calls` 由 `turns` 推导，无 usage 时全部计入 `unknown_calls`），再受 span gate 控制；`SOURCES` 增加 `subagents`；
+  - 子 span id 统一走 `_child_span_id()`，超过 120 字符时改用 hash 后缀；`SpanRecorder.finalize()` 也会关闭未收尾的子 Agent span 与子 tool/llm span。
+- **解决后效果**：`AGENT_SUBAGENTS_ENABLED=false` 时运行路径与之前完全一致；开启后 Trace 出现 `tool:<parent_call>` → `subagent:<id>` → `sublm:*` / `subtool:*` 的嵌套树。验证：agent-loop 181 passed / 1 skipped，server agent 相关 272 passed / 1 skipped（`test_agent_router.py::test_unreachable_executor_maps_to_502` 为既有环境相关失败，与本次改动无关），ruff check / format 通过。
+- **可复用结论**：把子任务暴露成普通工具时，观测层需要的不是更多子事件，而是**父子关联键**；一个 ContextVar 就能让嵌套工具把自己的调用 id 带进事件，而不改调用签名。配额与准入必须发生在扣费之前，否则「拒绝」本身也有成本。聚合型 usage（一次事件覆盖多次调用）要显式推导 `calls`，并且必须放在 span 开关之外，才能保证关掉 trace 采集时账仍然是平的。
+
+## P-21 子 Agent Dashboard P1：结构化结果渲染与 Trace 队列污染
+
+- **状态**：已解决
+- **发现时间**：2026-11-06
+- **解决时间**：2026-11-06
+- **场景**：按 v2 设计 Phase 3 把子 Agent 接入 Dashboard。后端事件、嵌套 span、`subagents` usage 分桶已就绪，前端此前没有任何 subagent 相关代码。
+- **证据**：
+  - 委派在聊天里表现为普通工具调用，`subagents` 的 `SubagentResult` JSON 被整块塞进 OUTPUT 的 `<pre>`，report / facts / unknowns 无法阅读；
+  - 子 Agent span 的 `span_type` 是 `agent`，`GET /traces?span_type=agent` 会把它和根 span 一起返回；Trace 页的 run 列表因此出现重复行，`totalRuns`、token 汇总与 `limit` 都会被嵌套 span 污染；
+  - 若按工具名（`explore` / `research_agent`）判断子 Agent，Dashboard 就绑定了某一种 server 配置，自定义 spec 名称会失效；
+  - 运行中或结果被截断时，tool output 不是完整 JSON，不能假设一定能解析。
+- **根因**：Phase 2 只保证数据正确，没有定义前端的“可读投影”；`/traces` 的 `span_type=agent` 语义是“所有 agent 类型 span”，而 Dashboard 需要的是“每次 run 的根 span”，两者在子 Agent 出现前恰好等价。
+- **解决措施**：
+  - `dashboard/src/types/api.ts` 增加 `SubagentResult` / `SubagentFact` / `SubagentStatus`；
+  - 新增 `src/components/agent/subagent-trace.tsx`：按 **信封形状**（`subagent_id` + `subagent_type` + 合法 `status`）识别子 Agent，不依赖工具名；标题取 `label`（回退 `goal`、类型名），副标题取 `goal`；展开后分块渲染 REPORT / FACTS（claim · evidence · confidence 表格）/ INFERENCES / UNKNOWNS / SOURCES，meta 行显示 `turns · chars isolated · result chars · tokens`；
+  - 解析失败（运行中、截断、普通工具）回退到原有 JSON 视图；信封 `truncated` 与 tool trace 截断分别给出说明；
+  - `tool-trace.tsx` 按解析结果分发到 `SubagentTraceRow`；
+  - `message-bubble.tsx` 的 usage tooltip 增加来源友好名称（`Agent loop` / `Compression` / `Memory LLM` / `Memory embedding` / `Subagents`），每项按 total tokens 展示，子 Agent 成本可单独看到；
+  - `/traces` 增加 `roots_only` 查询参数，Dashboard 列表固定传 `true`；只过滤 `parent_span_id IS NULL`，不改变默认 API 行为。
+- **解决后效果**：开启子 Agent 后，聊天里出现可折叠的 SUBAGENT 卡片，事实表带证据与置信度；Trace 页的 run 列表不再把嵌套 agent span 当成独立 run；未开启时页面渲染与之前一致。验证：`tsc --noEmit` 通过，`next build` 通过，`tests/test_traces_router.py` 10 passed，ruff check / format 通过。
+- **可复用结论**：跨层识别结构化数据时要认**形状**而不是认名字，名字属于配置、形状属于协议；新增一类 span 时要同时检查所有“按 span_type 取根”的查询，否则嵌套会让列表与聚合重复计数。
+
+## P-22 Trace 页固定两层导航：子 Agent 的孙级 span 无法查看
+
+- **状态**：已解决
+- **发现时间**：2026-11-06
+- **解决时间**：2026-11-06
+- **场景**：P-21 完成后 Trace 页已能看到 run 列表与子 Agent 卡片，但要在 Trace 页核对一次委派内部发生了什么（subagent 自己的 LLM 调用与工具调用）时，发现点不下去。
+- **证据**：
+  - `toggleChildSpans` 只保留 `parent_span_id === selectedSpan.span_id` 的直接子 span，得到的是 `tool:<parent_call>`；
+  - 子 span 详情 Dialog 只渲染 `SpanDetailFields`，没有子节点列表；
+  - 于是 `subagent:<id>` 及其下的 `sublm:*` / `subtool:*` 在 UI 上没有任何入口，而 `SpanDetailFields` 的 Parent 字段又会显示一个当前页面无法到达的父 span id；
+  - 该层级在 P-20 的 span 树里真实存在（`tool:<id>` → `subagent:<id>` → `sublm`/`subtool`）。
+- **根因**：Trace 页在 span 树只有两层（agent → llm/tool）时把导航写成了固定两跳：列表 → 根抽屉 → 子详情；层级增长后，导航模型没有沿 `parent_span_id` 继续解析的能力。
+- **解决措施**：
+  - 打开“Child spans”时一次拉取该 run 的全部 span 存入 `runSpans`，根 span 的直接子节点由 `useMemo` 从同一份数据派生，下钻任意层都不再发列表请求；
+  - 子详情 Dialog 改为由 `childStack`（当前下钻路径）驱动：每层渲染当前 span 详情 + 它自己的子 span 列表，点击任一子节点入栈；`Back` 出栈，退回根层时关闭 Dialog；
+  - `childDetailCacheRef` 按 span 主键缓存详情，Back 时同步命中缓存，不重复请求；
+  - 保留 `childDetailRequestRef` 的请求序号竞态保护，快速切换层级时丢弃过期响应；
+  - Dialog 标题为当前 span 名称，描述为 `根 / … / 当前` 的完整路径；
+  - 子 span 列表抽成 `SpanList`，根抽屉与 Dialog 复用同一行样式（类型、名称、状态、耗时）。
+- **解决后效果**：从 run 根 span 可以连续点开 `tool → subagent → sublms`，每层只发一次详情请求（回退走缓存）；未开启子 Agent 的 run 仍是原来的两层体验。验证：`tsc --noEmit` 通过，`next build` 通过，Prettier 通过；重建镜像后用真实 run `cb78b5b9`（explore 子 Agent，27 个 span）在无头 Chrome 中走通 `agent.turn → explore → subagent.explore → llm.turn.1` 四级路径，Back 逐级返回并最终关闭，四张截图已目测。验证中发现子列表原本排在 Input/Output 之后，已移到详情元信息下方。
+- **可复用结论**：可视化嵌套结构时不要把树深写进导航流程；以「父指针 + 当前路径栈」建模，一次取回当前实体的子集合，由前端解析层级，既能支持任意深度，也避免每下钻一层就多一次请求。
+
+---
+
 ## 变更记录
 
 | 日期 | 变更 |
@@ -650,3 +742,7 @@
 | 2026-11-05 | P-07 注入块改为只鼓励复用：删除「when the facts may have changed, verify them with WebSearch/WebFetch」的复核句，改为「Reuse one when it answers the current question instead of repeating the same web research」（`server/app/agent/research_memory.py:_render_block`，同步 `server/README.md` 与 `tests/test_agent_research_memory.py`，相关 81 passed）。真实复测 `2105fac8`：同题 3 次 WebFetch + 1 次 search_memories、45,656 tokens / 9.3s；对照删除前 `410fcaba`（3 次工具 / 27,782 tokens）——删掉复核提示后模型仍会重抓，说明是否检索由基础 prompt 与结论缺口（上次结论里 Mate 90 Pro 价格缺失）决定，单靠这一句无法消除重复抓取；下一步要控 token 应先降 `AGENT_TOOL_RESULT_MAX_CHARS`（当前 16,000 字符/条） |
 | 2026-11-05 | 上下文压缩预算实测：`AGENT_CONTEXT_MAX_TOKENS` 由默认 32,000 调到 64,000 后复跑同题（`410fcaba`：5 calls / 27,782 tokens / 0 次压缩 / 8.1s），但该 run 命中了同题研究记忆（`source=exact`）因而未触及阈值，不能作为阈值效果对照；32k 基线 `da4d25f2` 为 14 calls / 118,842 tokens / 4 次压缩 / 40.1s |
 | 2026-11-05 | 追加 P-17：压缩摘要改用独立便宜的模型——`AgentConfig.compression_model` + `AgentRuntime(compression_provider=...)`，server 新增 `AGENT_COMPRESSION_MODEL/API_KEY/BASE_URL`；`.env` 配 `deepseek-chat`（非思考别名，实测 0 reasoning tokens）；agent-loop 167 passed，server agent runtime 62 passed，镜像重建并重启验证 |
+| 2026-11-06 | 追加 P-19：子 Agent SDK P1 实现中发现工具策略测试用名、`task.max_turns` 透传、每 run 共享预算、跨 run 重置、token 漏计与 resume 断言问题；新增 `_DelegationState` 并修复，agent-loop 178 passed / 1 skipped，ruff 通过，新增 `examples/subagent.py` |
+| 2026-11-06 | 追加 P-20：子 Agent server P1 接入——新增 `server/app/agent/subagents.py`（spec/prompt/scope 校验）、三种 `AgentSubagent*` 事件与嵌套 span（`tool:<id>` → `subagent:<id>` → `sublm`/`subtool`）、`subagents` usage 分桶（span 关闭时仍上报）以及 `AGENT_SUBAGENT_*` 配置；SDK 侧补 `CURRENT_TOOL_CALL_ID` 与 `subagent_task_validator`，零 DB 迁移；agent-loop 181 passed / 1 skipped，server agent 相关 272 passed / 1 skipped，ruff 通过 |
+| 2026-11-06 | 追加 P-21：子 Agent Dashboard P1——新增 `subagent-trace.tsx` 按信封形状渲染 REPORT/FACTS/INFERENCES/UNKNOWNS/SOURCES 与 `turns · isolated_chars · tokens`，`message-bubble` 的 usage tooltip 增加来源名称与 `Subagents` 分项；同时发现并修复 `/traces?span_type=agent` 把嵌套子 Agent span 当成独立 run 的问题，新增 `roots_only` 参数；`tsc`、`next build`、`test_traces_router.py` 10 passed、ruff 通过 |
+| 2026-11-06 | 追加 P-22：Trace 页多级下钻——打开 Child spans 时一次拉取整个 run 的 span，Dialog 改为 `childStack` 路径栈驱动，每层渲染当前 span 详情及其子 span，支持 `tool → subagent → sublms` 任意深度；Back 出栈并命中详情缓存，`SpanList` 复用行样式；`tsc`、`next build`、Prettier 通过。真实 run `cb78b5b9` 验证四级路径与逐级 Back；过程中把子列表从 JSON 之后移到详情元信息下方。本机 `server/.env` 已置 `AGENT_SUBAGENTS_ENABLED=true`，workspace 新增 `subagent-demo/` 8 个演示文件 |
