@@ -249,3 +249,143 @@ def test_a_memory_save_written_after_finalize_stays_completed():
     assert span["status"] == "completed"
     assert span["attributes"]["memory_id"] == "m1"
     assert repo.spans["agent"]["status"] == "completed"
+
+
+def test_subagent_spans_nest_under_the_parent_tool_span():
+    repo = RecordingRepo()
+    run = _run()
+    recorder = _recorder(repo, run)
+
+    recorder.handle(agent_events.AgentToolCall(tool_call_id="call_1", name="explore", iteration=1))
+    recorder.handle(
+        agent_events.AgentSubagentStarted(
+            subagent_id="sub_1",
+            subagent_type="explore",
+            label="read a.py",
+            depth=1,
+            goal_chars=6,
+            parent_tool_call_id="call_1",
+            model="child-model",
+            tool_names=["Read", "Grep"],
+        )
+    )
+    recorder.handle(
+        agent_events.AgentSubagentEvent(
+            subagent_id="sub_1",
+            phase="model_request",
+            iteration=1,
+            message_count=2,
+            tool_count=2,
+        )
+    )
+    recorder.handle(
+        agent_events.AgentSubagentEvent(
+            subagent_id="sub_1",
+            phase="tool_call",
+            iteration=1,
+            tool_call_id="child_1",
+            name="Read",
+            arguments={"file_path": "a.py"},
+        )
+    )
+    recorder.handle(
+        agent_events.AgentSubagentEvent(
+            subagent_id="sub_1",
+            phase="tool_result",
+            iteration=1,
+            tool_call_id="child_1",
+            name="Read",
+            content="hello",
+            status="completed",
+        )
+    )
+    recorder.handle(
+        agent_events.AgentSubagentEvent(
+            subagent_id="sub_1",
+            phase="model_response",
+            iteration=1,
+            content_chars=40,
+            finish_reason="stop",
+            usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        )
+    )
+    recorder.handle(
+        agent_events.AgentSubagentFinished(
+            subagent_id="sub_1",
+            subagent_type="explore",
+            status="completed",
+            turns=2,
+            usage={"prompt_tokens": 20, "completion_tokens": 8, "total_tokens": 28},
+            isolated_chars=5,
+            result_chars=30,
+            duration_ms=900,
+            resumable=True,
+        )
+    )
+
+    agent_span = repo.spans["subagent:sub_1"]
+    assert agent_span["span_type"] == "agent"
+    assert agent_span["parent_span_id"] == "tool:call_1"
+    assert agent_span["status"] == "completed"
+    assert agent_span["duration_ms"] == 900
+    assert agent_span["attributes"]["model"] == "child-model"
+    assert agent_span["attributes"]["tool_names"] == ["Read", "Grep"]
+    assert agent_span["attributes"]["turns"] == 2
+    assert agent_span["attributes"]["usage"]["total_tokens"] == 28
+    assert agent_span["output"]["result_chars"] == 30
+
+    llm = repo.spans["sublm:sub_1:1"]
+    assert llm["parent_span_id"] == "subagent:sub_1"
+    assert llm["status"] == "completed"
+    assert llm["attributes"]["usage"]["total_tokens"] == 15
+
+    tool = repo.spans["subtool:sub_1:child_1"]
+    assert tool["parent_span_id"] == "subagent:sub_1"
+    assert tool["status"] == "completed"
+    assert tool["output"]["content"] == "hello"
+
+
+def test_finalize_closes_an_unfinished_subagent_tree():
+    repo = RecordingRepo()
+    run = _run()
+    recorder = _recorder(repo, run)
+    recorder.handle(
+        agent_events.AgentSubagentStarted(
+            subagent_id="sub_1",
+            subagent_type="explore",
+            parent_tool_call_id="call_1",
+        )
+    )
+    recorder.handle(
+        agent_events.AgentSubagentEvent(
+            subagent_id="sub_1",
+            phase="tool_call",
+            iteration=1,
+            tool_call_id="child_1",
+            name="Grep",
+        )
+    )
+
+    recorder.finalize(status="cancelled", content="", metadata={}, error_detail="cancelled")
+
+    span = repo.spans["subagent:sub_1"]
+    assert span["status"] == "aborted"
+    assert span["attributes"]["subagent_status"] == "interrupted"
+    assert repo.spans["subtool:sub_1:child_1"]["status"] == "aborted"
+
+
+def test_subagent_events_without_a_started_span_are_ignored():
+    repo = RecordingRepo()
+    run = _run()
+    recorder = _recorder(repo, run)
+
+    recorder.handle(
+        agent_events.AgentSubagentEvent(
+            subagent_id="sub_missing",
+            phase="tool_call",
+            tool_call_id="child_1",
+            name="Read",
+        )
+    )
+
+    assert not any(span_id.startswith("subtool:") for span_id in repo.spans)

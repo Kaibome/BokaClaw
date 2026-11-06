@@ -43,8 +43,11 @@ class _FakeSession:
     def __init__(self, rows):
         self.rows = rows
 
-    def execute(self, _stmt):
-        return _ScalarResult(self.rows)
+    def execute(self, stmt):
+        rows = self.rows
+        if "parent_span_id IS NULL" in str(stmt):
+            rows = [row for row in rows if row.parent_span_id is None]
+        return _ScalarResult(rows)
 
     def get(self, _model, ident):
         return next((row for row in self.rows if row.id == ident), None)
@@ -156,6 +159,28 @@ def test_list_reports_cache_counters_from_the_root_span():
     assert body["cached_tokens"] == 12
     assert body["cache_miss_tokens"] == 8
     assert body["cache_hit_rate"] == 0.6
+
+
+def test_roots_only_hides_nested_agent_spans():
+    root = _span(1)
+    child = _span(
+        2,
+        span_id="subagent:sub_1",
+        parent_span_id="agent",
+        span_type="agent",
+        name="subagent.explore",
+    )
+    app = FastAPI()
+    app.include_router(traces_router.router)
+    fake_user = User(id=uuid.uuid4(), name="t", email="t@e.com", password_hash="x", role="admin")
+    app.dependency_overrides[require_admin] = lambda: fake_user
+    app.dependency_overrides[get_db] = lambda: _FakeSession([root, child])
+    client = TestClient(app, raise_server_exceptions=False)
+
+    assert [item["id"] for item in client.get("/traces?span_type=agent").json()] == [1, 2]
+    body = client.get("/traces?span_type=agent&roots_only=true").json()
+
+    assert [item["id"] for item in body] == [1]
 
 
 def test_list_omits_cache_fields_when_the_run_reported_none():

@@ -16,7 +16,7 @@ from typing import Any, Iterator, Mapping
 
 logger = logging.getLogger(__name__)
 
-SOURCES = ("agent_loop", "compression", "memory_llm", "memory_embedding")
+SOURCES = ("agent_loop", "compression", "memory_llm", "memory_embedding", "subagents")
 _TOKEN_KEYS = ("prompt_tokens", "completion_tokens", "total_tokens")
 _TOKEN_ALIASES = {
     "prompt_tokens": "prompt_tokens",

@@ -145,6 +145,60 @@ class AgentMemorySave:
 
 
 @dataclass
+class AgentSubagentStarted:
+    """A delegated child run started; its span nests under the parent tool span."""
+
+    subagent_id: str
+    subagent_type: str = ""
+    label: str = ""
+    depth: int = 0
+    goal_chars: int = 0
+    parent_tool_call_id: str = ""
+    resume: bool = False
+    model: str | None = None
+    tool_names: list[str] = field(default_factory=list)
+
+
+@dataclass
+class AgentSubagentEvent:
+    """One child model call or tool call, forwarded for the nested span tree."""
+
+    subagent_id: str
+    phase: str = ""
+    iteration: int = 0
+    message_count: int = 0
+    tool_count: int = 0
+    content_chars: int = 0
+    finish_reason: str | None = None
+    usage: dict[str, int] | None = None
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    tool_call_id: str | None = None
+    name: str | None = None
+    arguments: dict[str, Any] | None = None
+    is_error: bool = False
+    status: str | None = None
+    original_chars: int | None = None
+    content: str | None = None
+    error: str | None = None
+
+
+@dataclass
+class AgentSubagentFinished:
+    """A delegated child run settled, successfully or not."""
+
+    subagent_id: str
+    subagent_type: str = ""
+    status: str = "failed"
+    turns: int = 0
+    usage: dict[str, int] = field(default_factory=dict)
+    isolated_chars: int = 0
+    result_chars: int = 0
+    duration_ms: int | None = None
+    resumable: bool = False
+    error: str | None = None
+
+
+@dataclass
 class AgentRunEnded:
     stop_reason: str | None = None
 
@@ -169,6 +223,9 @@ AgentEvent = (
     | AgentUsageUpdate
     | AgentMemoryRecall
     | AgentMemorySave
+    | AgentSubagentStarted
+    | AgentSubagentEvent
+    | AgentSubagentFinished
     | AgentRunEnded
     | AgentError
 )

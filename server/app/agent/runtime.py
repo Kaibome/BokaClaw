@@ -21,7 +21,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Tuple
 
-from app.agent.dev_tools import build_dev_tools
+from app.agent.dev_tools import build_dev_tools, load_dev_tool_config
 from app.agent.events import (
     AgentCompleted,
     AgentContextCompressed,
@@ -34,11 +34,15 @@ from app.agent.events import (
     AgentModelResponse,
     AgentRunEnded,
     AgentRunStarted,
+    AgentSubagentEvent,
+    AgentSubagentFinished,
+    AgentSubagentStarted,
     AgentToolCall,
     AgentToolResult,
     AgentUsageUpdate,
 )
 from app.agent.research_memory import ResearchRecall, recall_research
+from app.agent.subagents import SUBAGENT_GUIDANCE, build_scope_validator, build_subagent_specs
 from app.agent.usage import RunUsageMeter, meter_context, normalize_usage
 
 logger = logging.getLogger(__name__)
@@ -173,6 +177,17 @@ class LocalAgentConfig:
     compression_model: Optional[str] = None
     compression_api_key: Optional[str] = None
     compression_base_url: Optional[str] = None
+    # Subagents are off by default; when off the runtime is exactly as before.
+    subagents_enabled: bool = False
+    subagent_model: Optional[str] = None
+    subagent_max_depth: int = 2
+    subagent_max_calls_per_run: int = 4
+    subagent_timeout_seconds: float = 120.0
+    subagent_max_turns: int = 8
+    subagent_max_result_chars: int = 8_000
+    subagent_token_budget: Optional[int] = None
+    subagent_verification: str = "spot_check"
+    subagent_allow_absolute_paths: bool = False
 
 
 def _current_llm_config() -> Dict[str, Any]:
@@ -252,6 +267,9 @@ def load_local_config() -> Optional[LocalAgentConfig]:
     research_min_score = _env_optional_float("AGENT_RESEARCH_MEMORY_MIN_SCORE", 0.5)
     if research_min_score is None:
         research_min_score = 0.5
+    subagent_verification = (os.getenv("AGENT_SUBAGENT_VERIFICATION") or "spot_check").strip().lower()
+    if subagent_verification not in {"none", "spot_check", "strict"}:
+        subagent_verification = "spot_check"
     return LocalAgentConfig(
         model=str(model),
         api_key=str(api_key),
@@ -281,6 +299,16 @@ def load_local_config() -> Optional[LocalAgentConfig]:
         compression_model=compression_model,
         compression_api_key=(compression_api_key or str(api_key)) if compression_model else None,
         compression_base_url=(compression_base_url or base_url) if compression_model else None,
+        subagents_enabled=_env_flag("AGENT_SUBAGENTS_ENABLED", False),
+        subagent_model=(os.getenv("AGENT_SUBAGENT_MODEL") or "").strip() or None,
+        subagent_max_depth=max(1, _env_int("AGENT_SUBAGENT_MAX_DEPTH", 2)),
+        subagent_max_calls_per_run=max(0, _env_int("AGENT_SUBAGENT_MAX_CALLS_PER_RUN", 4)),
+        subagent_timeout_seconds=max(1.0, _env_float("AGENT_SUBAGENT_TIMEOUT_SECONDS", 120.0)),
+        subagent_max_turns=max(1, _env_int("AGENT_SUBAGENT_MAX_TURNS", 8)),
+        subagent_max_result_chars=max(256, _env_int("AGENT_SUBAGENT_MAX_RESULT_CHARS", 8_000)),
+        subagent_token_budget=_env_budget("AGENT_SUBAGENT_TOKEN_BUDGET", None),
+        subagent_verification=subagent_verification,
+        subagent_allow_absolute_paths=_env_flag("AGENT_SUBAGENT_ALLOW_ABSOLUTE_PATHS", False),
     )
 
 
@@ -465,6 +493,15 @@ def _as_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _optional_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _model_request_event(
     data: dict[str, Any],
     iteration: int,
@@ -545,6 +582,100 @@ def _bridge_event(event: Any, put: Callable[[str, Any], None], *, model: str | N
                     usage_unknown_calls=_as_int(for_debug.get("usage_unknown_calls")),
                 ),
             )
+        return
+
+    if event_type in {"subagent_started", "subagent_event", "subagent_finished"}:
+        subagent_id = data.get("subagent_id")
+        if not isinstance(subagent_id, str) or not subagent_id:
+            return
+
+        if event_type == "subagent_finished":
+            usage = normalize_usage(data.get("usage"))
+            turns = max(0, _as_int(data.get("turns")))
+            # The child reports one aggregate for every step it took. A failure
+            # before the first model call has no usage and no steps.
+            calls = max(1, turns) if usage or turns else 0
+            if calls:
+                put(
+                    "usage",
+                    AgentUsageUpdate(
+                        source="subagents",
+                        phase="response",
+                        usage=usage,
+                        calls=calls,
+                        unknown_calls=0 if usage else calls,
+                    ),
+                )
+            if not _span_capture_enabled():
+                return
+            put(
+                "span_subagent_finished",
+                AgentSubagentFinished(
+                    subagent_id=subagent_id,
+                    subagent_type=str(data.get("subagent_type") or ""),
+                    status=str(data.get("status") or "failed"),
+                    turns=turns,
+                    usage=usage,
+                    isolated_chars=max(0, _as_int(data.get("isolated_chars"))),
+                    result_chars=max(0, _as_int(data.get("result_chars"))),
+                    duration_ms=_optional_int(data.get("duration_ms")),
+                    resumable=bool(data.get("resumable")),
+                    error=data.get("error") if isinstance(data.get("error"), str) else None,
+                ),
+            )
+            return
+
+        if not _span_capture_enabled():
+            return
+
+        if event_type == "subagent_started":
+            goal = data.get("goal")
+            tool_names = data.get("tool_names")
+            put(
+                "span_subagent_started",
+                AgentSubagentStarted(
+                    subagent_id=subagent_id,
+                    subagent_type=str(data.get("subagent_type") or ""),
+                    label=str(data.get("label") or ""),
+                    depth=max(0, _as_int(data.get("depth"))),
+                    goal_chars=len(goal) if isinstance(goal, str) else 0,
+                    parent_tool_call_id=str(data.get("parent_tool_call_id") or ""),
+                    resume=bool(data.get("resume")),
+                    model=data.get("model") if isinstance(data.get("model"), str) else None,
+                    tool_names=[name for name in tool_names if isinstance(name, str)]
+                    if isinstance(tool_names, list)
+                    else [],
+                ),
+            )
+            return
+
+        tool_calls = data.get("tool_calls")
+        arguments = data.get("arguments")
+        content = data.get("content")
+        put(
+            "span_subagent_event",
+            AgentSubagentEvent(
+                subagent_id=subagent_id,
+                phase=str(data.get("phase") or ""),
+                iteration=_iteration(event, data),
+                message_count=max(0, _as_int(data.get("message_count"))),
+                tool_count=max(0, _as_int(data.get("tool_count"))),
+                content_chars=max(0, _as_int(data.get("content_chars"))),
+                finish_reason=data.get("finish_reason") if isinstance(data.get("finish_reason"), str) else None,
+                usage=normalize_usage(data.get("usage")) or None,
+                tool_calls=[call for call in tool_calls if isinstance(call, dict)]
+                if isinstance(tool_calls, list)
+                else [],
+                tool_call_id=data.get("tool_call_id") if isinstance(data.get("tool_call_id"), str) else None,
+                name=data.get("name") if isinstance(data.get("name"), str) else None,
+                arguments=arguments if isinstance(arguments, dict) else None,
+                is_error=bool(data.get("is_error")),
+                status=data.get("status") if isinstance(data.get("status"), str) else None,
+                original_chars=_optional_int(data.get("original_chars")),
+                content=content if isinstance(content, str) else None,
+                error=data.get("error") if isinstance(data.get("error"), str) else None,
+            ),
+        )
         return
 
     if event_type in {"run_started", "model_request", "model_response", "run_ended", "error"}:
@@ -710,9 +841,32 @@ def build_runtime(
             timeout=config.request_timeout,
             max_retries=config.max_retries,
         )
+    # Build the dev tool config once: the subagent scope validator must confine
+    # paths to the same resolved workspace the file tools use.
+    dev_config = load_dev_tool_config()
+    system_prompt = config.system_prompt
+    subagents = []
+    subagent_options = None
+    subagent_task_validator = None
+    if config.subagents_enabled:
+        system_prompt = f"{system_prompt}\n\n{SUBAGENT_GUIDANCE}"
+        subagents = build_subagent_specs(sdk, config)
+        subagent_options = sdk.SubagentOptions(
+            enabled=True,
+            max_depth=config.subagent_max_depth,
+            max_calls_per_run=config.subagent_max_calls_per_run,
+            max_result_chars=config.subagent_max_result_chars,
+            default_timeout_seconds=config.subagent_timeout_seconds,
+            token_budget=config.subagent_token_budget,
+            verification_policy=config.subagent_verification,
+        )
+        subagent_task_validator = build_scope_validator(
+            config.subagent_allow_absolute_paths,
+            dev_config.workspace if dev_config is not None else None,
+        )
     agent_config = sdk.AgentConfig(
         name="bokaclaw-agent",
-        system_prompt=config.system_prompt,
+        system_prompt=system_prompt,
         max_iterations=config.max_iterations,
         final_answer_on_max_iterations=config.final_answer_on_max_iterations,
         model=model_config,
@@ -747,8 +901,15 @@ def build_runtime(
         config.progress_nudge_after,
         config.progress_stop_after,
     )
-    tools = [*_memory_tools(sdk, payload.get("user_id")), *build_dev_tools(sdk)]
-    return sdk.AgentRuntime(agent_config, tools=tools, on_event=on_event)
+    tools = [*_memory_tools(sdk, payload.get("user_id")), *build_dev_tools(sdk, dev_config)]
+    return sdk.AgentRuntime(
+        agent_config,
+        tools=tools,
+        on_event=on_event,
+        subagents=subagents,
+        subagent_options=subagent_options,
+        subagent_task_validator=subagent_task_validator,
+    )
 
 
 def _response_prompt_tokens(event: Any) -> Optional[int]:
@@ -1001,6 +1162,9 @@ async def stream_local_agent(
                 "span_context_compressed",
                 "span_run_ended",
                 "span_error",
+                "span_subagent_started",
+                "span_subagent_event",
+                "span_subagent_finished",
             }:
                 yield value
             elif kind == "error":

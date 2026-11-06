@@ -21,8 +21,12 @@ from app.agent.events import (  # noqa: E402
     AgentDelta,
     AgentLoopError,
     AgentMemoryRecall,
+    AgentSubagentEvent,
+    AgentSubagentFinished,
+    AgentSubagentStarted,
     AgentToolCall,
     AgentToolResult,
+    AgentUsageUpdate,
 )
 from app.agent.research_memory import RecallHit, ResearchRecall  # noqa: E402
 
@@ -49,6 +53,17 @@ class FakeAgentConfig:
         self.kwargs = kwargs
 
 
+class FakeSubagentSpec:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.name = kwargs["name"]
+
+
+class FakeSubagentOptions:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+
+
 class FakeTool:
     def __init__(self, fn, name=None):
         self.fn = fn
@@ -56,11 +71,23 @@ class FakeTool:
 
 
 class FakeRuntime:
-    def __init__(self, sdk, config, tools, on_event=None):
+    def __init__(
+        self,
+        sdk,
+        config,
+        tools,
+        on_event=None,
+        subagents=(),
+        subagent_options=None,
+        subagent_task_validator=None,
+    ):
         self.sdk = sdk
         self.config = config
         self.tools = list(tools)
         self.on_event = on_event
+        self.subagents = list(subagents)
+        self.subagent_options = subagent_options
+        self.subagent_task_validator = subagent_task_validator
         self.run_calls = []
         self.stream_calls = []
         self.closed = False
@@ -101,6 +128,8 @@ class FakeSDK:
     ConfigurationError = FakeConfigurationError
     ModelConfig = FakeModelConfig
     AgentConfig = FakeAgentConfig
+    SubagentSpec = FakeSubagentSpec
+    SubagentOptions = FakeSubagentOptions
 
     def __init__(self, result=None, error=None, delay=0.0):
         self.result = result
@@ -115,8 +144,25 @@ class FakeSDK:
         self.tools.append(wrapped)
         return wrapped
 
-    def AgentRuntime(self, config, *, tools=(), on_event=None):
-        runtime = FakeRuntime(self, config, tools, on_event=on_event)
+    def AgentRuntime(
+        self,
+        config,
+        *,
+        tools=(),
+        on_event=None,
+        subagents=(),
+        subagent_options=None,
+        subagent_task_validator=None,
+    ):
+        runtime = FakeRuntime(
+            self,
+            config,
+            tools,
+            on_event=on_event,
+            subagents=subagents,
+            subagent_options=subagent_options,
+            subagent_task_validator=subagent_task_validator,
+        )
         self.runtimes.append(runtime)
         return runtime
 
@@ -180,6 +226,17 @@ def clean_agent_env(monkeypatch):
         "AGENT_RESEARCH_MEMORY",
         "AGENT_RESEARCH_MEMORY_TTL_DAYS",
         "AGENT_RESEARCH_MEMORY_MIN_SCORE",
+        "AGENT_SUBAGENTS_ENABLED",
+        "AGENT_SUBAGENT_MODEL",
+        "AGENT_SUBAGENT_MAX_DEPTH",
+        "AGENT_SUBAGENT_MAX_CALLS_PER_RUN",
+        "AGENT_SUBAGENT_TIMEOUT_SECONDS",
+        "AGENT_SUBAGENT_MAX_TURNS",
+        "AGENT_SUBAGENT_MAX_RESULT_CHARS",
+        "AGENT_SUBAGENT_TOKEN_BUDGET",
+        "AGENT_SUBAGENT_VERIFICATION",
+        "AGENT_SUBAGENT_ALLOW_ABSOLUTE_PATHS",
+        "AGENT_WORKSPACE_ROOT",
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
         "DEEPSEEK_API_KEY",
@@ -1307,3 +1364,218 @@ def test_available_sdk_with_config_is_configured(monkeypatch):
     monkeypatch.setattr(agent_runtime, "_load_sdk", lambda: FakeSDK())
 
     assert agent_runtime.is_locally_configured() is True
+
+
+# ---- subagents ---------------------------------------------------------------
+
+
+def test_subagent_settings_default_to_off(monkeypatch):
+    monkeypatch.setattr(agent_runtime, "_current_llm_config", lambda: {})
+    monkeypatch.setenv("AGENT_MODEL", "m")
+    monkeypatch.setenv("AGENT_API_KEY", "k")
+
+    config = agent_runtime.load_local_config()
+
+    assert config is not None
+    assert config.subagents_enabled is False
+    assert config.subagent_model is None
+    assert config.subagent_max_depth == 2
+    assert config.subagent_max_calls_per_run == 4
+    assert config.subagent_timeout_seconds == 120.0
+    assert config.subagent_max_turns == 8
+    assert config.subagent_max_result_chars == 8_000
+    assert config.subagent_token_budget is None
+    assert config.subagent_verification == "spot_check"
+    assert config.subagent_allow_absolute_paths is False
+
+
+def test_subagent_settings_can_be_tuned(monkeypatch):
+    monkeypatch.setattr(agent_runtime, "_current_llm_config", lambda: {})
+    monkeypatch.setenv("AGENT_MODEL", "m")
+    monkeypatch.setenv("AGENT_API_KEY", "k")
+    monkeypatch.setenv("AGENT_SUBAGENTS_ENABLED", "true")
+    monkeypatch.setenv("AGENT_SUBAGENT_MODEL", "child-model")
+    monkeypatch.setenv("AGENT_SUBAGENT_MAX_DEPTH", "3")
+    monkeypatch.setenv("AGENT_SUBAGENT_MAX_CALLS_PER_RUN", "2")
+    monkeypatch.setenv("AGENT_SUBAGENT_TIMEOUT_SECONDS", "45")
+    monkeypatch.setenv("AGENT_SUBAGENT_MAX_TURNS", "6")
+    monkeypatch.setenv("AGENT_SUBAGENT_MAX_RESULT_CHARS", "4000")
+    monkeypatch.setenv("AGENT_SUBAGENT_TOKEN_BUDGET", "9000")
+    monkeypatch.setenv("AGENT_SUBAGENT_VERIFICATION", "strict")
+    monkeypatch.setenv("AGENT_SUBAGENT_ALLOW_ABSOLUTE_PATHS", "true")
+
+    config = agent_runtime.load_local_config()
+
+    assert config is not None
+    assert config.subagents_enabled is True
+    assert config.subagent_model == "child-model"
+    assert config.subagent_max_depth == 3
+    assert config.subagent_max_calls_per_run == 2
+    assert config.subagent_timeout_seconds == 45.0
+    assert config.subagent_max_turns == 6
+    assert config.subagent_max_result_chars == 4_000
+    assert config.subagent_token_budget == 9_000
+    assert config.subagent_verification == "strict"
+    assert config.subagent_allow_absolute_paths is True
+
+
+def test_unknown_subagent_verification_falls_back_to_spot_check(monkeypatch):
+    monkeypatch.setattr(agent_runtime, "_current_llm_config", lambda: {})
+    monkeypatch.setenv("AGENT_MODEL", "m")
+    monkeypatch.setenv("AGENT_API_KEY", "k")
+    monkeypatch.setenv("AGENT_SUBAGENT_VERIFICATION", "paranoid")
+
+    config = agent_runtime.load_local_config()
+
+    assert config is not None
+    assert config.subagent_verification == "spot_check"
+
+
+def test_build_runtime_without_subagents_passes_no_specs():
+    sdk = FakeSDK()
+
+    agent_runtime.build_runtime(sdk, _config(), {"user_id": None, "message": "hi"})
+
+    runtime = sdk.runtimes[0]
+    assert runtime.subagents == []
+    assert runtime.subagent_options is None
+    assert runtime.subagent_task_validator is None
+    assert "Subagents are available" not in runtime.config.kwargs["system_prompt"]
+
+
+def test_build_runtime_wires_subagents_guidance_and_scope_confined_to_the_workspace(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENT_DEV_TOOLS", "true")
+    monkeypatch.setenv("AGENT_WORKSPACE_ROOT", str(tmp_path))
+    sdk = FakeSDK()
+    config = _config(subagents_enabled=True, subagent_max_calls_per_run=2)
+
+    agent_runtime.build_runtime(sdk, config, {"user_id": None, "message": "hi"})
+
+    runtime = sdk.runtimes[0]
+    assert [spec.name for spec in runtime.subagents] == ["explore", "research_agent"]
+    assert runtime.subagent_options.kwargs["enabled"] is True
+    assert runtime.subagent_options.kwargs["max_calls_per_run"] == 2
+    assert runtime.subagent_options.kwargs["verification_policy"] == "spot_check"
+    assert "Subagents are available" in runtime.config.kwargs["system_prompt"]
+
+    validate = runtime.subagent_task_validator
+    assert validate(types.SimpleNamespace(scope=["src/app.py"])) is None
+    assert "outside the workspace" in validate(types.SimpleNamespace(scope=["/etc/passwd"]))
+
+
+def test_bridge_emits_subagent_usage_and_spans(monkeypatch):
+    forwarded = []
+
+    def put(kind, value=None):
+        forwarded.append((kind, value))
+
+    started = types.SimpleNamespace(
+        type="subagent_started",
+        seq=3,
+        data={
+            "subagent_id": "sub_1",
+            "subagent_type": "explore",
+            "label": "read a.py",
+            "goal": "read a.py",
+            "depth": 1,
+            "resume": False,
+            "parent_tool_call_id": "call_1",
+            "model": "child-model",
+            "tool_names": ["Read", "Grep"],
+        },
+    )
+    child = types.SimpleNamespace(
+        type="subagent_event",
+        seq=4,
+        data={
+            "subagent_id": "sub_1",
+            "phase": "tool_call",
+            "iteration": 1,
+            "tool_call_id": "child_1",
+            "name": "Read",
+            "arguments": {"file_path": "a.py"},
+        },
+    )
+    finished = types.SimpleNamespace(
+        type="subagent_finished",
+        seq=5,
+        data={
+            "subagent_id": "sub_1",
+            "subagent_type": "explore",
+            "status": "completed",
+            "turns": 2,
+            "usage": {"prompt_tokens": 30, "completion_tokens": 10, "total_tokens": 40},
+            "isolated_chars": 120,
+            "result_chars": 300,
+            "duration_ms": 1500,
+            "resumable": True,
+            "error": None,
+        },
+    )
+
+    agent_runtime._bridge_event(started, put)
+    agent_runtime._bridge_event(child, put)
+    agent_runtime._bridge_event(finished, put)
+
+    kinds = [kind for kind, _ in forwarded]
+    assert kinds == ["span_subagent_started", "span_subagent_event", "usage", "span_subagent_finished"]
+
+    usage = forwarded[2][1]
+    assert isinstance(usage, AgentUsageUpdate)
+    assert usage.source == "subagents"
+    assert usage.calls == 2
+    assert usage.unknown_calls == 0
+    assert usage.usage["total_tokens"] == 40
+
+    started_event = forwarded[0][1]
+    assert isinstance(started_event, AgentSubagentStarted)
+    assert started_event.parent_tool_call_id == "call_1"
+    assert started_event.goal_chars == len("read a.py")
+    assert started_event.tool_names == ["Read", "Grep"]
+
+    child_event = forwarded[1][1]
+    assert isinstance(child_event, AgentSubagentEvent)
+    assert child_event.phase == "tool_call"
+    assert child_event.tool_call_id == "child_1"
+    assert child_event.arguments == {"file_path": "a.py"}
+
+    finished_event = forwarded[3][1]
+    assert isinstance(finished_event, AgentSubagentFinished)
+    assert finished_event.status == "completed"
+    assert finished_event.turns == 2
+
+
+def test_bridge_emits_subagent_usage_even_without_span_capture(monkeypatch):
+    monkeypatch.setenv("AGENT_SPAN_CAPTURE", "false")
+    forwarded = []
+    finished = types.SimpleNamespace(
+        type="subagent_finished",
+        seq=5,
+        data={
+            "subagent_id": "sub_1",
+            "status": "timeout",
+            "turns": 3,
+            "usage": {},
+        },
+    )
+
+    agent_runtime._bridge_event(finished, lambda kind, value=None: forwarded.append((kind, value)))
+
+    assert [kind for kind, _ in forwarded] == ["usage"]
+    usage = forwarded[0][1]
+    assert usage.calls == 3
+    assert usage.unknown_calls == 3
+
+
+def test_bridge_skips_subagent_spans_without_span_capture(monkeypatch):
+    monkeypatch.setenv("AGENT_SPAN_CAPTURE", "false")
+    forwarded = []
+    started = types.SimpleNamespace(
+        type="subagent_started",
+        seq=1,
+        data={"subagent_id": "sub_1", "subagent_type": "explore"},
+    )
+
+    agent_runtime._bridge_event(started, lambda kind, value=None: forwarded.append((kind, value)))
+
+    assert forwarded == []

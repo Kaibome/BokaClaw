@@ -94,6 +94,7 @@ def list_traces(
     run_id: uuid.UUID | None = Query(default=None),
     span_type: str | None = Query(default=None, pattern=SPAN_TYPE_PATTERN),
     status: str | None = Query(default=None, pattern=SPAN_STATUS_PATTERN),
+    roots_only: bool = Query(default=False),
     order: str = Query(default="desc", pattern="^(asc|desc)$"),
 ):
     stmt = select(AgentRunSpan)
@@ -103,6 +104,11 @@ def list_traces(
         stmt = stmt.where(AgentRunSpan.span_type == span_type)
     if status is not None:
         stmt = stmt.where(AgentRunSpan.status == status)
+    if roots_only:
+        # Nested agent spans (for example ``subagent:<id>``) belong to a parent
+        # tool call, not to a new run. Callers that list runs ask for roots only
+        # so nested spans neither appear as separate traces nor consume the limit.
+        stmt = stmt.where(AgentRunSpan.parent_span_id.is_(None))
 
     if order == "asc":
         stmt = stmt.order_by(AgentRunSpan.started_at.asc(), AgentRunSpan.id.asc())

@@ -216,6 +216,16 @@ JSON response instead. Requests are rate limited to 30/minute per IP.
 | `AGENT_RESEARCH_MEMORY` | `true` | Save conclusions from completed web-research turns to mem0, and offer fresh similar conclusions to later turns. Set to `false` to disable both halves. |
 | `AGENT_RESEARCH_MEMORY_TTL_DAYS` | `30` | Saved conclusions older than this are not offered to the model; values below 1 are raised to 1. |
 | `AGENT_RESEARCH_MEMORY_MIN_SCORE` | `0.5` | Minimum similarity for a saved conclusion to be offered; clamped to 0–1. |
+| `AGENT_SUBAGENTS_ENABLED` | `false` | Register the `explore` and `research_agent` subagents. When off, the runtime behaves exactly as before. |
+| `AGENT_SUBAGENT_MODEL` | `AGENT_MODEL` | Model used by child agents. Empty inherits the main model. |
+| `AGENT_SUBAGENT_MAX_DEPTH` | `2` | Maximum nesting depth; child runtimes currently never register nested subagents. |
+| `AGENT_SUBAGENT_MAX_CALLS_PER_RUN` | `4` | Delegations allowed per parent run; `0` disables delegation without unregistering the tools. |
+| `AGENT_SUBAGENT_TIMEOUT_SECONDS` | `120` | Wall-clock timeout for one child run. |
+| `AGENT_SUBAGENT_MAX_TURNS` | `8` | ReAct step budget for one child run. |
+| `AGENT_SUBAGENT_MAX_RESULT_CHARS` | `8000` | Cap on the report returned to the parent context. |
+| `AGENT_SUBAGENT_TOKEN_BUDGET` | — | Total child tokens allowed per parent run; empty means no cap. |
+| `AGENT_SUBAGENT_VERIFICATION` | `spot_check` | How the parent is told to verify child claims: `none`, `spot_check`, or `strict`. |
+| `AGENT_SUBAGENT_ALLOW_ABSOLUTE_PATHS` | `false` | Allow a task's `scope` to name absolute paths outside `AGENT_WORKSPACE_ROOT`. |
 | `AGENT_CONTEXT_DEBUG` | on | Log the resolved model-view settings once per turn and each `context_compressed` decision at INFO. Diagnostics only; the event is never sent to the client. Set to `0` / `false` / `no` / `off` to silence. |
 | `AGENT_DEV_TOOLS` | `true` | Register the developer tool set. |
 | `AGENT_OFFICE_TOOLS` | `true` | Register `PptxBuild` / `PptxUpdateSlide` / `PptxAddSlide` / `PptxDeleteSlide`; skipped when python-pptx is absent. |

@@ -28,6 +28,9 @@ from app.agent.events import (
     AgentModelResponse,
     AgentRunEnded,
     AgentRunStarted,
+    AgentSubagentEvent,
+    AgentSubagentFinished,
+    AgentSubagentStarted,
     AgentToolCall,
     AgentToolResult,
 )
@@ -146,6 +149,25 @@ def _tool_span_id(tool_call_id: str) -> str:
     return f"tool:{digest}"
 
 
+# ``agent_run_spans.span_id`` is VARCHAR(128); child ids stay well below it.
+_MAX_SPAN_ID_CHARS = 120
+_SUBAGENT_SPAN_STATUS = {
+    "completed": "completed",
+    "partial": "completed",
+    "failed": "failed",
+    "timeout": "failed",
+    "cancelled": "aborted",
+}
+
+
+def _child_span_id(prefix: str, subagent_id: str, suffix: str) -> str:
+    span_id = f"{prefix}:{subagent_id}:{suffix}"
+    if len(span_id) <= _MAX_SPAN_ID_CHARS:
+        return span_id
+    digest = hashlib.sha256(span_id.encode("utf-8")).hexdigest()[:32]
+    return f"{prefix}:{subagent_id}:{digest}"
+
+
 class SpanRecorder:
     """Build and persist the span tree for one claimed run."""
 
@@ -171,6 +193,10 @@ class SpanRecorder:
         self.pending_llm: dict[int, deque[str]] = defaultdict(deque)
         self.llm_spans: dict[str, dict[str, Any]] = {}
         self.tool_spans: dict[str, dict[str, Any]] = {}
+        self.subagent_spans: dict[str, dict[str, Any]] = {}
+        self.subagent_child_spans: dict[str, dict[str, Any]] = {}
+        self.pending_subagent_llm: dict[tuple[str, int], deque[str]] = defaultdict(deque)
+        self.subagent_llm_counts: dict[str, int] = defaultdict(int)
         self._llm_fallback = 0
 
     # ------------------------------------------------------------- lifecycle
@@ -227,6 +253,14 @@ class SpanRecorder:
             for span in self.tool_spans.values():
                 if span["status"] == "running":
                     self._close_span(span, span_status, now)
+            for span in self.subagent_child_spans.values():
+                if span["status"] == "running":
+                    self._close_span(span, span_status, now)
+            for span in self.subagent_spans.values():
+                if span["status"] == "running":
+                    span["attributes"]["subagent_status"] = "interrupted"
+                    self._close_span(span, span_status, now)
+                    self._write(**span)
 
             usage = metadata.get("usage")
             if isinstance(usage, dict):
@@ -299,6 +333,12 @@ class SpanRecorder:
             self._on_memory_recall(event)
         elif isinstance(event, AgentMemorySave):
             self._on_memory_save(event)
+        elif isinstance(event, AgentSubagentStarted):
+            self._on_subagent_started(event)
+        elif isinstance(event, AgentSubagentEvent):
+            self._on_subagent_event(event)
+        elif isinstance(event, AgentSubagentFinished):
+            self._on_subagent_finished(event)
 
     def _on_run_event(self, event: Any) -> None:
         if isinstance(event, AgentRunEnded) and isinstance(event.stop_reason, str):
@@ -518,6 +558,227 @@ class SpanRecorder:
             },
             error=event.error,
         )
+
+    def _on_subagent_started(self, event: AgentSubagentStarted) -> None:
+        span_id = f"subagent:{event.subagent_id}"
+        if len(span_id) > _MAX_SPAN_ID_CHARS:
+            digest = hashlib.sha256(span_id.encode("utf-8")).hexdigest()[:32]
+            span_id = f"subagent:{digest}"
+        parent_span_id = _tool_span_id(event.parent_tool_call_id) if event.parent_tool_call_id else "agent"
+        span = {
+            "span_id": span_id,
+            "span_type": "agent",
+            "parent_span_id": parent_span_id,
+            "name": f"subagent.{event.subagent_type or 'agent'}",
+            "status": "running",
+            "iteration": None,
+            "started_at": utcnow(),
+            "ended_at": None,
+            "duration_ms": None,
+            "input": {
+                "label": _bounded(_redact(event.label), self.options.max_bytes),
+                "goal_chars": event.goal_chars,
+            },
+            "output": {},
+            "attributes": {
+                "subagent_id": event.subagent_id,
+                "subagent_type": event.subagent_type,
+                "depth": event.depth,
+                "model": event.model,
+                "tool_names": event.tool_names,
+                "goal_chars": event.goal_chars,
+                "resume": event.resume,
+                "parent_tool_call_id": event.parent_tool_call_id,
+            },
+            "error": None,
+        }
+        self.subagent_spans[event.subagent_id] = span
+        self._write(**span)
+
+    def _on_subagent_event(self, event: AgentSubagentEvent) -> None:
+        parent = self.subagent_spans.get(event.subagent_id)
+        if parent is None:
+            return
+        if event.phase == "model_request":
+            self._on_subagent_model_request(event, parent)
+        elif event.phase == "model_response":
+            self._on_subagent_model_response(event, parent)
+        elif event.phase == "tool_call":
+            self._on_subagent_tool_call(event, parent)
+        elif event.phase == "tool_result":
+            self._on_subagent_tool_result(event, parent)
+        elif event.phase == "error" and event.error:
+            parent["attributes"]["last_error"] = _bounded(_redact(event.error), self.options.max_bytes)
+
+    def _on_subagent_model_request(self, event: AgentSubagentEvent, parent: dict[str, Any]) -> None:
+        self.subagent_llm_counts[event.subagent_id] += 1
+        span_id = _child_span_id("sublm", event.subagent_id, str(self.subagent_llm_counts[event.subagent_id]))
+        span = {
+            "span_id": span_id,
+            "span_type": "llm",
+            "parent_span_id": parent["span_id"],
+            "name": f"llm.turn.{event.iteration}",
+            "status": "running",
+            "iteration": event.iteration,
+            "started_at": utcnow(),
+            "ended_at": None,
+            "duration_ms": None,
+            "input": {
+                "summary": {
+                    "message_count": event.message_count,
+                    "tool_count": event.tool_count,
+                }
+            },
+            "output": {},
+            "attributes": {
+                "model": parent["attributes"].get("model"),
+                "message_count": event.message_count,
+                "tool_count": event.tool_count,
+            },
+            "error": None,
+        }
+        self.subagent_child_spans[span_id] = span
+        self.pending_subagent_llm[(event.subagent_id, event.iteration)].append(span_id)
+        self._write(**span)
+
+    def _on_subagent_model_response(self, event: AgentSubagentEvent, parent: dict[str, Any]) -> None:
+        pending = self.pending_subagent_llm.get((event.subagent_id, event.iteration))
+        span_id = pending.popleft() if pending else ""
+        span = self.subagent_child_spans.get(span_id) if span_id else None
+        if span is None:
+            # A response without a matching request: keep the call visible.
+            self.subagent_llm_counts[event.subagent_id] += 1
+            span = {
+                "span_id": _child_span_id("sublm", event.subagent_id, str(self.subagent_llm_counts[event.subagent_id])),
+                "span_type": "llm",
+                "parent_span_id": parent["span_id"],
+                "name": f"llm.turn.{event.iteration}",
+                "status": "running",
+                "iteration": event.iteration,
+                "started_at": utcnow(),
+                "ended_at": None,
+                "duration_ms": None,
+                "input": {},
+                "output": {},
+                "attributes": {},
+                "error": None,
+            }
+            self.subagent_child_spans[span["span_id"]] = span
+        span["output"] = {
+            "content_chars": event.content_chars,
+            "tool_calls": _bounded(_redact(event.tool_calls), self.options.max_bytes),
+            "finish_reason": event.finish_reason,
+        }
+        span["attributes"]["finish_reason"] = event.finish_reason
+        if event.usage:
+            usage = _bounded(_redact(dict(event.usage)), self.options.max_bytes)
+            span["attributes"]["usage"] = usage
+            span["output"]["usage"] = usage
+        self._close_span(span, "completed", utcnow())
+        self._write(**span)
+
+    def _on_subagent_tool_call(self, event: AgentSubagentEvent, parent: dict[str, Any]) -> None:
+        if not event.tool_call_id:
+            return
+        span_id = _child_span_id("subtool", event.subagent_id, event.tool_call_id)
+        if self.options.tool_content:
+            input_payload = {"arguments": _bounded(_redact(event.arguments or {}), self.options.max_bytes)}
+        else:
+            input_payload = {"arguments_hash": hashlib.sha256(repr(event.arguments).encode()).hexdigest()[:16]}
+        span = {
+            "span_id": span_id,
+            "span_type": "tool",
+            "parent_span_id": parent["span_id"],
+            "name": event.name or "tool",
+            "status": "running",
+            "iteration": event.iteration,
+            "started_at": utcnow(),
+            "ended_at": None,
+            "duration_ms": None,
+            "input": input_payload,
+            "output": {},
+            "attributes": {"tool_call_id": event.tool_call_id},
+            "error": None,
+        }
+        existing = self.subagent_child_spans.get(span_id)
+        if existing is not None:
+            span["started_at"] = existing["started_at"]
+        self.subagent_child_spans[span_id] = span
+        self._write(**span)
+
+    def _on_subagent_tool_result(self, event: AgentSubagentEvent, parent: dict[str, Any]) -> None:
+        if not event.tool_call_id:
+            return
+        span_id = _child_span_id("subtool", event.subagent_id, event.tool_call_id)
+        span = self.subagent_child_spans.get(span_id)
+        if span is None:
+            span = {
+                "span_id": span_id,
+                "span_type": "tool",
+                "parent_span_id": parent["span_id"],
+                "name": event.name or "tool",
+                "status": "running",
+                "iteration": event.iteration,
+                "started_at": utcnow(),
+                "ended_at": None,
+                "duration_ms": None,
+                "input": {},
+                "output": {},
+                "attributes": {"tool_call_id": event.tool_call_id},
+                "error": None,
+            }
+            self.subagent_child_spans[span_id] = span
+        if self.options.tool_content:
+            span["output"] = {
+                "content": _bounded(_redact(event.content or ""), self.options.max_bytes),
+                "is_error": event.is_error,
+            }
+        else:
+            span["output"] = {
+                "content_chars": event.original_chars or len(event.content or ""),
+                "is_error": event.is_error,
+            }
+        status = event.status if event.status in {"completed", "failed", "aborted"} else None
+        if status is None:
+            status = "failed" if event.is_error else "completed"
+        if event.is_error:
+            span["error"] = _bounded(event.content or "Subagent tool failed", self.options.max_bytes)
+            if not isinstance(span["error"], str):
+                span["error"] = json.dumps(span["error"], ensure_ascii=False, default=str)
+        self._close_span(span, status, utcnow())
+        self._write(**span)
+
+    def _on_subagent_finished(self, event: AgentSubagentFinished) -> None:
+        span = self.subagent_spans.pop(event.subagent_id, None)
+        if span is None:
+            return
+        status = _SUBAGENT_SPAN_STATUS.get(event.status, "failed")
+        span["attributes"].update(
+            {
+                "subagent_status": event.status,
+                "turns": event.turns,
+                "isolated_chars": event.isolated_chars,
+                "result_chars": event.result_chars,
+                "resumable": event.resumable,
+            }
+        )
+        if event.usage:
+            span["attributes"]["usage"] = _bounded(_redact(dict(event.usage)), self.options.max_bytes)
+        span["output"] = {
+            "status": event.status,
+            "turns": event.turns,
+            "result_chars": event.result_chars,
+            "isolated_chars": event.isolated_chars,
+        }
+        span["error"] = event.error
+        if event.duration_ms is not None:
+            span["duration_ms"] = event.duration_ms
+        now = utcnow()
+        for child in self.subagent_child_spans.values():
+            if child.get("parent_span_id") == span["span_id"] and child["status"] == "running":
+                self._close_span(child, status, now)
+        self._close_span(span, status, now)
+        self._write(**span)
 
     def _llm_span_id(self, seq: int | None, iteration: int) -> str:
         if seq is not None:
