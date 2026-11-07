@@ -5,9 +5,11 @@ from __future__ import annotations
 import inspect
 import json
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor, wait
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Any, Callable, get_type_hints
+from typing import Any, Callable, Literal, get_type_hints
 
 from pydantic import BaseModel, ValidationError, create_model
 
@@ -163,6 +165,8 @@ class Tool:
     func: Callable[..., Any]
     is_async: bool = False
     args_model: type[BaseModel] | None = field(default=None, repr=False)
+    effect: Literal["read", "write", "external"] = "write"
+    concurrency_safe: bool = False
 
     @classmethod
     def from_callable(
@@ -172,6 +176,8 @@ class Tool:
         name: str | None = None,
         description: str | None = None,
         localns: dict[str, Any] | None = None,
+        effect: Literal["read", "write", "external"] = "write",
+        concurrency_safe: bool | None = None,
     ) -> "Tool":
         if not callable(func):
             raise ToolSchemaError("Tool must be callable")
@@ -196,6 +202,9 @@ class Tool:
 
         call_method = inspect.getattr_static(type(func), "__call__", None)
         is_async = inspect.iscoroutinefunction(func) or inspect.iscoroutinefunction(call_method)
+        # Read-only tools are safe to run together by default. Anything that
+        # writes or has unknown side effects must opt in explicitly.
+        safe = (effect == "read") if concurrency_safe is None else concurrency_safe
 
         return cls(
             name=tool_name,
@@ -204,6 +213,8 @@ class Tool:
             func=func,
             is_async=is_async,
             args_model=args_model,
+            effect=effect,
+            concurrency_safe=safe,
         )
 
     def to_openai_spec(self) -> dict[str, Any]:
@@ -321,6 +332,157 @@ class ToolRegistry:
                 is_error=True,
             )
 
+    def plan_batches(self, calls: list[ToolCall]) -> list[list[int]]:
+        """Split ``calls`` into execution batches, preserving declaration order.
+
+        Consecutive concurrency-safe calls share a batch; every other call is a
+        single-call batch and a barrier.
+        """
+
+        batches: list[list[int]] = []
+        index = 0
+        while index < len(calls):
+            batch = self._safe_batch(calls, index)
+            batches.append(batch)
+            index = batch[-1] + 1
+        return batches
+
+    def invoke_batch(
+        self,
+        calls: list[ToolCall],
+        batch: list[int],
+        *,
+        error_mode: str = "return",
+        max_workers: int = 1,
+        cancel_event: threading.Event | None = None,
+    ) -> list[ToolResult]:
+        """Execute one planned batch and return results in batch order.
+
+        Calls that did not produce a result (cancelled before or during the
+        batch) are returned as ``aborted`` results, so the caller can always
+        pair every declared call with a tool message.
+        """
+
+        if cancel_event is not None and cancel_event.is_set():
+            return [self._aborted(calls[index], "run aborted: cancelled") for index in batch]
+
+        parallel_ok = error_mode == "return" and max_workers > 1 and len(batch) > 1
+        results: dict[int, ToolResult] = {}
+        if parallel_ok:
+            self._invoke_parallel(calls, batch, results, error_mode, max_workers, cancel_event)
+        else:
+            for index in batch:
+                results[index] = self.invoke(calls[index], error_mode=error_mode)
+
+        return [
+            results[index] if index in results else self._aborted(calls[index], "run aborted: cancelled")
+            for index in batch
+        ]
+
+    def invoke_many(
+        self,
+        calls: list[ToolCall],
+        *,
+        error_mode: str = "return",
+        max_workers: int = 1,
+        cancel_event: threading.Event | None = None,
+    ) -> list[ToolResult]:
+        """Invoke every call, parallelising each planned batch.
+
+        This is the batch-level convenience wrapper; ``AgentRuntime`` walks
+        ``plan_batches`` itself so it can replay events between batches. The
+        returned list always matches ``calls`` order, regardless of completion
+        order. Cancellation after a batch stops later batches and fills their
+        slots with aborted results.
+        """
+
+        if not calls:
+            return []
+        results: list[ToolResult | None] = [None] * len(calls)
+        for batch in self.plan_batches(calls):
+            if cancel_event is not None and cancel_event.is_set():
+                break
+            batch_results = self.invoke_batch(
+                calls,
+                batch,
+                error_mode=error_mode,
+                max_workers=max_workers,
+                cancel_event=cancel_event,
+            )
+            for index, result in zip(batch, batch_results, strict=True):
+                results[index] = result
+
+        final: list[ToolResult] = []
+        for position, result in enumerate(results):
+            if result is None:
+                result = self._aborted(calls[position], "run aborted: cancelled")
+            final.append(result)
+        return final
+
+    def _safe_batch(self, calls: list[ToolCall], start: int) -> list[int]:
+        """Return the contiguous run of concurrency-safe calls starting at ``start``."""
+
+        tool = self._tools.get(calls[start].name)
+        if tool is None or not tool.concurrency_safe or calls[start].arguments_error:
+            return [start]
+
+        batch = [start]
+        index = start + 1
+        while index < len(calls):
+            call = calls[index]
+            candidate = self._tools.get(call.name)
+            if candidate is None or not candidate.concurrency_safe or call.arguments_error:
+                break
+            batch.append(index)
+            index += 1
+        return batch
+
+    def _invoke_parallel(
+        self,
+        calls: list[ToolCall],
+        batch: list[int],
+        results: dict[int, ToolResult],
+        error_mode: str,
+        max_workers: int,
+        cancel_event: threading.Event | None,
+    ) -> None:
+        executor = ThreadPoolExecutor(
+            max_workers=min(max_workers, len(batch)),
+            thread_name_prefix="bokaclaw-tool",
+        )
+        futures = {executor.submit(self.invoke, calls[position], error_mode=error_mode): position for position in batch}
+        pending = set(futures)
+        cancelled = False
+        try:
+            while pending:
+                if cancel_event is not None and cancel_event.is_set():
+                    cancelled = True
+                    break
+                done, pending = wait(pending, timeout=0.2)
+                for future in done:
+                    results[futures[future]] = future.result()
+            if cancelled:
+                # Keep results that finished before the cancellation and cancel
+                # the rest. Running tools cannot be interrupted; their results
+                # are discarded and their slots become aborted results.
+                done, pending = wait(pending, timeout=0)
+                for future in done:
+                    results[futures[future]] = future.result()
+                for future in pending:
+                    future.cancel()
+        finally:
+            executor.shutdown(wait=not cancelled, cancel_futures=True)
+
+    @staticmethod
+    def _aborted(call: ToolCall, reason: str) -> ToolResult:
+        return ToolResult(
+            tool_call_id=call.id,
+            name=call.name,
+            content=json.dumps({"error": reason}, ensure_ascii=False),
+            is_error=True,
+            metadata={"aborted": True},
+        )
+
     @staticmethod
     def _error(
         call: ToolCall,
@@ -343,10 +505,14 @@ def tool(
     *,
     name: str | None = None,
     description: str | None = None,
+    effect: Literal["read", "write", "external"] = "write",
+    concurrency_safe: bool | None = None,
 ) -> Tool | Callable[[Callable[..., Any]], Tool]:
     """Decorate a function as a :class:`Tool`.
 
     Usable as ``@tool`` or ``@tool(name="...", description="...")``.
+    Read-only tools (``effect="read"``) are concurrency-safe by default; pass
+    ``concurrency_safe=...`` to override.
     """
 
     def decorator(callable_obj: Callable[..., Any]) -> Tool:
@@ -355,6 +521,8 @@ def tool(
             name=name,
             description=description,
             localns=_caller_locals(2),
+            effect=effect,
+            concurrency_safe=concurrency_safe,
         )
 
     if func is None:

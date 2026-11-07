@@ -170,6 +170,38 @@ async def fetch_price(sku: str) -> float:
 
 Use `await runtime.arun(...)` when calling from an async framework. The synchronous `run()` also handles async tools when it is not already inside an event loop.
 
+### Concurrent tool calls
+
+Multiple tool calls in one model response run in parallel only when their tools
+declare `concurrency_safe=True`. Consecutive safe calls form one batch; every
+other call is a single-call batch and a barrier, so writes and shell commands
+keep their declared order.
+
+```python
+@tool(effect="read")
+def lookup_docs(query: str) -> str:
+    """Read-only lookup; safe to run beside other reads."""
+    ...
+
+@tool
+def write_file(path: str, content: str) -> str:
+    """Writes by default: never batched with anything else."""
+    ...
+
+config = AgentConfig(tool_concurrency=4)  # default 1 (disabled)
+```
+
+`effect` is `"read"`, `"write"` (default), or `"external"`. `effect="read"`
+implies `concurrency_safe=True`; pass `concurrency_safe=False` to opt out, or
+`concurrency_safe=True` for a read-only external call. If any tool in a response
+is unsafe, the calls before and after it run in separate batches. With
+`tool_error_mode="raise"` concurrency is disabled so an exception still aborts
+the run at the same point.
+
+`ToolRegistry.plan_batches(...)`, `invoke_batch(...)`, and `invoke_many(...)`
+expose the same batching to callers that drive their own loop; results always
+come back in declaration order.
+
 ## Subagents
 
 A subagent is a second `AgentRuntime` exposed to the parent as an ordinary tool.
@@ -368,6 +400,7 @@ off by default in the SDK:
 | `context_compression` | `"summary"` | `"summary"` folds old messages with one model call; `"truncate"` only drops them. |
 | `compression_model` | `None` | Separate `ModelConfig` used only for summaries. Defaults to the agent's own provider; set it to a cheaper model or endpoint. |
 | `tool_result_max_chars` | `None` (off) | Maximum characters of one tool result in the model view. Minimum 256. |
+| `tool_concurrency` | `1` (off) | Maximum parallel tool calls. Only consecutive `concurrency_safe` tools are batched; unsafe calls stay serial and act as barriers. Range 1–8. |
 | `fact_ledger` | `False` | Keep a compact, deduplicated ledger of this run's tool calls and findings in the model view, appended after compression. |
 | `fact_ledger_max_chars` | `2500` | Maximum characters of the fact ledger. Minimum 256. |
 | `step_budget_notice` | `False` | Append `Step X of N` (with a wrap-up directive near the end) to each request view. |

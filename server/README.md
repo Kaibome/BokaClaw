@@ -207,6 +207,7 @@ JSON response instead. Requests are rate limited to 30/minute per IP.
 | `AGENT_COMPRESSION_API_KEY` | `AGENT_API_KEY` | API key for the compression endpoint (falls back to the agent's key). |
 | `AGENT_COMPRESSION_BASE_URL` | `AGENT_BASE_URL` | OpenAI-compatible base URL for the compression endpoint (falls back to the agent's URL). |
 | `AGENT_TOOL_RESULT_MAX_CHARS` | `16000` | Per-tool-result cap in the model view; full content is still stored. `0` / `off` disables it. |
+| `AGENT_TOOL_CONCURRENCY` | `1` | Run consecutive read-only tool calls in parallel (1 disables). Writes, shell commands, and monitors always stay serial and act as batch barriers. Range 1–8. |
 | `AGENT_FACT_LEDGER` | `true` | Keep a run-scoped ledger of tool calls and findings in the model view so early facts survive compression. Set to `false` to disable. |
 | `AGENT_FACT_LEDGER_MAX_CHARS` | `2500` | Ledger cap; values below 256 are raised to 256. |
 | `AGENT_STEP_BUDGET_NOTICE` | `true` | Append `Step X of N` and a wrap-up directive near the step limit so the agent stops researching. Set to `false` to disable. |

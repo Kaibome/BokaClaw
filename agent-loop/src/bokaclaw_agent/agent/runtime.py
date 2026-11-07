@@ -141,6 +141,8 @@ class AgentRuntime:
         self.on_event = on_event
         self.tools = ToolRegistry(tools)
         self._event_seq = 0
+        # Concurrent tool batches may emit events from worker threads.
+        self._event_lock = threading.RLock()
         self._active_session_id = ""
         self._active_iteration = 0
         self._active_cancel_event: threading.Event | None = None
@@ -448,67 +450,92 @@ class AgentRuntime:
                     stop_reason = _map_stop_reason(response.finish_reason)
                     break
 
-                for index, call in enumerate(response.tool_calls):
-                    pending_calls = response.tool_calls[index:]
-                    # Cooperative cancellation: before each tool call.
-                    check_cancelled(iteration)
-                    self._emit(
-                        EventType.TOOL_CALL,
-                        session_id,
-                        iteration,
-                        {
-                            "tool_call_id": call.id,
-                            "name": call.name,
-                            "arguments": call.arguments,
-                            "raw_arguments": call.raw_arguments,
-                            "arguments_error": call.arguments_error,
-                            "status": "running",
-                        },
+                calls = list(response.tool_calls)
+                # With concurrency disabled (or when errors must raise at the
+                # exact call), keep the historical one-call-at-a-time event
+                # interleaving; batching would only change event order.
+                if self.config.tool_concurrency <= 1 or self.config.tool_error_mode != "return":
+                    batches = [[index] for index in range(len(calls))]
+                else:
+                    batches = self.tools.plan_batches(calls)
+                for batch in batches:
+                    # Announce this batch before it runs, so the dashboard can
+                    # show its calls as running even when results arrive out of
+                    # order. Later batches are not announced until they start.
+                    for index in batch:
+                        call = calls[index]
+                        self._emit(
+                            EventType.TOOL_CALL,
+                            session_id,
+                            iteration,
+                            {
+                                "tool_call_id": call.id,
+                                "name": call.name,
+                                "arguments": call.arguments,
+                                "raw_arguments": call.raw_arguments,
+                                "arguments_error": call.arguments_error,
+                                "status": "running",
+                            },
+                        )
+                    batch_results = self.tools.invoke_batch(
+                        calls,
+                        batch,
+                        error_mode=self.config.tool_error_mode,
+                        max_workers=self.config.tool_concurrency,
+                        cancel_event=cancel_event,
                     )
-                    result = self.tools.invoke(call, error_mode=self.config.tool_error_mode)
-                    tool_results.append(result)
-                    if result.usage:
-                        # A tool may run a child agent; its token usage belongs to
-                        # the parent run's total as well as to the tool result.
-                        self._merge_usage(usage, result.usage)
-                    if ledger is not None:
-                        ledger.record(call, result)
-                    if guard is not None:
-                        action = guard.record(result)
-                        if action == "stop":
-                            guard_stop = True
-                        elif action == "nudge":
-                            guard_notice = _NO_PROGRESS_NUDGE
-                        elif guard.last_was_progress and guard_notice is not None:
-                            # New evidence arrived, so the nudge has served its
-                            # purpose; a later stall gets a fresh one.
-                            guard_notice = None
-                    # Events and the model view carry the capped copy; the
-                    # persisted message and RunResult keep the full result.
-                    view_content, truncated = truncate_text(
-                        result.content,
-                        self.config.tool_result_max_chars,
-                    )
-                    event_data = {
-                        "tool_call_id": result.tool_call_id,
-                        "name": result.name,
-                        "content": view_content,
-                        "truncated": truncated,
-                        "original_chars": len(result.content),
-                        "is_error": result.is_error,
-                        "status": "failed" if result.is_error else "completed",
-                    }
-                    if result.usage:
-                        event_data["usage"] = dict(result.usage)
-                    if result.metadata:
-                        event_data["metadata"] = result.metadata
-                    self._emit(EventType.TOOL_RESULT, session_id, iteration, event_data)
-                    message = tool_message(result)
-                    context.append(message)
-                    new_messages.append(message)
-                    pending_calls = response.tool_calls[index + 1 :]
-                    # Cooperative cancellation: after each tool call, before
-                    # the next call or the next ReAct iteration.
+                    # Execution may be parallel, but every run-scoped side effect
+                    # is replayed in declaration order: protocol pairing, the
+                    # ledger, the progress guard, and usage keep their ordering.
+                    for index, result in zip(batch, batch_results, strict=True):
+                        call = calls[index]
+                        tool_results.append(result)
+                        if result.usage:
+                            # A tool may run a child agent; its token usage belongs
+                            # to the parent run's total as well as to the tool result.
+                            self._merge_usage(usage, result.usage)
+                        if ledger is not None:
+                            ledger.record(call, result)
+                        if guard is not None:
+                            action = guard.record(result)
+                            if action == "stop":
+                                guard_stop = True
+                            elif action == "nudge":
+                                guard_notice = _NO_PROGRESS_NUDGE
+                            elif guard.last_was_progress and guard_notice is not None:
+                                # New evidence arrived, so the nudge has served its
+                                # purpose; a later stall gets a fresh one.
+                                guard_notice = None
+                        # Events and the model view carry the capped copy; the
+                        # persisted message and RunResult keep the full result.
+                        view_content, truncated = truncate_text(
+                            result.content,
+                            self.config.tool_result_max_chars,
+                        )
+                        aborted = bool(result.metadata.get("aborted")) if result.metadata else False
+                        event_data = {
+                            "tool_call_id": result.tool_call_id,
+                            "name": result.name,
+                            "content": view_content,
+                            "truncated": truncated,
+                            "original_chars": len(result.content),
+                            "is_error": result.is_error,
+                            "status": "aborted" if aborted else ("failed" if result.is_error else "completed"),
+                        }
+                        if result.usage:
+                            event_data["usage"] = dict(result.usage)
+                        if result.metadata:
+                            event_data["metadata"] = result.metadata
+                        self._emit(EventType.TOOL_RESULT, session_id, iteration, event_data)
+                        message = tool_message(result)
+                        context.append(message)
+                        new_messages.append(message)
+                    # Calls after this batch have not run yet. If the batch
+                    # observed cancellation, _cancel_run aborts them and the
+                    # assistant/tool pairing stays complete.
+                    pending_calls = calls[batch[-1] + 1 :]
+                    # Cooperative cancellation: after each batch, before the
+                    # next batch or the next ReAct iteration.
                     check_cancelled(iteration)
                 pending_calls = []
                 if guard_stop:
@@ -1169,18 +1196,20 @@ class AgentRuntime:
         data: dict[str, Any],
     ) -> None:
         # Sequence numbers are allocated for every event, even without a
-        # callback, and restart at 1 for each run.
-        self._event_seq += 1
-        if self.on_event is None:
-            return
-        event = AgentEvent(
-            type=event_type,
-            session_id=session_id,
-            iteration=iteration,
-            seq=self._event_seq,
-            data=data,
-        )
-        try:
-            resolve_awaitable(self.on_event(event))
-        except Exception:  # noqa: BLE001 - observer failures must not stop a run
-            logger.exception("Agent event callback failed for %s", event_type.value)
+        # callback, and restart at 1 for each run. Tool workers may emit
+        # concurrently, so allocation and delivery share one lock.
+        with self._event_lock:
+            self._event_seq += 1
+            if self.on_event is None:
+                return
+            event = AgentEvent(
+                type=event_type,
+                session_id=session_id,
+                iteration=iteration,
+                seq=self._event_seq,
+                data=data,
+            )
+            try:
+                resolve_awaitable(self.on_event(event))
+            except Exception:  # noqa: BLE001 - observer failures must not stop a run
+                logger.exception("Agent event callback failed for %s", event_type.value)

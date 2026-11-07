@@ -709,6 +709,42 @@
 
 ---
 
+## P-23 工具调用缺少工程化重试、熔断与幂等
+
+- **状态**：未解决
+- **发现时间**：2026-11-07
+- **解决时间**：—
+- **场景**：梳理 `bokaclaw-agent` 工具失败链路，确认工具失败后的重试、熔断与幂等保证。
+- **证据**：
+  - `ToolRegistry.invoke` 只把异常转成 `ToolResult(is_error=True)`，没有任何重试逻辑（`agent-loop/src/bokaclaw_agent/tools/registry.py:293-322`）；server 使用 `tool_error_mode="return"`，run 不会因工具失败中断；
+  - 全仓库 `agent-loop/src/bokaclaw_agent/tools/` 与 `agent/` 下没有 `max_attempts` / backoff / 错误分类；
+  - 没有 per-tool 熔断器，只有 run 级的 `ProgressGuard`（连续 5 次无新证据即停）、`max_iterations`、`max_seconds`；
+  - `tool_call_id` 只用于消息配对与 trace 归并，不是幂等键；文件工具直接 `path.write_text(...)`（`server/app/agent/dev_tools.py:897/927/992`），非原子写；
+  - executor `/exec` 只带 Bearer token，没有 `Idempotency-Key`（`server/app/agent/executor.py:62-74`）；
+  - `client_run_id` 是普通列，没有唯一约束，也没有按它复用已有 run 的查询（`server/app/models.py:160`）。
+- **根因**：
+  1. 设计上把“失败后是否重试”交给模型自愈，框架只负责 run 级封顶；
+  2. 错误结果不参与 `ProgressGuard` 的证据计算（`is_error` → 无证据），所以连续失败最终表现为 `no_progress`，而不是按工具熔断；
+  3. 工具协议里的 `tool_call_id` 被当作消息配对 id，而不是可复用的幂等键。
+- **待办**：错误分类 + 有界重试（退避/抖动，只对幂等工具开启）+ `/exec` 幂等键 + per-tool 失败计数与半开试探 + `client_run_id` 唯一索引。详见 `docs/agent-loop/tool-execution.md` §8.4。
+- **可复用结论**：把重试交给模型等于放弃可控性；重试、熔断、幂等是三个独立机制，缺少任一环都会在长工具链上放大失败成本。
+
+---
+
+## P-24 ToolTrace 64 KB 预算按时间正序消耗，最新工具结果先被清空
+
+- **状态**：未解决
+- **发现时间**：2026-11-07
+- **解决时间**：—
+- **场景**：分析单 run 工具输出超过 `AGENT_TOOL_TRACE_MAX_TOTAL_BYTES`（默认 65,536）时，下一轮历史会看到什么。
+- **现象**：`ToolTrace.snapshot()` 从最早条目开始扣预算；某条放不下时把该条内容清空并把剩余预算置零，后续所有条目的 `content` 都变成空串。结果是**越新的工具结果越先被丢掉**，越早的反而保留完整内容。
+- **证据**：`server/app/agent/trace.py:199-218`；下一轮 `_render_history_message` 会把这些空内容渲染成 `{"status": ..., "truncated": true}` 占位（`server/app/agent/store.py:197-204`、`207-271`）。
+- **根因**：预算分配按 `_order` 的时间正序进行，没有考虑“最近结果通常最相关”；超出预算后的处理是“清零并停发”，不是“按优先级淘汰”。
+- **待办**：改为逆序分配（保新弃旧），或按状态/工具类型分层保留；至少保证最近 N 条有内容。
+- **可复用结论**：任何“总量封顶”的裁剪逻辑都要先确定保新还是保旧；正序扣预算在时间序列上等价于保旧弃新，通常与预期相反。
+
+---
+
 ## 变更记录
 
 | 日期 | 变更 |
@@ -746,3 +782,5 @@
 | 2026-11-06 | 追加 P-20：子 Agent server P1 接入——新增 `server/app/agent/subagents.py`（spec/prompt/scope 校验）、三种 `AgentSubagent*` 事件与嵌套 span（`tool:<id>` → `subagent:<id>` → `sublm`/`subtool`）、`subagents` usage 分桶（span 关闭时仍上报）以及 `AGENT_SUBAGENT_*` 配置；SDK 侧补 `CURRENT_TOOL_CALL_ID` 与 `subagent_task_validator`，零 DB 迁移；agent-loop 181 passed / 1 skipped，server agent 相关 272 passed / 1 skipped，ruff 通过 |
 | 2026-11-06 | 追加 P-21：子 Agent Dashboard P1——新增 `subagent-trace.tsx` 按信封形状渲染 REPORT/FACTS/INFERENCES/UNKNOWNS/SOURCES 与 `turns · isolated_chars · tokens`，`message-bubble` 的 usage tooltip 增加来源名称与 `Subagents` 分项；同时发现并修复 `/traces?span_type=agent` 把嵌套子 Agent span 当成独立 run 的问题，新增 `roots_only` 参数；`tsc`、`next build`、`test_traces_router.py` 10 passed、ruff 通过 |
 | 2026-11-06 | 追加 P-22：Trace 页多级下钻——打开 Child spans 时一次拉取整个 run 的 span，Dialog 改为 `childStack` 路径栈驱动，每层渲染当前 span 详情及其子 span，支持 `tool → subagent → sublms` 任意深度；Back 出栈并命中详情缓存，`SpanList` 复用行样式；`tsc`、`next build`、Prettier 通过。真实 run `cb78b5b9` 验证四级路径与逐级 Back；过程中把子列表从 JSON 之后移到详情元信息下方。本机 `server/.env` 已置 `AGENT_SUBAGENTS_ENABLED=true`，workspace 新增 `subagent-demo/` 8 个演示文件 |
+| 2026-11-07 | 新增 `docs/agent-loop/tool-execution.md`，梳理工具注册/下发、参数校验与权限边界、消息协议顺序、并发改造约束、结果截断与跨轮持久化、压缩交互、失败处理（重试/熔断/幂等）与工具检索/按需加载；同时追加 P-23（缺少工程化重试/熔断/幂等）与 P-24（ToolTrace 预算方向导致最新结果先丢） |
+| 2026-11-07 | 实现工具并发（P0 + server 接入）：`Tool.effect` / `concurrency_safe`、`ToolRegistry.plan_batches` / `invoke_batch` / `invoke_many`、`AgentConfig.tool_concurrency`；runtime 改为按批执行、按批次顺序回放事件与 run 级状态，保留取消与协议配对；server 新增 `AGENT_TOOL_CONCURRENCY`（默认 1），Read/Glob/Grep/WebFetch/WebSearch 标记为并发安全，写工具、shell、Monitor、子 Agent 保持串行；新增 13 个测试，agent-loop 194 passed / 1 skipped，ruff 通过 |

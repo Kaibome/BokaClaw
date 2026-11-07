@@ -67,6 +67,16 @@ class AgentConfig(BaseModel):
             "persisted and returned in RunResult.tool_results. Disabled when None."
         ),
     )
+    tool_concurrency: int = Field(
+        default=1,
+        ge=1,
+        le=8,
+        description=(
+            "Maximum number of tool calls executed in parallel. Only consecutive calls whose "
+            "tools declare concurrency_safe=True are batched; unsafe calls stay serial and act "
+            "as batch barriers. 1 disables concurrency."
+        ),
+    )
     fact_ledger: bool = Field(
         default=False,
         description=(

@@ -1169,15 +1169,17 @@ def build_dev_tools(sdk, config: Optional[DevToolConfig] = None):
         """
         return execute_monitor(cfg, action, command, monitor_id, wait_seconds, pattern)
 
+    # Read-only tools may run in the same batch. Writes, shell, and monitors
+    # stay serial (they are batch barriers in the SDK).
     tools = [
-        sdk.tool(Read, name="Read"),
+        sdk.tool(Read, name="Read", effect="read"),
         sdk.tool(Write, name="Write"),
         sdk.tool(Edit, name="Edit"),
         sdk.tool(NotebookEdit, name="NotebookEdit"),
-        sdk.tool(Glob, name="Glob"),
-        sdk.tool(Grep, name="Grep"),
-        sdk.tool(WebFetch, name="WebFetch"),
-        sdk.tool(WebSearch, name="WebSearch"),
+        sdk.tool(Glob, name="Glob", effect="read"),
+        sdk.tool(Grep, name="Grep", effect="read"),
+        sdk.tool(WebFetch, name="WebFetch", effect="external", concurrency_safe=True),
+        sdk.tool(WebSearch, name="WebSearch", effect="external", concurrency_safe=True),
     ]
 
     if cfg.office_tools:

@@ -164,6 +164,7 @@ class LocalAgentConfig:
     context_keep_recent_tokens: Optional[int] = None
     context_compression: str = "summary"
     tool_result_max_chars: Optional[int] = None
+    tool_concurrency: int = 1
     fact_ledger: bool = True
     fact_ledger_max_chars: int = 2_500
     step_budget_notice: bool = True
@@ -287,6 +288,7 @@ def load_local_config() -> Optional[LocalAgentConfig]:
         context_keep_recent_tokens=context_keep_recent_tokens,
         context_compression=_env_compression_mode("AGENT_CONTEXT_COMPRESSION"),
         tool_result_max_chars=_env_budget("AGENT_TOOL_RESULT_MAX_CHARS", 16_000),
+        tool_concurrency=max(1, min(8, _env_int("AGENT_TOOL_CONCURRENCY", 1))),
         fact_ledger=_env_flag("AGENT_FACT_LEDGER", True),
         fact_ledger_max_chars=max(256, _env_int("AGENT_FACT_LEDGER_MAX_CHARS", 2_500)),
         step_budget_notice=_env_flag("AGENT_STEP_BUDGET_NOTICE", True),
@@ -454,7 +456,11 @@ def _memory_tools(sdk, user_id: Optional[str]):
         )
         return {"status": "saved"}
 
-    return [sdk.tool(search_memories), sdk.tool(save_memory)]
+    return [
+        sdk.tool(search_memories, effect="read"),
+        # save_memory writes to mem0 and can duplicate entries; keep it serial.
+        sdk.tool(save_memory),
+    ]
 
 
 _TOOL_TERMINAL_STATUSES = {"completed", "failed", "aborted"}
@@ -875,6 +881,7 @@ def build_runtime(
         context_keep_recent_tokens=config.context_keep_recent_tokens,
         context_compression=config.context_compression,
         tool_result_max_chars=config.tool_result_max_chars,
+        tool_concurrency=config.tool_concurrency,
         fact_ledger=config.fact_ledger,
         fact_ledger_max_chars=config.fact_ledger_max_chars,
         step_budget_notice=config.step_budget_notice,
@@ -885,7 +892,7 @@ def build_runtime(
     _context_debug(
         "agent context config: model=%s compression_model=%s max_iterations=%s context_max_tokens=%s "
         "context_keep_recent_tokens=%s context_compression=%s tool_result_max_chars=%s "
-        "fact_ledger=%s fact_ledger_max_chars=%s step_budget_notice=%s "
+        "tool_concurrency=%s fact_ledger=%s fact_ledger_max_chars=%s step_budget_notice=%s "
         "progress_guard=%s progress_nudge_after=%s progress_stop_after=%s",
         config.model,
         config.compression_model or config.model,
@@ -894,6 +901,7 @@ def build_runtime(
         config.context_keep_recent_tokens,
         config.context_compression,
         config.tool_result_max_chars,
+        config.tool_concurrency,
         config.fact_ledger,
         config.fact_ledger_max_chars,
         config.step_budget_notice,
