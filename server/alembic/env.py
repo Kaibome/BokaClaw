@@ -7,6 +7,7 @@ from app.core.db import Base, _build_database_url
 
 # Import models so Base.metadata picks up all tables
 from app import models  # noqa: F401
+from app.memory import models as memory_models  # noqa: F401
 
 config = context.config
 

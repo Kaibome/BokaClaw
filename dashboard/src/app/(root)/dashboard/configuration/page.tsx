@@ -13,7 +13,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { toast } from "@/components/ui/use-toast";
-import { UpgradeBanner } from "@/components/self-hosted/upgrade-banner";
 import { getErrorMessage } from "@/lib/error-message";
 import { api } from "@/utils/api";
 import { MEMORY_ENDPOINTS } from "@/utils/api-endpoints";
@@ -228,7 +227,7 @@ export default function ConfigurationPage() {
       <p className="text-xs text-onSurface-default-tertiary">
         {t("configuration.needAnotherPrefix")}
         <a
-          href="https://docs.mem0.ai/open-source/setup#supported-providers"
+          href="https://docs.bokaclaw.ai/memory/operations"
           target="_blank"
           rel="noopener noreferrer"
           className="underline underline-offset-4 hover:text-onSurface-default-primary"
@@ -243,14 +242,6 @@ export default function ConfigurationPage() {
           {isSaving ? t("common.saving") : t("configuration.save")}
         </Button>
       )}
-
-      <UpgradeBanner
-        id="config-sso"
-        message={t("configuration.upgrade.message")}
-        ctaLabel={t("configuration.upgrade.cta")}
-        ctaUrl="https://app.mem0.ai/enterprise?utm_source=oss&utm_medium=dashboard-configuration-sso"
-        variant="enterprise"
-      />
     </div>
   );
 }

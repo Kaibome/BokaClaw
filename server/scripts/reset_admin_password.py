@@ -1,4 +1,4 @@
-"""Reset a user's password by email. Run inside the `mem0` container."""
+"""Reset a user's password by email. Run inside the `bokaclaw-server` container."""
 
 import os
 import sys

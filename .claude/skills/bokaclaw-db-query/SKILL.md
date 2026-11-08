@@ -1,12 +1,12 @@
 ---
 name: bokaclaw-db-query
-description: 只读查询本地 BokaClaw Postgres 数据库，无需在宿主机安装 psql：通过 `docker exec` 在 `bokaclaw-postgres` 容器内运行 `psql`，提供列出表（含精确行数和磁盘占用）、查看表结构、统计行数、执行任意 SELECT 和导出 CSV 的辅助命令。覆盖两个数据库：`mem0_app`（users、conversations、request_logs、agent_runs 等）和 `postgres`（mem0 的 `memories` 向量表）。触发场景：询问有哪些表、查看/描述表结构、统计数据行数、查询会话/请求日志/记忆/Agent 运行记录，或对本地 BokaClaw 数据库执行 SQL。不触发场景：启动/停止/构建容器（请用 bokaclaw-docker-stack）、修改应用代码或迁移、查询远程/托管数据库。
+description: 只读查询本地 BokaClaw Postgres 数据库，无需在宿主机安装 psql：通过 `docker exec` 在 `bokaclaw-postgres` 容器内运行 `psql`，提供列出表（含精确行数和磁盘占用）、查看表结构、统计行数、执行任意 SELECT 和导出 CSV 的辅助命令。覆盖两个数据库：`mem0_app`（users、conversations、request_logs、agent_runs，以及工作区记忆的派生索引 `memory_index_*`）和 `postgres`（旧版 Mem0 的 `memories` 向量表，仅用于一次性迁移）。触发场景：询问有哪些表、查看/描述表结构、统计数据行数、查询会话/请求日志/记忆/Agent 运行记录，或对本地 BokaClaw 数据库执行 SQL。不触发场景：启动/停止/构建容器（请用 bokaclaw-docker-stack）、修改应用代码或迁移、查询远程/托管数据库。
 license: Apache-2.0
 metadata:
   author: BokaClaw
   version: "0.1.0"
   category: database
-  tags: "postgres, psql, docker, sql, tables, mem0, bokaclaw"
+  tags: "postgres, psql, docker, sql, tables, memory, bokaclaw"
 ---
 
 # Query the local BokaClaw database
@@ -38,7 +38,7 @@ Flags go **before** the command.
 
 ```bash
 db.sh tables
-db.sh -d postgres tables                        # mem0 vector database
+db.sh -d postgres tables                        # legacy Mem0 vector database
 db.sh schema conversations
 db.sh count request_logs
 db.sh query "SELECT id, title FROM conversations ORDER BY created_at DESC LIMIT 5"
@@ -54,17 +54,20 @@ SQL back as the answer, and do not summarize away values the user asked for.
 
 | Database | Tables | What lives there |
 |---|---|---|
-| `mem0_app` | `users`, `api_keys`, `settings`, `conversations`, `conversation_messages`, `request_logs`, `agent_runs`, `agent_run_events`, `refresh_token_jtis`, `alembic_version` | Application state, written by `bokaclaw-server` |
-| `postgres` | `memories` | mem0's vector collection (pgvector, 512-dim fastembed vectors) |
+| `mem0_app` | `users`, `api_keys`, `settings`, `conversations`, `conversation_messages`, `request_logs`, `agent_runs`, `agent_run_events`, `refresh_token_jtis`, `alembic_version`, `memory_index_*`, `memory_history` | Application state plus the derived memory index, written by `bokaclaw-server` |
+| `postgres` | `memories` | Legacy Mem0 vector collection, kept only as input for the one-time migration |
 
-`memories` has no foreign key to `users`; the app isolates by `user_id` /
-`agent_id` columns inside the row. Its columns are `id`, `vector`, and
-`payload` (jsonb) — the memory text is `payload->>'data'`:
+The authoritative memory text lives in workspace Markdown under
+`AGENT_MEMORY_ROOT/users/<user_id>/`; `memory_index_entries` is a rebuildable
+projection with one row per bullet:
 
 ```bash
-db.sh -d postgres query \
-  "SELECT id, payload->>'data' AS memory, payload->>'user_id' AS user_id FROM memories LIMIT 10"
+db.sh query \
+  "SELECT id, user_id, kind, content, source_path FROM memory_index_entries ORDER BY updated_at DESC LIMIT 10"
 ```
+
+The legacy `memories` table has no foreign key to `users`; its text is
+`payload->>'data'` and it is not written by the current runtime.
 
 ## Sensitive rows
 

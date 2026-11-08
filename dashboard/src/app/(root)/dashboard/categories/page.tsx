@@ -38,7 +38,6 @@ export default function CategoriesPage() {
       title={t("categories.title")}
       description={t("categories.description")}
       previewContent={<CategoriesMockup />}
-      utmMedium="dashboard-locked-categories"
     />
   );
 }

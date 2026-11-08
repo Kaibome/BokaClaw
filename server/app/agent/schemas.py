@@ -131,7 +131,7 @@ class AgentInvokeRequest(BaseModel):
     conversation_id: uuid.UUID | None = None
     message: str = Field(..., min_length=1, max_length=32_000)
     agent_id: str | None = Field(None, max_length=255)
-    # Deprecated: mem0 memory scope. Execution uses agent_runs.id (run_id).
+    # Deprecated: legacy memory scope. Execution uses agent_runs.id (run_id).
     run_id: str | None = Field(None, max_length=255)
     client_run_id: str | None = Field(None, max_length=255)
     metadata: dict[str, Any] = Field(default_factory=dict)

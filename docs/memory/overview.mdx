@@ -1,0 +1,47 @@
+---
+title: "Memory Overview"
+description: "How BokaClaw stores durable agent memory in workspace Markdown with a rebuildable Postgres index."
+icon: "brain"
+---
+
+BokaClaw treats workspace Markdown as the source of truth for memory. Postgres holds a derived
+index that can be dropped and rebuilt at any time. No vector database or hosted memory service is
+required.
+
+## Layout
+
+```
+<AGENT_MEMORY_ROOT>/users/<user_id>/
+  USER.md                # identity and durable preferences
+  MEMORY.md              # curated long-term facts
+  memory/YYYY-MM-DD.md   # episodic captures and research conclusions
+```
+
+`AGENT_MEMORY_ROOT` defaults to `/app/memory`. It is mounted into the server container only — never
+into the executor — and it must not be nested inside `AGENT_WORKSPACE_ROOT`.
+
+## Two layers
+
+| Layer | What it is | How it is used |
+|---|---|---|
+| Markdown files | Authoritative facts, preferences, and episodes | Inspectable, diffable, user-owned |
+| Postgres index | `memory_index_entries`, `memory_index_files`, `memory_history` | Full-text + vector recall, audit |
+
+The index is derived. Deleting it loses nothing; run `python -m app.memory.cli reconcile --all` to
+rebuild it from the files.
+
+## Per-turn flow
+
+1. **Recall.** The agent loads a small always-on profile (`USER.md` plus curated identity/rules) and
+   runs a hybrid query search. Results are injected as a user-role `<recalled-memories>` block, never
+   into the system prompt.
+2. **Respond.** The model may call `search_memories`, `save_memory`, `get_memory`, `update_memory`,
+   or `delete_memory`. The generic `Write`/`Edit` tools cannot reach memory files.
+3. **Capture.** After a completed turn, a filtered episode is appended to the daily file. Capture
+   never calls a model; consolidation is a later feature.
+
+## Trust
+
+Every entry carries a `trust` value written by code, never parsed from Markdown: `owner`, `agent`,
+`tool`, `untrusted`, or `system`. `untrusted` content can be stored and searched explicitly but is
+never auto-injected.

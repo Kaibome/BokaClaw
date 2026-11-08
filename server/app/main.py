@@ -5,11 +5,19 @@ import time
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
+from dotenv import load_dotenv
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, RedirectResponse
+from pydantic import BaseModel, Field
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from sqlalchemy import func, select
+
 from app.agent.runner import AgentRunManager
 from app.core import telemetry
 from app.core.auth import ADMIN_API_KEY, AUTH_DISABLED, JWT_SECRET, require_admin, verify_auth
 from app.core.db import SessionLocal
-from dotenv import load_dotenv
 from app.core.errors import (
     UpstreamError,
     install_request_id_logging,
@@ -18,12 +26,16 @@ from app.core.errors import (
     upstream_error,
     upstream_error_handler,
 )
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, RedirectResponse
-from app.models import RequestLog, User
-from pydantic import BaseModel, Field
 from app.core.rate_limit import limiter
+from app.core.server_state import (
+    get_current_config,
+    get_memory_instance,
+    initialize_state,
+    set_session_factory,
+    update_config,
+)
+from app.memory.errors import MemoryNotFound, MemoryValidationError
+from app.models import RequestLog, User
 from app.routers import agent as agent_router
 from app.routers import api_keys as api_keys_router
 from app.routers import auth as auth_router
@@ -33,18 +45,6 @@ from app.routers import evals as evals_router
 from app.routers import requests as requests_router
 from app.routers import traces as traces_router
 from app.schemas import MessageResponse
-from app.core.server_state import (
-    get_current_config,
-    get_memory_instance,
-    initialize_state,
-    set_session_factory,
-    update_config,
-)
-from slowapi import _rate_limit_exceeded_handler
-from slowapi.errors import RateLimitExceeded
-from sqlalchemy import func, select
-
-from mem0.exceptions import ValidationError as Mem0ValidationError
 
 load_dotenv()
 
@@ -86,7 +86,7 @@ def _warn_if_unconfigured() -> None:
         "    1. Set ADMIN_API_KEY=<long-random-value>  (fastest, no client changes)\n"
         "    2. Register an admin at http://<host>:3000/setup\n"
         "    3. Set AUTH_DISABLED=true                 (local development only)\n"
-        "  Docs: https://docs.mem0.ai/open-source/features/rest-api#authentication\n"
+        "  Docs: http://<host>:8000/docs\n"
         "%s",
         "=" * 72,
         "=" * 72,
@@ -106,42 +106,39 @@ elif ADMIN_API_KEY and len(ADMIN_API_KEY) < MIN_KEY_LENGTH:
         "ADMIN_API_KEY is shorter than %d characters - consider using a longer key for production.",
         MIN_KEY_LENGTH,
     )
+elif ADMIN_API_KEY:
+    logging.info("Authentication enabled for protected endpoints.")
 elif not ADMIN_API_KEY:
     _warn_if_unconfigured()
 
 telemetry.log_status()
 
-POSTGRES_HOST = os.environ.get("POSTGRES_HOST", "postgres")
-POSTGRES_PORT = os.environ.get("POSTGRES_PORT", "5432")
-POSTGRES_DB = os.environ.get("POSTGRES_DB", "postgres")
-POSTGRES_USER = os.environ.get("POSTGRES_USER", "postgres")
-POSTGRES_PASSWORD = os.environ.get("POSTGRES_PASSWORD", "postgres")
-POSTGRES_COLLECTION_NAME = os.environ.get("POSTGRES_COLLECTION_NAME", "memories")
-
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-HISTORY_DB_PATH = os.environ.get("HISTORY_DB_PATH", "/app/history/history.db")
-DEFAULT_LLM_PROVIDER = os.environ.get("MEM0_DEFAULT_LLM_PROVIDER", "openai")
-DEFAULT_LLM_MODEL = os.environ.get("MEM0_DEFAULT_LLM_MODEL", "gpt-5-mini")
-DEFAULT_EMBEDDER_PROVIDER = os.environ.get("MEM0_DEFAULT_EMBEDDER_PROVIDER", "openai")
-DEFAULT_EMBEDDER_MODEL = os.environ.get("MEM0_DEFAULT_EMBEDDER_MODEL", "text-embedding-3-small")
-# pgvector fixes the vector width when the collection is created, so it must
-# match the embedder. Local embedding models have different widths (e.g.
-# BAAI/bge-small-zh-v1.5 is 512), so allow overriding it for those.
-DEFAULT_EMBEDDING_DIMS = int(os.environ.get("MEM0_DEFAULT_EMBEDDING_DIMS", "1536"))
+MEMORY_BACKEND = os.environ.get("MEMORY_BACKEND", "markdown").strip().lower()
+AGENT_MEMORY_ROOT = os.environ.get("AGENT_MEMORY_ROOT", "/app/memory")
+DEFAULT_LLM_PROVIDER = os.environ.get("MEMORY_DEFAULT_LLM_PROVIDER") or os.environ.get(
+    "MEM0_DEFAULT_LLM_PROVIDER", "openai"
+)
+DEFAULT_LLM_MODEL = os.environ.get("MEMORY_DEFAULT_LLM_MODEL") or os.environ.get(
+    "MEM0_DEFAULT_LLM_MODEL", "gpt-5-mini"
+)
+DEFAULT_EMBEDDER_PROVIDER = os.environ.get("MEMORY_DEFAULT_EMBEDDER_PROVIDER") or os.environ.get(
+    "MEM0_DEFAULT_EMBEDDER_PROVIDER", "openai"
+)
+DEFAULT_EMBEDDER_MODEL = os.environ.get("MEMORY_DEFAULT_EMBEDDER_MODEL") or os.environ.get(
+    "MEM0_DEFAULT_EMBEDDER_MODEL", "text-embedding-3-small"
+)
 
 DEFAULT_CONFIG = {
     "version": "v1.1",
-    "vector_store": {
-        "provider": "pgvector",
-        "config": {
-            "host": POSTGRES_HOST,
-            "port": int(POSTGRES_PORT),
-            "dbname": POSTGRES_DB,
-            "user": POSTGRES_USER,
-            "password": POSTGRES_PASSWORD,
-            "collection_name": POSTGRES_COLLECTION_NAME,
-            "embedding_model_dims": DEFAULT_EMBEDDING_DIMS,
-        },
+    "memory": {
+        "backend": MEMORY_BACKEND,
+        "root": AGENT_MEMORY_ROOT,
+        "recall_tokens": int(os.environ.get("AGENT_MEMORY_RECALL_TOKENS", "1500")),
+        "recall_max": int(os.environ.get("AGENT_MEMORY_RECALL_MAX", "15")),
+        "recall_threshold": float(os.environ.get("AGENT_MEMORY_RECALL_THRESHOLD", "0.4")),
+        "capture_enabled": os.environ.get("AGENT_MEMORY_CAPTURE", "true").lower()
+        not in {"0", "false", "no", "off"},
     },
     "llm": {
         "provider": DEFAULT_LLM_PROVIDER,
@@ -151,7 +148,6 @@ DEFAULT_CONFIG = {
         "provider": DEFAULT_EMBEDDER_PROVIDER,
         "config": {"api_key": OPENAI_API_KEY, "model": DEFAULT_EMBEDDER_MODEL},
     },
-    "history_db_path": HISTORY_DB_PATH,
 }
 
 
@@ -184,7 +180,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Mem0 REST APIs",
+    title="BokaClaw REST API",
     description=(
         "A REST API for managing and searching memories for your AI Agents and Apps.\n\n"
         "## Authentication\n"
@@ -253,14 +249,14 @@ class SearchRequest(BaseModel):
 
 
 class GenerateInstructionsRequest(BaseModel):
-    use_case: str = Field(..., description="Description of what the user will use Mem0 for.")
+    use_case: str = Field(..., description="Description of what the user will use BokaClaw for.")
 
 
 def _client_error(exc: Exception) -> HTTPException:
     """Map core validation / not-found errors to 4xx so clients can tell a bad
     request from an upstream outage. 'not found' is a 404, everything else a 400."""
     detail = str(exc)
-    status_code = 404 if isinstance(exc, ValueError) and "not found" in detail.lower() else 400
+    status_code = 404 if isinstance(exc, MemoryNotFound) or (isinstance(exc, ValueError) and "not found" in detail.lower()) else 400
     return HTTPException(status_code=status_code, detail=detail)
 
 
@@ -364,7 +360,7 @@ async def log_requests(request: Request, call_next):
             )
 
 
-@app.get("/configure", summary="Get current Mem0 configuration")
+@app.get("/configure", summary="Get current memory and model configuration")
 def get_config(_auth=Depends(verify_auth)):
     return _redact_config(get_current_config())
 
@@ -374,7 +370,7 @@ def list_bundled_providers(_auth=Depends(verify_auth)):
     return {"llm": list(BUNDLED_LLM_PROVIDERS), "embedder": list(BUNDLED_EMBEDDER_PROVIDERS)}
 
 
-@app.post("/configure", summary="Configure Mem0")
+@app.post("/configure", summary="Configure memory and models")
 def set_config(config: Dict[str, Any], _auth=Depends(require_admin)):
     """Set memory configuration. Requires admin role."""
     _validate_bundled_providers(config)
@@ -386,7 +382,7 @@ def set_config(config: Dict[str, Any], _auth=Depends(require_admin)):
 def generate_instructions(req: GenerateInstructionsRequest, _auth=Depends(verify_auth)):
     """Generate custom instructions and a contextual test message tailored to a use case."""
     try:
-        llm = get_memory_instance().llm
+        service = get_memory_instance()
         prompt = (
             "You are configuring a memory system. Given the use case below, produce two things:\n"
             "1. INSTRUCTIONS: A short paragraph of custom instructions telling the memory extraction system "
@@ -397,7 +393,12 @@ def generate_instructions(req: GenerateInstructionsRequest, _auth=Depends(verify
             "INSTRUCTIONS: <your instructions>\n"
             f"TEST_MESSAGE: <your test message>\n\nUse case: {req.use_case}"
         )
-        response = llm.generate_response([{"role": "user", "content": prompt}])
+        if hasattr(service, "settings"):
+            from app.memory.llm import generate_response
+
+            response = generate_response(service.settings, [{"role": "user", "content": prompt}])
+        else:
+            response = service.llm.generate_response([{"role": "user", "content": prompt}])
         instructions = response
         test_message = "I like to hike on weekends."
         if "INSTRUCTIONS:" in response and "TEST_MESSAGE:" in response:
@@ -421,45 +422,17 @@ def add_memory(memory_create: MemoryCreate, _auth=Depends(verify_auth)):
         if response.get("results"):
             telemetry.log_dashboard_nudge_once(DASHBOARD_URL)
         return JSONResponse(content=response)
-    except (ValueError, Mem0ValidationError) as e:
+    except (ValueError, MemoryValidationError, MemoryNotFound) as e:
         raise _client_error(e)
     except Exception:
         raise upstream_error()
 
 
 ALL_MEMORIES_LIMIT = 1000
-_RESERVED_PAYLOAD_KEYS = {
-    "data",
-    "user_id",
-    "agent_id",
-    "run_id",
-    "hash",
-    "created_at",
-    "updated_at",
-    "expiration_date",
-}
-
-
-def _serialize_memory(row: Any) -> Dict[str, Any]:
-    payload = getattr(row, "payload", None) or {}
-    return {
-        "id": getattr(row, "id", None),
-        "memory": payload.get("data"),
-        "user_id": payload.get("user_id"),
-        "agent_id": payload.get("agent_id"),
-        "run_id": payload.get("run_id"),
-        "hash": payload.get("hash"),
-        "expiration_date": payload.get("expiration_date"),
-        "metadata": {k: v for k, v in payload.items() if k not in _RESERVED_PAYLOAD_KEYS},
-        "created_at": payload.get("created_at"),
-        "updated_at": payload.get("updated_at"),
-    }
 
 
 def _list_all_memories(limit: int = ALL_MEMORIES_LIMIT) -> Dict[str, Any]:
-    results = get_memory_instance().vector_store.list(top_k=limit)
-    rows = results[0] if results and isinstance(results, list) and isinstance(results[0], list) else results or []
-    return {"results": [_serialize_memory(row) for row in rows]}
+    return get_memory_instance().list_all(top_k=limit)
 
 
 @app.get("/memories", summary="Get memories")
@@ -549,7 +522,7 @@ def update_memory(memory_id: str, updated_memory: MemoryUpdate, _auth=Depends(ve
         if "expiration_date" in fields_set:
             params["expiration_date"] = updated_memory.expiration_date
         return get_memory_instance().update(**params)
-    except (ValueError, Mem0ValidationError) as e:
+    except (ValueError, MemoryValidationError, MemoryNotFound) as e:
         raise _client_error(e)
     except Exception:
         raise upstream_error()
@@ -570,7 +543,7 @@ def delete_memory(memory_id: str, _auth=Depends(verify_auth)):
     try:
         get_memory_instance().delete(memory_id=memory_id)
         return MessageResponse(message="Memory deleted successfully")
-    except (ValueError, Mem0ValidationError) as e:
+    except (ValueError, MemoryValidationError, MemoryNotFound) as e:
         raise _client_error(e)
     except Exception:
         raise upstream_error()

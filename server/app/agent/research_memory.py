@@ -7,9 +7,9 @@ otherwise starts from zero. This module has two halves:
 * ``remember_research`` (and its reporting form ``save_research``) runs after a
   completed turn. When the tool trace shows a successful ``WebSearch`` or
   ``WebFetch``, it stores the final answer, the source URLs, and the capture
-  time as one user-scoped mem0 memory. Memories are labeled
-  ``kind="research_conclusion"`` and written with ``infer=False`` so the
-  conclusion and its sources are preserved verbatim. An identical question
+  time as one user-scoped workspace memory entry. Entries are labeled
+  ``kind="research_conclusion"`` and stored verbatim, so the conclusion and its
+  sources are preserved exactly. An identical question
   updates the existing memory instead of appending a duplicate.
 * ``prior_research_block`` (and its reporting form ``recall_research``) runs
   before a turn. It first looks up an identical question by its stable key,
@@ -45,11 +45,10 @@ RESEARCH_KIND = "research_conclusion"
 DEFAULT_TTL_DAYS = 30
 DEFAULT_MIN_SCORE = 0.5
 DEFAULT_TOP_K = 3
-# mem0 v1.1 returns a hybrid ``score``: (semantic + bm25 + entity) / max_possible,
-# where ``max_possible`` is 2.0 whenever any candidate in the pool has a keyword
-# hit. Comparing that value to a fixed cosine-like floor makes recall depend on
-# the rest of the candidate pool, so the floor is applied to the raw semantic
-# score exposed by ``explain=True`` instead.
+# Search returns a hybrid ``score`` (semantic + keyword, renormalized), whose
+# scale depends on the rest of the candidate pool. Comparing that value to a
+# fixed cosine-like floor would make recall depend on unrelated candidates, so
+# the floor is applied to the raw semantic score exposed by ``explain=True``.
 DETAILS_KEY = "score_details"
 
 MAX_SOURCES = 8
@@ -379,7 +378,7 @@ def recall_research(
 
     if len(fresh) < limit:
         # Different phrasings are found by similarity. The floor is applied to
-        # the raw semantic score, not to mem0's pool-dependent hybrid score.
+        # the raw semantic score, not to the pool-dependent hybrid score.
         items, error = _search(memory, report.question, report.user_id, limit, score_floor)
         if error is not None:
             report.error = error
@@ -546,10 +545,10 @@ def _fresh_entry(
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """Validate one memory item and turn it into a renderable conclusion.
 
-    The floor is compared against the raw semantic score from mem0's
-    ``score_details``. The top-level ``score`` is the hybrid value, whose
-    divisor shrinks and grows with the candidate pool, so it is only kept for
-    reporting and as a fallback for stores that do not explain their scores.
+    The floor is compared against the raw semantic score in ``score_details``.
+    The top-level ``score`` is the hybrid value, whose scale shrinks and grows
+    with the candidate pool, so it is only kept for reporting and as a fallback
+    for stores that do not explain their scores.
     """
 
     if not isinstance(item, dict):

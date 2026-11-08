@@ -128,6 +128,11 @@ class AgentMemoryRecall:
     error: str | None = None
     chars: int = 0
     duration_ms: int | None = None
+    profile_chars: int = 0
+    query_hits: int = 0
+    budget_tokens: int = 1500
+    categories: list[str] = field(default_factory=list)
+    research_hits: int = 0
 
 
 @dataclass
@@ -142,6 +147,10 @@ class AgentMemorySave:
     reason: str | None = None
     error: str | None = None
     duration_ms: int | None = None
+    kind: str | None = None
+    path: str | None = None
+    captured: int = 0
+    entries: int = 0
 
 
 @dataclass

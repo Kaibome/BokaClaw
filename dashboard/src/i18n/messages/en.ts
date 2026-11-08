@@ -472,10 +472,9 @@ const en = {
     "Deleting a case does not change past eval results; they keep their frozen snapshot.",
   "evalCases.delete.deleting": "Deleting…",
 
-  // Locked cloud features
-  "locked.message": "This feature is available in Mem0 Cloud and Enterprise.",
-  "locked.startFree": "Start free on Cloud",
-  "locked.talkToSales": "Talk to sales",
+  // Features not included in the self-hosted build
+  "locked.message":
+    "This feature is not available in the self-hosted BokaClaw build.",
   "analytics.title": "Analytics",
   "analytics.description":
     "Track memory operations, latency, and usage patterns over time.",
@@ -635,11 +634,7 @@ const en = {
   "auth.resetTitle": "Reset your admin password",
   "auth.resetDescription":
     "Run this command on the server host. It overwrites the existing password; anyone already signed in stays signed in until their session expires.",
-  "auth.quote":
-    "Mem0 allowed us to unlock true personalized tutoring for every student, and it took us just a weekend to integrate.",
-  "auth.quoteAuthor": "Michael Tong",
-  "auth.quoteRole": "CTO, RevisionDojo",
-  "auth.trustedBy": "Trusted by 100k+ Developers",
+  "auth.tagline": "Self-hosted AI agent workbench",
 
   // Settings
   "settings.title": "Settings",

@@ -25,17 +25,26 @@ AUTH_DISABLED=false
 DASHBOARD_URL=http://localhost:3000
 APP_DB_NAME=mem0_app
 
-# Local embedder (required when reusing a 512-dim pgvector volume)
-MEM0_DEFAULT_LLM_MODEL=gpt-5-mini
-MEM0_DEFAULT_EMBEDDER_PROVIDER=fastembed
-MEM0_DEFAULT_EMBEDDER_MODEL=BAAI/bge-small-zh-v1.5
-MEM0_DEFAULT_EMBEDDING_DIMS=512
+# Workspace-Markdown memory (authoritative) + rebuildable Postgres index
+MEMORY_BACKEND=markdown
+AGENT_MEMORY_ROOT=/app/memory
+AGENT_MEMORY_RECALL_TOKENS=1500
+AGENT_MEMORY_RECALL_MAX=15
+AGENT_MEMORY_RECALL_THRESHOLD=0.4
+AGENT_MEMORY_CAPTURE=true
+AGENT_MEMORY_RECONCILE_ON_START=true
+AGENT_MEMORY_RECONCILE_INTERVAL_SECONDS=300
+
+# Local embedder
+MEMORY_DEFAULT_LLM_MODEL=gpt-5-mini
+MEMORY_DEFAULT_EMBEDDER_PROVIDER=fastembed
+MEMORY_DEFAULT_EMBEDDER_MODEL=BAAI/bge-small-zh-v1.5
 HF_ENDPOINT=https://hf-mirror.com
 HF_HUB_DISABLE_XET=1
 # start-stack.sh passes this to the container; the default /tmp path is lost on recreate.
 FASTEMBED_CACHE_PATH=/app/history/fastembed
 
-MEM0_TELEMETRY=false
+BOKACLAW_TELEMETRY=false
 REQUEST_LOG_RETENTION_DAYS=30
 
 # Agent
@@ -106,7 +115,7 @@ docker run -d --name bokaclaw-server --network bokaclaw-net --restart unless-sto
   -e AGENT_EXECUTOR_TOKEN="$AGENT_EXECUTOR_TOKEN" \
   -e FASTEMBED_CACHE_PATH=/app/history/fastembed \
   --add-host host.docker.internal:host-gateway \
-  -p 8000:8000 -v mem0-local-history:/app/history \
+  -p 8000:8000 -v mem0-local-history:/app/history -v mem0-local-memory:/app/memory \
   -v /Users/pankaibo/BokaClaw/workspace:/app/workspace \
   bokaclaw-server:test uvicorn app.main:app --host 0.0.0.0 --port 8000
 
@@ -127,32 +136,36 @@ is useful in development but wastes CPU in a long-running local stack.
 
 | Variable | Database | Used for |
 |---|---|---|
-| `POSTGRES_DB` | `postgres` | mem0's vector collection (`memories`) and the `vector` extension |
-| `APP_DB_NAME` | `mem0_app` | Alembic tables: `users`, `api_keys`, `settings`, `request_logs`, `conversations`, `conversation_messages` |
+| `POSTGRES_DB` | `postgres` | Legacy Mem0 vector collection (`memories`), kept for the one-time migration; not written by the runtime |
+| `APP_DB_NAME` | `mem0_app` | Alembic tables: `users`, `api_keys`, `settings`, `request_logs`, `conversations`, `conversation_messages`, and the derived memory index (`memory_index_*`, `memory_history`) |
 
 Both live in the same Postgres instance and container. `server/app/core/db.py` builds
-the SQLAlchemy URL from `APP_DB_NAME`; `server/app/main.py` builds the mem0 config
-from `POSTGRES_DB`.
+the SQLAlchemy URL from `APP_DB_NAME`; the workspace memory backend records its
+index in that same application database.
 
 ## Volumes
 
 | Volume | Container path | Holds |
 |---|---|---|
 | `mem0-local-pg` | `/var/lib/postgresql/data` | The whole PG 17 cluster (both databases, `pgvector` extension, memories) |
-| `mem0-local-history` | `/app/history` | `history.db`, the mem0 message history SQLite file, and `fastembed/`, the ONNX embedder cache |
+| `mem0-local-history` | `/app/history` | Legacy `history.db` (migration input only) and `fastembed/`, the ONNX embedder cache |
+| `mem0-local-memory` | `/app/memory` | Authoritative workspace Markdown: `users/<user_id>/{USER.md,MEMORY.md,memory/YYYY-MM-DD.md}` |
 | `/Users/pankaibo/BokaClaw/workspace` (host bind, `WORKSPACE_HOST`) | `AGENT_WORKSPACE_ROOT` (`/app/workspace`) | Files written by the agent's `Write` / `Edit` / `NotebookEdit` tools; survives container re-creation |
 
 `docker rm` does not delete volumes. `docker volume rm mem0-local-pg` **does**,
-and it wipes memories, users and conversations. Never run it without an
-explicit request.
+and it wipes the derived memory index, users, and conversations;
+`docker volume rm mem0-local-memory` deletes the authoritative Markdown files.
+Never run either without an explicit request.
 
 ## pgvector dimensions
 
-pgvector stores the vector width on the column when the collection is created.
-`BAAI/bge-small-zh-v1.5` (fastembed) is **512**; OpenAI
-`text-embedding-3-small` defaults to **1536**. Mixing them against an existing
-collection fails at insert/search time. Changing the embedder means dropping
-and rebuilding the collection, not just restarting the server.
+The workspace index uses a fixed `halfvec(3072)` column. Vectors from smaller
+models (fastembed's `BAAI/bge-small-zh-v1.5` is **512**, OpenAI
+`text-embedding-3-small` is **1536**) are normalized and zero-padded, so inserts
+never fail on width. Each row records `embedding_model`; search only ranks rows
+embedded by the current model, and the rest stay keyword-searchable until
+`python -m app.memory.cli reindex` re-embeds them. Models wider than 3072 are
+rejected.
 
 ## Why the start script repairs `pg_hba.conf`
 

@@ -30,6 +30,9 @@ EVAL_CPUS=${EVAL_CPUS:-2}
 PG_IMAGE=${PG_IMAGE:-pgvector/pgvector:pg17}
 PG_VOLUME=${PG_VOLUME:-mem0-local-pg}
 HISTORY_VOLUME=${HISTORY_VOLUME:-mem0-local-history}
+MEMORY_VOLUME=${MEMORY_VOLUME:-mem0-local-memory}
+MEMORY_CONTAINER=${AGENT_MEMORY_ROOT:-/app/memory}
+MEMORY_BACKEND=${MEMORY_BACKEND:-markdown}
 PG_PORT=${PG_PORT:-8432}
 API_PORT=${API_PORT:-8000}
 DASHBOARD_PORT=${DASHBOARD_PORT:-3000}
@@ -53,7 +56,6 @@ POSTGRES_PORT=5432
 POSTGRES_DB=postgres
 POSTGRES_USER=postgres
 POSTGRES_PASSWORD=${PGPW}
-POSTGRES_COLLECTION_NAME=memories
 
 ADMIN_API_KEY=${ADMIN}
 JWT_SECRET=${JWT}
@@ -61,14 +63,24 @@ AUTH_DISABLED=false
 DASHBOARD_URL=http://localhost:${DASHBOARD_PORT}
 APP_DB_NAME=mem0_app
 
-MEM0_DEFAULT_LLM_MODEL=gpt-5-mini
-MEM0_DEFAULT_EMBEDDER_PROVIDER=fastembed
-MEM0_DEFAULT_EMBEDDER_MODEL=BAAI/bge-small-zh-v1.5
-MEM0_DEFAULT_EMBEDDING_DIMS=512
+MEMORY_DEFAULT_LLM_MODEL=gpt-5-mini
+MEMORY_DEFAULT_EMBEDDER_PROVIDER=fastembed
+MEMORY_DEFAULT_EMBEDDER_MODEL=BAAI/bge-small-zh-v1.5
 HF_ENDPOINT=https://hf-mirror.com
 HF_HUB_DISABLE_XET=1
 
-MEM0_TELEMETRY=false
+# Workspace Markdown is authoritative; Postgres holds a rebuildable index.
+MEMORY_BACKEND=markdown
+AGENT_MEMORY_ROOT=/app/memory
+AGENT_MEMORY_RECALL_TOKENS=1500
+AGENT_MEMORY_RECALL_MAX=15
+AGENT_MEMORY_RECALL_THRESHOLD=0.4
+AGENT_MEMORY_CAPTURE=true
+AGENT_MEMORY_RECONCILE_ON_START=true
+AGENT_MEMORY_RECONCILE_INTERVAL_SECONDS=300
+AGENT_MEMORY_REQUIRE_APPROVAL=false
+
+BOKACLAW_TELEMETRY=false
 REQUEST_LOG_RETENTION_DAYS=30
 
 AGENT_LOOP_MOCK=true
@@ -256,9 +268,12 @@ else
     -e EVAL_JUDGE_MODEL="${EVAL_JUDGE_MODEL:-deepseek-chat}" \
     -e EVAL_JUDGE_API_KEY="${EVAL_JUDGE_API_KEY:-}" \
     -e FASTEMBED_CACHE_PATH=/app/history/fastembed \
+    -e MEMORY_BACKEND="$MEMORY_BACKEND" \
+    -e AGENT_MEMORY_ROOT="$MEMORY_CONTAINER" \
     --add-host host.docker.internal:host-gateway \
     -p "${API_PORT}:8000" \
     -v "${HISTORY_VOLUME}:/app/history" \
+    -v "${MEMORY_VOLUME}:${MEMORY_CONTAINER}" \
     -v "${WORKSPACE_HOST}:${WORKSPACE_CONTAINER}" \
     "$SERVER_IMAGE" uvicorn app.main:app --host 0.0.0.0 --port 8000 >/dev/null
 fi
@@ -363,3 +378,4 @@ printf '    API:       %s\n' "$API_PUBLIC_URL"
 printf '    Postgres:  localhost:%s\n' "$PG_PORT"
 printf '    Eval:      %s (worker %s)\n' "$EVAL_CONTAINER" "${EVAL_WORKER_ID:-eval-1}"
 printf '    Workspace: %s -> %s\n' "$WORKSPACE_HOST" "$WORKSPACE_CONTAINER"
+printf '    Memory:    volume %s -> %s\n' "$MEMORY_VOLUME" "$MEMORY_CONTAINER"

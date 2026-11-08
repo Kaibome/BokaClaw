@@ -438,7 +438,7 @@ def _render_bullets(ctx: _Context, slide: Any, spec: Dict[str, Any], page: int) 
     box = _add_textbox(slide, MARGIN_X, 176, CONTENT_WIDTH, 300)
     frame = box.text_frame
     first = True
-    for text, ratio, indent in items:
+    for text, ratio, _indent in items:
         paragraph = frame.paragraphs[0] if first else frame.add_paragraph()
         first = False
         _write(paragraph, text, size=size * ratio, color=ctx.text, ctx=ctx)
@@ -482,7 +482,7 @@ def _render_two_column(ctx: _Context, slide: Any, spec: Dict[str, Any], page: in
         box = _add_textbox(slide, x, 210, column_width, 268)
         frame = box.text_frame
         first = True
-        for text, ratio, indent in items:
+        for text, ratio, _indent in items:
             paragraph = frame.paragraphs[0] if first else frame.add_paragraph()
             first = False
             _write(paragraph, text, size=size * ratio, color=ctx.text, ctx=ctx)
@@ -542,9 +542,16 @@ def _render_table(ctx: _Context, slide: Any, spec: Dict[str, Any], page: int) ->
 
     size = 11.0
     while size > 7:
-        tallest = max(line_count(cell, width - 16, size) for width, cell in zip(widths, headers))
+        tallest = max(
+            line_count(cell, width - 16, size) for width, cell in zip(widths, headers, strict=False)
+        )
         body_lines = max(
-            [line_count(cell, width - 16, size) for row in rows for width, cell in zip(widths, row)] or [1]
+            [
+                line_count(cell, width - 16, size)
+                for row in rows
+                for width, cell in zip(widths, row, strict=False)
+            ]
+            or [1]
         )
         if tallest * size * 1.35 <= row_height - 8 and body_lines * size * 1.35 <= row_height - 8:
             break

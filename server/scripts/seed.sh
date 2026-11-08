@@ -3,12 +3,12 @@ set -e
 
 API_URL="${API_URL:-http://localhost:8888}"
 DASHBOARD_URL="${DASHBOARD_URL:-http://localhost:3000}"
-EMAIL="${EMAIL:-admin@mem0.dev}"
+EMAIL="${EMAIL:-admin@example.com}"
 PASSWORD="${PASSWORD:-$(python3 -c 'import secrets; print(secrets.token_urlsafe(16))')}"
 NAME="${NAME:-Admin}"
 OUTPUT="${OUTPUT:-text}"
 
-echo "=== Mem0 Self-Hosted Seed ==="
+echo "=== BokaClaw Self-Hosted Seed ==="
 echo "API: $API_URL"
 echo ""
 
@@ -74,7 +74,7 @@ echo ""
 if ! grep -qE '^(OPENAI|ANTHROPIC|GOOGLE)_API_KEY=.' .env 2>/dev/null; then
   echo "!! No LLM provider API key set in server/.env."
   echo "   Set OPENAI_API_KEY (or ANTHROPIC_API_KEY / GOOGLE_API_KEY), then:"
-  echo "     docker compose up -d --force-recreate mem0"
+  echo "     docker compose up -d --force-recreate server"
   echo "   The curl below will return provider_auth_failed until you do."
   echo ""
 fi

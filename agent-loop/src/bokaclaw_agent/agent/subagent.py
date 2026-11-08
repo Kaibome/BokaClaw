@@ -44,6 +44,7 @@ READ_ONLY_TOOL_NAMES = frozenset(
         "WebFetch",
         "WebSearch",
         "search_memories",
+        "get_memory",
     }
 )
 RESEARCH_TOOL_NAMES = READ_ONLY_TOOL_NAMES | frozenset({"save_memory"})

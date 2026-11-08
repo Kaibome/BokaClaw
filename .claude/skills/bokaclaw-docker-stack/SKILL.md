@@ -98,7 +98,7 @@ Build pitfalls (full log in `references/troubleshooting.md`):
 
 | Container | Image | Host port | Purpose |
 |---|---|---|---|
-| `bokaclaw-postgres` | `pgvector/pgvector:pg17` | 8432 | `postgres` DB (mem0 memories) + `mem0_app` DB (users, conversations) |
+| `bokaclaw-postgres` | `pgvector/pgvector:pg17` | 8432 | `postgres` DB (legacy Mem0 tables) + `mem0_app` DB (users, conversations, `memory_index_*`) |
 | `bokaclaw-server` | `bokaclaw-server:test` | 8000 | FastAPI; `/agent`, `/conversations`, `/memories`, `/auth` |
 | `bokaclaw-dashboard` | `bokaclaw-dashboard:test` | 3000 | Next.js UI; `/` redirects to `/login` |
 | `bokaclaw-executor` | `bokaclaw-server:test` | none | Sandboxed shell executor for agent `Bash` / `PowerShell` / `Monitor` |
@@ -132,14 +132,16 @@ field meanings: `references/env-and-volumes.md`. Minimum for this stack:
 - `POSTGRES_*` (password required), `POSTGRES_DB=postgres`,
   `APP_DB_NAME=mem0_app`
 - `JWT_SECRET`, `ADMIN_API_KEY`, `DASHBOARD_URL=http://localhost:3000`
-- fastembed settings (`MEM0_DEFAULT_EMBEDDER_PROVIDER=fastembed`,
-  `MEM0_DEFAULT_EMBEDDER_MODEL=BAAI/bge-small-zh-v1.5`,
-  `MEM0_DEFAULT_EMBEDDING_DIMS=512`, `HF_ENDPOINT=https://hf-mirror.com`)
-  when reusing the 512-dim volume. The ONNX model itself is cached at
+- fastembed settings (`MEMORY_DEFAULT_EMBEDDER_PROVIDER=fastembed`,
+  `MEMORY_DEFAULT_EMBEDDER_MODEL=BAAI/bge-small-zh-v1.5`,
+  `HF_ENDPOINT=https://hf-mirror.com`). The ONNX model itself is cached at
   `/app/history/fastembed` on the `mem0-local-history` volume
   (`FASTEMBED_CACHE_PATH`, passed by `start-stack.sh`), so `RECREATE=1` does not
   download it again; if a first download crawls, see
   `references/troubleshooting.md` §9.
+- `MEMORY_BACKEND=markdown`, `AGENT_MEMORY_ROOT=/app/memory` (the
+  `mem0-local-memory` volume, mounted into the server only — never into the
+  executor)
 - `AGENT_LOOP_MOCK=true` for UI-only tests; real replies need
   `AGENT_LOOP_MOCK=false` plus `AGENT_MODEL` / `AGENT_API_KEY` / `AGENT_BASE_URL`
   (DeepSeek: `deepseek-flash`, `https://api.deepseek.com`)
@@ -159,9 +161,10 @@ field meanings: `references/env-and-volumes.md`. Minimum for this stack:
    `ALTER USER postgres PASSWORD '<value from .env>'` through the local trust
    socket, making `.env` the source of truth.
 
-The volume's pgvector collection was created at **512 dimensions**; switching
-to the default OpenAI embedder (1536) causes dimension mismatches. Keep the
-fastembed settings or start a fresh volume.
+The volume's legacy pgvector collection was created at **512 dimensions**. The
+workspace index uses `halfvec(3072)` and zero-pads smaller vectors, so a model
+change no longer breaks inserts; rows from a different model stay keyword-only
+until `python -m app.memory.cli reindex` re-embeds them.
 
 ### Health checks
 
@@ -174,7 +177,8 @@ curl -sN -X POST http://localhost:8000/agent \
   -H "X-API-Key: $ADMIN_API_KEY" -H 'Content-Type: application/json' \
   -H 'Accept: text/event-stream' \
   -d '{"message":"ping","stream":true}'                                        # meta → delta → done (mock)
-docker exec bokaclaw-postgres psql -d mem0_app -tAc 'SELECT version_num FROM alembic_version'  # 007
+docker exec bokaclaw-postgres psql -d mem0_app -tAc 'SELECT version_num FROM alembic_version'  # 014
+docker exec bokaclaw-server python -m app.memory.cli reconcile --all
 ```
 
 ### Login and accounts

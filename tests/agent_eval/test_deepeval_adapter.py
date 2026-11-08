@@ -22,9 +22,10 @@ if str(_EVAL_DIR) not in sys.path:
 import adapter  # noqa: E402
 
 try:
-    import deepeval
     from deepeval.tracing import trace_manager
     from deepeval.tracing.types import AgentSpan, LlmSpan, ToolSpan, TraceSpanStatus
+
+    import deepeval
 except Exception as exc:  # pragma: no cover - depends on the eval environment
     pytest.skip(f"deepeval is not importable here: {exc}", allow_module_level=True)
 

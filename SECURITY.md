@@ -1,27 +1,22 @@
 # Security Policy
 
-We take the security of Mem0 and our community seriously. Thank you for helping
-keep Mem0 and its users safe by disclosing vulnerabilities responsibly.
+We take the security of BokaClaw and our community seriously. Thank you for helping
+keep BokaClaw and its users safe by disclosing vulnerabilities responsibly.
 
 ## Reporting a Vulnerability
 
 Please **do not** report security vulnerabilities through public GitHub issues,
 pull requests, or discussions.
 
-If you believe you have found a security vulnerability in Mem0, please report it
-privately through one of the following channels:
-
-1. **GitHub Private Vulnerability Reporting** — open a
-   [private security advisory](https://github.com/mem0ai/mem0/security/advisories/new)
-   directly on this repository.
-2. **Email** the maintainers at **support@mem0.ai** with the subject line:
-
-   `SECURITY: Mem0 vulnerability report`
+If you believe you have found a security vulnerability in BokaClaw, report it
+privately through **GitHub Private Vulnerability Reporting**: open a
+[private security advisory](https://github.com/Kaibome/BokaClaw/security/advisories/new)
+directly on this repository.
 
 To help us triage and resolve the issue quickly, please include as much of the
 following as you can:
 
-- Affected component or package (e.g. Python SDK, TypeScript SDK, server, CLI)
+- Affected component or package (e.g. server, dashboard, agent runtime, memory backend)
 - Affected version, tag, or commit
 - Clear, step-by-step reproduction instructions
 - The security impact and a proof of concept, if available

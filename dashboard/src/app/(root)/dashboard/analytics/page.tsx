@@ -55,7 +55,6 @@ export default function AnalyticsPage() {
       title={t("analytics.title")}
       description={t("analytics.description")}
       previewContent={<AnalyticsMockup />}
-      utmMedium="dashboard-locked-analytics"
     />
   );
 }

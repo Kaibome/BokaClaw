@@ -2,7 +2,7 @@
 
 > 自托管的 AI Agent 工作台：持久记忆、ReAct 运行时、沙箱工具、链路追踪与离线评测，运行在你自己的基础设施上。
 
-BokaClaw 在 [Mem0](https://github.com/mem0ai/mem0) 的记忆层之上，补齐了一个完整的 Agent 应用闭环：Next.js 控制台负责交互与运营，FastAPI 服务端负责鉴权、会话、执行与观测，`bokaclaw-agent` 负责可嵌入的 ReAct 循环，Postgres + pgvector 同时承载记忆与业务数据。
+BokaClaw 是一个自托管的 AI Agent 工作台：工作区 Markdown 是记忆的权威存储，Postgres 只承载可重建的检索索引与业务数据。Next.js 控制台负责交互与运营，FastAPI 服务端负责鉴权、会话、执行与观测，`bokaclaw-agent` 负责可嵌入的 ReAct 循环。
 
 项目当前处于快速演进阶段，接口与配置项仍可能调整；对外发布的 SDK 为 `bokaclaw-agent`。
 
@@ -12,7 +12,7 @@ BokaClaw 在 [Mem0](https://github.com/mem0ai/mem0) 的记忆层之上，补齐�
 
 | 模块 | 能力 |
 |---|---|
-| **持久记忆** | 基于 Mem0 的 `add / search / update / delete`，支持 `user_id`、`agent_id`、`run_id` 多级作用域、元数据过滤、历史记录与实体级联删除 |
+| **持久记忆** | 工作区 Markdown（`USER.md` / `MEMORY.md` / 每日情节）为权威存储；Postgres 全文+向量索引可重建；支持 `user_id` 作用域、来源标记、历史审计与自动情节捕获 |
 | **Agent 运行时** | `bokaclaw-agent`：OpenAI 兼容模型的 ReAct 循环，支持 `run()`、`stream()`、`arun()`、协作式取消、同步/异步工具 |
 | **多轮会话** | 服务端持久化会话与消息；SSE 增量输出；断线重连、事件回放与 `after_seq` 游标 |
 | **工具生态** | 文件读写、Glob/Grep、网页搜索与抓取、PowerShell/Bash、PPTX 生成；工具结果按预算回填模型 |
@@ -36,8 +36,8 @@ flowchart LR
     Manager --> Runtime["bokaclaw-agent<br/>ReAct 运行时"]
 
     Runtime -->|"OpenAI 兼容协议"| Model["LLM / 压缩模型"]
-    Server -->|"SDK 调用"| Memory["Mem0 记忆层"]
-    Memory --> PG[("Postgres + pgvector")]
+    Server -->|"读写文件 + 索引"| Memory["工作区 Markdown"]
+    Memory --> PG[("Postgres + pgvector<br/>派生索引")]
 
     Server -->|"Bash / PowerShell / Monitor"| Executor["Executor<br/>沙箱容器"]
     Server -->|"span / event"| PG
@@ -61,12 +61,9 @@ flowchart LR
 | `server/` | FastAPI 服务端：鉴权、记忆 API、Agent 执行、会话、span、评测、Docker 编排 |
 | `dashboard/` | Next.js 15 控制台：Agent 对话、Trace、Eval、Memories、Requests、Entities、配置与密钥 |
 | `agent-loop/` | 独立 Python SDK `bokaclaw-agent`：ReAct 循环、工具、子代理、上下文压缩、会话存储 |
-| `mem0/` | Mem0 Python SDK：记忆、LLM、Embedding、向量库、图存储、重排 |
-| `tests/` | 根目录测试：Mem0 SDK、服务端 Agent、鉴权、Trace、评测等 |
+| `tests/` | 服务端 Agent、鉴权、Trace、评测等产品测试 |
 | `server/app/eval/` | DeepEval 评测适配、指标、golden 数据与后台 worker |
-| `docs/` | 架构与设计文档（Agent 运行时、Dashboard 契约、评测等） |
-| `cli/` | Mem0 CLI（Python / Node），面向 Mem0 Platform 与 OSS |
-| `integrations/` | 各类 Agent / 编辑器集成 |
+| `docs/` | 架构与设计文档（记忆格式、Agent 运行时、Dashboard 契约、评测等） |
 | `deepeval/` | DeepEval 4.3.3 源码参考副本，供评测实现对照 |
 
 ---
@@ -194,20 +191,23 @@ make prune-logs              # 清理 30 天前的请求日志
 | `POSTGRES_PASSWORD` | 必填，Compose 缺少该值会拒绝启动 |
 | `JWT_SECRET` | 启用鉴权时必填，建议 `openssl rand -base64 48` |
 | `OPENAI_API_KEY` | 默认 LLM 与 Embedding 的密钥 |
-| `MEM0_DEFAULT_LLM_PROVIDER` | `openai` / `anthropic` / `gemini` / `deepseek` |
-| `MEM0_DEFAULT_LLM_MODEL` | 默认 `gpt-5-mini` |
-| `MEM0_DEFAULT_EMBEDDER_PROVIDER` | `openai` / `gemini` / `fastembed` |
-| `MEM0_DEFAULT_EMBEDDER_MODEL` | 默认 `text-embedding-3-small` |
-| `MEM0_DEFAULT_EMBEDDING_DIMS` | 需与 Embedding 模型一致；本地 fastembed 常用 512 |
+| `MEMORY_BACKEND` | 固定为 `markdown`（工作区 Markdown 权威存储） |
+| `AGENT_MEMORY_ROOT` | 记忆工作区根目录，默认 `/app/memory` |
+| `AGENT_MEMORY_RECALL` | 是否启用每轮记忆召回，默认 `true` |
+| `AGENT_MEMORY_CAPTURE` | 是否在轮末追加情节，默认 `true` |
+| `MEMORY_DEFAULT_LLM_PROVIDER` | `openai` / `anthropic` / `gemini` / `deepseek` |
+| `MEMORY_DEFAULT_LLM_MODEL` | 默认 `gpt-5-mini` |
+| `MEMORY_DEFAULT_EMBEDDER_PROVIDER` | `openai` / `gemini` / `fastembed` |
+| `MEMORY_DEFAULT_EMBEDDER_MODEL` | 默认 `text-embedding-3-small` |
 | `AUTH_DISABLED` | 仅限本地开发，生产环境保持 `false` |
-| `MEM0_TELEMETRY` | 匿名遥测开关，`false` 可退出 |
+| `BOKACLAW_TELEMETRY` | 匿名遥测开关，`false` 可退出 |
 
 ### Agent
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `AGENT_MODEL` | 复用 Mem0 LLM | 覆盖 Agent 使用的模型 |
-| `AGENT_API_KEY` / `AGENT_BASE_URL` | 复用 Mem0 配置 | 接入 Qwen、vLLM、Ollama、OpenRouter 等兼容端点 |
+| `AGENT_MODEL` | 复用 LLM 配置 | 覆盖 Agent 使用的模型 |
+| `AGENT_API_KEY` / `AGENT_BASE_URL` | 复用 LLM 配置 | 接入 Qwen、vLLM、Ollama、OpenRouter 等兼容端点 |
 | `AGENT_MAX_ITERATIONS` | `10` | 单轮 ReAct 最大步数 |
 | `AGENT_FINAL_ANSWER_ON_MAX_ITERATIONS` | `true` | 步数耗尽时再做一次无工具请求，尽力作答 |
 | `AGENT_CONTEXT_MAX_TOKENS` | `32000` | 模型视图的 Token 预算 |
@@ -369,13 +369,13 @@ print(result.content)
 ```bash
 cd server
 docker compose up -d --build
-docker compose logs -f mem0
+docker compose logs -f server
 ```
 
 数据库迁移在容器启动时执行：
 
 ```bash
-docker compose exec mem0 alembic upgrade head
+docker compose exec server alembic upgrade head
 ```
 
 测试（在具备服务端依赖的 Python 环境中，从仓库根目录运行）：
@@ -430,7 +430,7 @@ hatch run eval:test
 - **敏感信息脱敏**：span 写入前按规则过滤 `sk-*`、`Bearer`、`api_key`、`password`、`token` 等字段。
 - **限流**：Agent 接口默认 30 次/分钟/IP；鉴权接口同样受限。
 - **安全响应头**：Dashboard 设置 `X-Frame-Options: DENY`、`frame-ancestors 'none'`、`nosniff` 与严格 Referrer Policy。
-- **遥测可关闭**：`MEM0_TELEMETRY=false`。
+- **遥测可关闭**：`BOKACLAW_TELEMETRY=false`。
 
 ---
 
@@ -467,4 +467,4 @@ hatch run eval:test
 
 Apache-2.0，见 [`LICENSE`](LICENSE)。
 
-BokaClaw 基于 [Mem0](https://github.com/mem0ai/mem0) 构建，保留其原始许可证与版权声明。Mem0 是 Mem0, Inc. 的商标；本项目与 Mem0 官方无隶属关系。
+BokaClaw 的早期版本基于 [Mem0](https://github.com/mem0ai/mem0) 构建，感谢其 Apache-2.0 许可与贡献；当前运行时已移除 Mem0 依赖，记忆改为工作区 Markdown 权威存储。

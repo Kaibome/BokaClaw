@@ -64,7 +64,6 @@ export default function ExportPage() {
       title={t("export.title")}
       description={t("export.description")}
       previewContent={<ExportMockup />}
-      utmMedium="dashboard-locked-export"
     />
   );
 }

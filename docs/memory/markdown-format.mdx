@@ -1,0 +1,40 @@
+---
+title: "Markdown Format"
+description: "The bullet-plus-metadata grammar used by workspace memory files."
+icon: "markdown"
+---
+
+Each memory is a Markdown bullet followed by an indented HTML comment carrying structured metadata.
+The bullet is human-readable; the comment is what the index reads. Missing or malformed metadata is
+tolerated: the entry is treated as a manual one.
+
+```markdown
+# Memory
+
+## Preferences
+- 用户周末喜欢徒步、露营，也喜欢喝黑咖啡
+  <!-- memory: {"id":"m-3f9c2a1b7d4e5f60","kind":"preference","importance":0.85,"source":"curated","trust":"owner","created":"2026-11-02T10:23:36Z","updated":"2026-11-02T10:23:36Z"} -->
+```
+
+## Fields
+
+| Field | Meaning |
+|---|---|
+| `id` | Stable entry id. Migrated rows keep their original UUID. New ids are content-derived. |
+| `kind` | `identity`, `configuration`, `rule`, `preference`, `decision`, `technical`, `relationship`, `project`, `operational`, `episode`, `research_conclusion` |
+| `source` | `curated`, `capture`, `research`, `manual`, or `migration` |
+| `trust` | `owner`, `agent`, `tool`, `untrusted`, or `system` |
+| `importance` | 0–1; used in ranking |
+| `expires` | Optional ISO timestamp; expired entries stay in the file but leave recall |
+| `question_key` / `sources` | Research-conclusion metadata |
+
+## Manual edits
+
+You can edit a bullet by hand. Keep the `id` unchanged to update the indexed entry; remove the
+metadata comment and the next reconcile treats the bullet as a new manual entry. Duplicate ids are
+resolved by path order and logged.
+
+## Headings
+
+Headings map to kinds when metadata omits `kind`: `Identity`, `Preferences`, `Rules`, `Decisions`,
+`Technical`, `Relationships`, `Projects`, `Operational`, `Captured`, and `Research`.

@@ -29,8 +29,8 @@ _SERVER_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "server")
 if _SERVER_DIR not in sys.path:
     sys.path.insert(0, _SERVER_DIR)
 
-import app.routers.agent as agent_router  # noqa: E402
 import app.agent.runner as agent_runner  # noqa: E402
+import app.routers.agent as agent_router  # noqa: E402
 from app.agent.events import (  # noqa: E402
     AgentCompleted,
     AgentDelta,
@@ -40,9 +40,9 @@ from app.agent.events import (  # noqa: E402
     AgentToolResult,
     AgentUsageUpdate,
 )
-from app.agent.research_memory import ResearchSave  # noqa: E402
 from app.agent.runner import AgentRunManager, RunConfig  # noqa: E402
 from app.agent.schemas import ConversationMessageOut, ConversationOut  # noqa: E402
+from app.agent.turn_memory import TurnMemorySave  # noqa: E402
 from app.core.auth import require_auth  # noqa: E402
 from app.core.rate_limit import limiter  # noqa: E402
 from app.models import User  # noqa: E402
@@ -528,15 +528,17 @@ async def test_manager_saves_research_memory_after_completion(monkeypatch):
 
     def fake_save(payload, content, entries):
         saved.append((payload, content, entries))
-        return ResearchSave(
+        return TurnMemorySave(
             action="added",
             question=payload["message"],
             memory_id="mem-1",
             sources=1,
             chars=180,
+            kind="research_conclusion",
+            entries=1,
         )
 
-    monkeypatch.setattr(agent_runner, "save_research", fake_save)
+    monkeypatch.setattr(agent_runner, "save_turn_memory", fake_save)
 
     async def executor(_payload, _request_id, *, cancel_event=None, max_seconds=None):
         yield AgentToolCall(

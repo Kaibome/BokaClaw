@@ -53,8 +53,7 @@ const STEP_TITLES: MessageKey[] = [
   "setup.title.useCase",
   "setup.title.quickTest",
 ];
-const SUPPORTED_PROVIDERS_URL =
-  "https://docs.mem0.ai/open-source/setup#supported-providers";
+const SUPPORTED_PROVIDERS_URL = "https://docs.bokaclaw.ai/memory/operations";
 
 const USE_CASE_PRESETS: MessageKey[] = [
   "setup.preset.personalAssistant",

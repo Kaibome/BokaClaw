@@ -1,7 +1,7 @@
 """Per-run model token accounting.
 
 One :class:`RunUsageMeter` is created per claimed run. The agent-loop emits one
-``AgentUsageUpdate`` per model call, and the mem0 LLM/embedding clients record
+``AgentUsageUpdate`` per model call, and the memory embedding/LLM adapters record
 through the ``CURRENT_METER`` context variable. The meter never fabricates
 tokens: a call that returns no usage is counted as ``unknown_calls``.
 """
@@ -285,7 +285,7 @@ class RunUsageMeter:
 
 @contextmanager
 def meter_context(meter: RunUsageMeter | None) -> Iterator[None]:
-    """Bind ``meter`` for mem0 calls made in this context."""
+    """Bind ``meter`` for memory calls made in this context."""
 
     token = CURRENT_METER.set(meter)
     try:
@@ -335,121 +335,3 @@ def usage_snapshot_from_metadata(metadata: Mapping[str, Any] | None) -> dict[str
         source.update(cached_tokens=cached, cache_miss_tokens=missed)
         snapshot.update(_cache_summary(cached, missed))
     return snapshot
-
-
-# --------------------------------------------------------------------- mem0
-
-
-_INSTALL_LOCK = threading.Lock()
-_INSTALL_MARKER = "_bokaclaw_usage_metering"
-
-
-def install_memory_metering(memory: Any) -> bool:
-    """Attach usage accounting to a ``Memory`` instance.
-
-    Wraps the provider SDK client, which every OpenAI-compatible mem0 provider
-    keeps in ``.client``. Providers without one fall back to counting calls as
-    unknown. Installation is idempotent and never raises.
-    """
-
-    with _INSTALL_LOCK:
-        if getattr(memory, _INSTALL_MARKER, False):
-            return True
-
-        installed = False
-        llm = getattr(memory, "llm", None)
-        if llm is not None:
-            if _wrap_openai_create(llm, "memory_llm"):
-                installed = True
-            elif _wrap_unknown(llm, "generate_response", "memory_llm"):
-                installed = True
-            else:
-                logger.warning("Could not instrument the mem0 LLM; its calls will not be metered")
-
-        embedder = getattr(memory, "embedding_model", None)
-        if embedder is not None:
-            if _wrap_openai_create(embedder, "memory_embedding"):
-                installed = True
-            else:
-                wrapped_embed = _wrap_unknown(embedder, "embed", "memory_embedding")
-                wrapped_batch = _wrap_unknown(embedder, "embed_batch", "memory_embedding")
-                if wrapped_embed or wrapped_batch:
-                    installed = True
-                else:
-                    logger.warning("Could not instrument the mem0 embedder; its calls will not be metered")
-
-        try:
-            setattr(memory, _INSTALL_MARKER, True)
-        except Exception:  # pragma: no cover - defensive
-            logger.debug("Could not mark the mem0 instance as metered", exc_info=True)
-        return installed
-
-
-def _wrap_openai_create(provider: Any, source: str) -> bool:
-    client = getattr(provider, "client", None)
-    if client is None:
-        return False
-
-    if source == "memory_embedding":
-        resource = getattr(client, "embeddings", None)
-    else:
-        resource = getattr(getattr(client, "chat", None), "completions", None)
-
-    create = getattr(resource, "create", None)
-    if not callable(create):
-        return False
-    if getattr(create, "_bokaclaw_metered", False):
-        return True
-
-    def metered_create(*args: Any, **kwargs: Any) -> Any:
-        response = create(*args, **kwargs)
-        _record_response(source, getattr(response, "usage", None))
-        return response
-
-    metered_create._bokaclaw_metered = True  # type: ignore[attr-defined]
-    try:
-        setattr(resource, "create", metered_create)
-    except Exception:  # pragma: no cover - defensive
-        logger.warning("Could not wrap %s client create(); falling back to call counting", source, exc_info=True)
-        return False
-    return True
-
-
-def _wrap_unknown(provider: Any, method: str, source: str) -> bool:
-    original = getattr(provider, method, None)
-    if not callable(original):
-        return False
-    if getattr(original, "_bokaclaw_metered", False):
-        return True
-
-    def metered(*args: Any, **kwargs: Any) -> Any:
-        _record_unknown(source)
-        return original(*args, **kwargs)
-
-    metered._bokaclaw_metered = True  # type: ignore[attr-defined]
-    try:
-        setattr(provider, method, metered)
-    except Exception:  # pragma: no cover - defensive
-        logger.warning("Could not wrap mem0 %s.%s", type(provider).__name__, method, exc_info=True)
-        return False
-    return True
-
-
-def _record_response(source: str, usage: Any) -> None:
-    meter = CURRENT_METER.get()
-    if meter is None:
-        return
-    try:
-        meter.record_response(source, usage)
-    except Exception:  # pragma: no cover - instrumentation must not fail a run
-        logger.debug("Failed to record mem0 usage", exc_info=True)
-
-
-def _record_unknown(source: str) -> None:
-    meter = CURRENT_METER.get()
-    if meter is None:
-        return
-    try:
-        meter.record(source, None)
-    except Exception:  # pragma: no cover - instrumentation must not fail a run
-        logger.debug("Failed to record an unknown mem0 call", exc_info=True)

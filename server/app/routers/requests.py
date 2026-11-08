@@ -1,13 +1,14 @@
 import uuid
 from datetime import datetime
 
-from app.core.auth import require_admin
-from app.core.db import get_db
 from fastapi import APIRouter, Depends, Query
-from app.models import RequestLog
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+
+from app.core.auth import require_admin
+from app.core.db import get_db
+from app.models import RequestLog
 
 router = APIRouter(prefix="/requests", tags=["requests"])
 

@@ -78,7 +78,7 @@ COPY --from=dashboard-build /build/public /app/dashboard/public
 
 COPY server/entrypoint.all-in-one.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh \
-    && mkdir -p /app/history \
+    && mkdir -p /app/history /app/memory \
     && chown -R postgres:postgres /var/lib/postgresql
 
 EXPOSE 8000 3000

@@ -4,7 +4,7 @@
 - `onboarding_completed` — fires when the setup wizard reaches its final success state
   (so dashboard installs emit both; API-only installs emit only the first).
 
-Enabled by default (matching the mem0 OSS library). Opt out with `MEM0_TELEMETRY=false`.
+Enabled by default. Opt out with `BOKACLAW_TELEMETRY=false`.
 Fires to the same PostHog project the library uses. Shared properties: email domain,
 server version, and a randomly generated install UUID. `onboarding_completed` also
 carries the operator's freeform use-case string.
@@ -19,13 +19,12 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
-import mem0
-
 PROJECT_API_KEY = "phc_hgJkUVJFYtmaJqrvf6CYN67TIQ8yhXAkWzUn9AMU4yX"
 HOST = "https://us.i.posthog.com"
 
-ENABLED = os.environ.get("MEM0_TELEMETRY", "true").lower() not in {"0", "false", "no", "off"}
-STATE_PATH = Path(os.environ.get("MEM0_TELEMETRY_STATE_PATH", "/app/history/telemetry.json"))
+ENABLED = os.environ.get("BOKACLAW_TELEMETRY", "true").lower() not in {"0", "false", "no", "off"}
+STATE_PATH = Path(os.environ.get("BOKACLAW_TELEMETRY_STATE_PATH", "/app/history/telemetry.json"))
+SERVER_VERSION = os.environ.get("BOKACLAW_VERSION", "0.1.0")
 
 _lock = Lock()
 _client: Any = None
@@ -73,7 +72,7 @@ def _get_client():
 
 def log_status() -> None:
     if ENABLED:
-        logging.info("telemetry: anonymous telemetry is enabled. Set MEM0_TELEMETRY=false to disable.")
+        logging.info("telemetry: anonymous telemetry is enabled. Set BOKACLAW_TELEMETRY=false to disable.")
 
 
 def _capture_once(email: str, event: str, state_key: str, extra: dict[str, Any] | None = None) -> None:
@@ -95,7 +94,7 @@ def _capture_once(email: str, event: str, state_key: str, extra: dict[str, Any] 
                 event=event,
                 properties={
                     "email_domain": email.rsplit("@", 1)[-1].lower() if "@" in email else "unknown",
-                    "server_version": mem0.__version__,
+                    "server_version": SERVER_VERSION,
                     **(extra or {}),
                 },
             )
@@ -117,7 +116,7 @@ def log_dashboard_nudge_once(dashboard_url: str) -> None:
     """Log a hint pointing the operator to the web dashboard the first time a memory
     is stored. Fires at most once per process (so a restart may re-log it on the next
     add — harmless for a discovery nudge). LOCAL console log only — sends nothing
-    off-box, so it is intentionally NOT gated by MEM0_TELEMETRY.
+    off-box, so it is intentionally NOT gated by BOKACLAW_TELEMETRY.
     """
     global _dashboard_nudge_logged
     if _dashboard_nudge_logged:

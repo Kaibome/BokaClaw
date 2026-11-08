@@ -456,10 +456,8 @@ const zh: Messages = {
     "删除用例不会改变历史评测结果；它们会保留冻结的快照。",
   "evalCases.delete.deleting": "删除中…",
 
-  // Locked cloud features
-  "locked.message": "此功能在 Mem0 Cloud 与企业版中提供。",
-  "locked.startFree": "免费试用云端版",
-  "locked.talkToSales": "联系销售",
+  // 自托管版本未包含的功能
+  "locked.message": "此功能在自托管 BokaClaw 版本中不可用。",
   "analytics.title": "分析",
   "analytics.description": "按时间跟踪记忆操作、延迟与使用模式。",
   "analytics.stat.totalOperations": "操作总数",
@@ -612,11 +610,7 @@ const zh: Messages = {
   "auth.resetTitle": "重置管理员密码",
   "auth.resetDescription":
     "在服务器主机上运行以下命令。它会覆盖现有密码；已经登录的用户会保持登录，直到会话过期。",
-  "auth.quote":
-    "Mem0 让我们为每位学生提供真正的个性化辅导，整个集成只花了一个周末。",
-  "auth.quoteAuthor": "Michael Tong",
-  "auth.quoteRole": "RevisionDojo 首席技术官",
-  "auth.trustedBy": "深受 100,000+ 开发者信赖",
+  "auth.tagline": "自托管 AI Agent 工作台",
 
   // Settings
   "settings.title": "设置",

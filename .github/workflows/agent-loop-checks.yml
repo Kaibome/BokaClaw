@@ -1,0 +1,46 @@
+name: Agent Runtime CI
+
+# The embeddable bokaclaw-agent ReAct runtime.
+# On PRs this is invoked by ci-gate.yml (the single required check);
+# push-to-main and manual runs remain standalone.
+on:
+  workflow_call:
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+    paths:
+      - 'agent-loop/**'
+      - '.github/workflows/agent-loop-checks.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Agent runtime (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: agent-loop/pyproject.toml
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install "./agent-loop[postgres,test]"
+          pip install ruff
+
+      - name: Ruff
+        run: ruff check agent-loop/src agent-loop/tests
+
+      - name: Pytest
+        run: pytest agent-loop/tests -q

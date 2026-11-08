@@ -33,9 +33,9 @@ DOCS_DIR = REPO_ROOT / "docs"
 LLMS_TXT = DOCS_DIR / "llms.txt"
 IGNORE_FILE = REPO_ROOT / "scripts" / "llms-txt-ignore.txt"
 
-BASE_URL = "https://docs.mem0.ai/"
+BASE_URL = "https://docs.bokaclaw.ai/"
 TRIAGE_HEADER = "## Unclassified - needs triage"
-URL_RE = re.compile(r"\(https://docs\.mem0\.ai/([^)\s#]*)")
+URL_RE = re.compile(r"\(https://docs\.bokaclaw\.ai/([^)\s#]*)")
 
 
 def load_ignore_prefixes() -> list[str]:

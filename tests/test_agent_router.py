@@ -40,8 +40,8 @@ from app.agent.schemas import ConversationMessageOut, ConversationOut  # noqa: E
 from app.agent.store import DEFAULT_TITLE, MAX_TITLE_LENGTH, derive_title, get_owned_conversation  # noqa: E402
 from app.core.auth import require_auth  # noqa: E402
 from app.core.db import get_db  # noqa: E402
-from app.models import User  # noqa: E402
 from app.core.rate_limit import limiter  # noqa: E402
+from app.models import User  # noqa: E402
 from app.routers import agent as agent_router  # noqa: E402
 from app.routers import conversations as conversations_router  # noqa: E402
 

@@ -11,7 +11,7 @@ export type EffectiveConfig = {
   embedder?: ProviderConfig;
 };
 
-// Mirrors the defaults in the mem0 SDK so switching provider never carries a
+// Mirrors the server defaults so switching provider never carries a
 // model name that belongs to the previous provider.
 export const DEFAULT_LLM_MODELS: Record<string, string> = {
   openai: "gpt-5-mini",

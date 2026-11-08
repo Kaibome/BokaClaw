@@ -1,7 +1,7 @@
 """Tests for the in-process agent runtime wrapper in `server/app/agent/runtime.py`.
 
 The ``bokaclaw-agent`` SDK is replaced with a fake, so these tests cover the
-server-side contract only: model resolution from mem0/env, payload validation,
+server-side contract only: model resolution from persisted config/env, payload validation,
 memory tool scoping, and the mapping from SDK failures to ``AgentLoopError``.
 """
 
@@ -264,22 +264,22 @@ def test_no_model_is_unconfigured(monkeypatch):
     assert agent_runtime.load_local_config() is None
 
 
-def test_reuses_mem0_openai_config(monkeypatch):
+def test_reuses_configured_openai_llm(monkeypatch):
     monkeypatch.setattr(
         agent_runtime,
         "_current_llm_config",
-        lambda: {"provider": "openai", "config": {"model": "gpt-test", "api_key": "sk-mem0"}},
+        lambda: {"provider": "openai", "config": {"model": "gpt-test", "api_key": "sk-test"}},
     )
 
     config = agent_runtime.load_local_config()
 
     assert config is not None
     assert config.model == "gpt-test"
-    assert config.api_key == "sk-mem0"
+    assert config.api_key == "sk-test"
     assert config.base_url is None
 
 
-def test_reuses_mem0_deepseek_config_with_default_base_url(monkeypatch):
+def test_reuses_configured_deepseek_llm_with_default_base_url(monkeypatch):
     monkeypatch.setattr(
         agent_runtime,
         "_current_llm_config",
@@ -303,11 +303,11 @@ def test_deepseek_without_key_or_explicit_base_url_is_unconfigured(monkeypatch):
     assert agent_runtime.load_local_config() is None
 
 
-def test_explicit_env_wins_over_mem0(monkeypatch):
+def test_explicit_env_wins_over_configured_llm(monkeypatch):
     monkeypatch.setattr(
         agent_runtime,
         "_current_llm_config",
-        lambda: {"provider": "openai", "config": {"model": "gpt-test", "api_key": "sk-mem0"}},
+        lambda: {"provider": "openai", "config": {"model": "gpt-test", "api_key": "sk-test"}},
     )
     monkeypatch.setenv("AGENT_MODEL", "local-model")
     monkeypatch.setenv("AGENT_API_KEY", "local-key")
@@ -323,7 +323,7 @@ def test_explicit_env_wins_over_mem0(monkeypatch):
     )
 
 
-def test_explicit_model_allows_unsupported_mem0_provider(monkeypatch):
+def test_explicit_model_allows_unsupported_configured_provider(monkeypatch):
     monkeypatch.setattr(
         agent_runtime,
         "_current_llm_config",
@@ -340,7 +340,7 @@ def test_explicit_model_allows_unsupported_mem0_provider(monkeypatch):
     assert config.base_url == "http://localhost:8000/v1"
 
 
-def test_unsupported_mem0_provider_without_override_is_unconfigured(monkeypatch):
+def test_unsupported_configured_provider_without_override_is_unconfigured(monkeypatch):
     monkeypatch.setattr(
         agent_runtime,
         "_current_llm_config",
@@ -899,9 +899,9 @@ def test_memory_tools_are_scoped_to_the_user(monkeypatch):
     sdk = FakeSDK()
     tools = agent_runtime._memory_tools(sdk, "user-1")
 
-    assert [type(tool) for tool in tools] == [FakeTool, FakeTool]
+    assert [type(tool) for tool in tools] == [FakeTool] * 5
 
-    search, save = (tool.fn for tool in tools)
+    search, _get, save = (tool.fn for tool in tools[:3])
     search(query="tea", limit=99)
     save(content="The user likes tea.")
 
@@ -909,6 +909,8 @@ def test_memory_tools_are_scoped_to_the_user(monkeypatch):
     assert calls["add"] == {
         "messages": [{"role": "user", "content": "The user likes tea."}],
         "user_id": "user-1",
+        "memory_type": "preference",
+        "metadata": {"source": "curated", "trust": "agent"},
     }
 
 
@@ -956,7 +958,7 @@ async def test_stream_local_agent_emits_final_answer(monkeypatch):
             {"session_id": "conv-1", "user_id": "user-1"},
         )
     ]
-    assert len(runtime.tools) == 2
+    assert len(runtime.tools) == 5
     assert runtime.closed is True
     assert runtime.config.kwargs["model"].kwargs["model"] == "test-model"
 
@@ -1281,6 +1283,8 @@ def test_missing_sdk_is_reported_as_not_configured(monkeypatch):
 def test_build_runtime_registers_dev_tools_when_enabled(monkeypatch, tmp_path):
     monkeypatch.setenv("AGENT_DEV_TOOLS", "true")
     monkeypatch.setenv("AGENT_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.delenv("AGENT_TOOLS_ALLOW_SHELL", raising=False)
+    monkeypatch.delenv("AGENT_EXECUTOR_URL", raising=False)
     sdk = FakeSDK()
 
     agent_runtime.build_runtime(sdk, _config(), {"user_id": None, "message": "hi"})

@@ -95,7 +95,7 @@ class Conversation(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=_new_uuid)
     # The dashboard account that owns this conversation. Distinct from the
-    # mem0 `user_id` memory scope, which is passed to the agent executor.
+    # Legacy `user_id` memory scope, which is passed to the agent executor.
     created_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     title: Mapped[str] = mapped_column(String(200))
     agent_id: Mapped[str | None] = mapped_column(String(255), nullable=True)

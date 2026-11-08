@@ -38,8 +38,8 @@ Examples of unacceptable behavior include:
 
 ## Contribution Conduct
 
-Mem0 receives more contributions than any maintainer can read line by line. The
-rules below exist so that the time we do have goes to people who are actually
+BokaClaw receives more contributions than any maintainer can read line by line.
+The rules below exist so that the time we do have goes to people who are actually
 trying to improve the project. They apply to issues, pull requests, discussions,
 and reviews.
 
@@ -105,8 +105,10 @@ online or offline event.
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported to the maintainers at **support@mem0.ai**. All complaints will be
-reviewed and investigated promptly and fairly.
+reported privately to the maintainers through GitHub, for example by opening a
+[private security advisory](https://github.com/Kaibome/BokaClaw/security/advisories/new)
+addressed to the maintainers. All complaints will be reviewed and investigated
+promptly and fairly.
 
 All community leaders are obligated to respect the privacy and security of the
 reporter of any incident.

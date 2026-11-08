@@ -1,4 +1,4 @@
-"""Per-run model token accounting and mem0 instrumentation."""
+"""Per-run model token accounting."""
 
 import os
 import sys
@@ -13,8 +13,6 @@ if _SERVER_DIR not in sys.path:
 
 from app.agent.usage import (  # noqa: E402
     RunUsageMeter,
-    install_memory_metering,
-    meter_context,
     normalize_usage,
     usage_snapshot_from_metadata,
 )
@@ -164,84 +162,6 @@ def test_usage_snapshot_from_metadata_round_trips_and_upgrades_legacy():
     assert legacy["total_tokens"] == 10
 
     assert usage_snapshot_from_metadata({})["coverage"] == "unavailable"
-
-
-class _Completions:
-    def __init__(self) -> None:
-        self.calls = 0
-
-    def create(self, **kwargs):
-        self.calls += 1
-        return SimpleNamespace(
-            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=4, total_tokens=14)
-        )
-
-
-class _Chat:
-    def __init__(self) -> None:
-        self.completions = _Completions()
-
-
-class _Embeddings:
-    def __init__(self) -> None:
-        self.calls = 0
-
-    def create(self, **kwargs):
-        self.calls += 1
-        return SimpleNamespace(usage=SimpleNamespace(prompt_tokens=3, completion_tokens=0, total_tokens=3))
-
-
-class _Client:
-    def __init__(self) -> None:
-        self.chat = _Chat()
-        self.embeddings = _Embeddings()
-
-
-def test_memory_metering_wraps_openai_clients():
-    memory = SimpleNamespace(llm=SimpleNamespace(client=_Client()), embedding_model=SimpleNamespace(client=_Client()))
-    assert install_memory_metering(memory) is True
-    assert install_memory_metering(memory) is True  # idempotent
-
-    meter = RunUsageMeter()
-    with meter_context(meter):
-        memory.llm.client.chat.completions.create(model="m", messages=[])
-        memory.embedding_model.client.embeddings.create(model="e", input="x")
-
-    snapshot = meter.snapshot()
-    assert snapshot["sources"]["memory_llm"]["total_tokens"] == 14
-    assert snapshot["sources"]["memory_embedding"]["total_tokens"] == 3
-    assert snapshot["coverage"] == "complete"
-
-
-class _LocalLLM:
-    def __init__(self) -> None:
-        self.calls = 0
-
-    def generate_response(self, *args, **kwargs):
-        self.calls += 1
-        return "ok"
-
-
-def test_memory_metering_counts_unknown_for_providers_without_a_client():
-    memory = SimpleNamespace(llm=_LocalLLM(), embedding_model=None)
-    assert install_memory_metering(memory) is True
-
-    meter = RunUsageMeter()
-    with meter_context(meter):
-        memory.llm.generate_response(messages=[])
-
-    snapshot = meter.snapshot()
-    assert snapshot["coverage"] == "unknown"
-    assert snapshot["unknown_calls"] == 1
-    assert snapshot["total_tokens"] is None
-
-
-def test_memory_metering_is_inert_without_a_bound_meter():
-    memory = SimpleNamespace(llm=SimpleNamespace(client=_Client()), embedding_model=None)
-    assert install_memory_metering(memory) is True
-
-    # No meter_context: the wrapped call must still succeed.
-    assert memory.llm.client.chat.completions.create(model="m", messages=[]) is not None
 
 
 @pytest.mark.parametrize("usage", [None, {}, {"prompt_tokens": 0}])

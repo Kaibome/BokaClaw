@@ -1,6 +1,6 @@
-"""Tests for reusable research conclusions stored in mem0.
+"""Tests for reusable research conclusions stored in workspace memory.
 
-The mem0 runtime is replaced with a fake so no embedding model or database is
+The memory service is replaced with a fake so no embedding model or database is
 needed; these tests cover source extraction, the save/update decision, TTL and
 score filtering, and the block rendered into the system prompt.
 """

@@ -1,52 +1,31 @@
-sdk-python:
+server:
   - changed-files:
       - any-glob-to-any-file:
-          - 'mem0/**'
+          - 'server/**'
           - 'tests/**'
-          - 'cli/python/**'
-          - 'pyproject.toml'
-          - 'poetry.lock'
 
-sdk-typescript:
+agent-runtime:
   - changed-files:
       - any-glob-to-any-file:
-          - 'cli/node/**'
+          - 'agent-loop/**'
 
-vector-store:
+dashboard:
   - changed-files:
       - any-glob-to-any-file:
-          - 'mem0/vector_stores/**'
+          - 'dashboard/**'
 
-rest-api:
+memory:
   - changed-files:
-      - any-glob-to-any-file: 'server/**'
-
-integrations:
-  - changed-files:
-      - any-glob-to-any-file: 'integrations/**'
-
-plugin:
-  - changed-files:
-      - all-globs-to-any-file:
-          - 'integrations/**'
-          - '!integrations/vercel-ai-sdk/**'
       - any-glob-to-any-file:
-          - 'skills/**'
-          - '.agents/**'
-          - '.claude-plugin/**'
-          - '.codex-plugin/**'
-          - '.cursor-plugin/**'
-          - 'marketplace.json'
-
-cli:
-  - changed-files:
-      - any-glob-to-any-file: 'cli/**'
+          - 'server/app/memory/**'
+          - 'server/alembic/versions/**'
+          - 'docs/memory/**'
+          - 'server/scripts/migrate_mem0_to_workspace_memory.py'
 
 documentation:
   - changed-files:
       - any-glob-to-any-file:
           - 'docs/**'
-          - 'examples/**'
           - '*.md'
 
 ci:
@@ -55,3 +34,5 @@ ci:
           - '.github/**'
           - 'scripts/**'
           - '.pre-commit-config.yaml'
+          - 'Makefile'
+          - 'pyproject.toml'

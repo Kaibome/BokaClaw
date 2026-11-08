@@ -61,8 +61,9 @@ def evaluate_run(
     except Exception as exc:
         raise EvalExecutionError("eval_deepeval_unavailable", str(exc)) from exc
 
-    from deepeval import evaluate
     from deepeval.evaluate.configs import DisplayConfig, ErrorConfig
+
+    from deepeval import evaluate
 
     golden = _build_golden(golden_snapshot) if golden_snapshot is not None else None
     test_case = adapter.to_llm_test_case(spans, run=run, golden=golden)

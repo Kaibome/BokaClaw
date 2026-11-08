@@ -1,6 +1,6 @@
 """Delete request_logs rows older than REQUEST_LOG_RETENTION_DAYS (default 30).
 
-Run inside the `mem0` container, or wire into cron / a systemd timer on the host.
+Run inside the `bokaclaw-server` container, or wire into cron / a systemd timer on the host.
 """
 
 import os

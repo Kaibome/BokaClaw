@@ -171,8 +171,8 @@ progress at all.
 
 **Why**
 
-mem0 builds the embedder during startup, so the API does not serve until the
-~95 MB ONNX model is in the cache. fastembed's default cache is
+The memory backend builds the embedder during startup, so the API does not serve
+until the ~95 MB ONNX model is in the cache. fastembed's default cache is
 `/tmp/fastembed_cache`, which is container-local: every `RECREATE=1` starts
 empty and downloads again. `hf-mirror.com` answers quickly, but it redirects
 large files to Hugging Face's xet storage, whose speed from this machine
@@ -213,7 +213,7 @@ docker exec bokaclaw-server du -sh /app/history/fastembed     # ~91M
 curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8000/openapi.json   # 200, no "Downloading" in logs
 ```
 
-Do not delete the `mem0-local-history` volume to "fix" this: it also holds
-`history.db`. A retry is often enough on its own, since the slow xet route is
+Do not delete the `mem0-local-history` volume to "fix" this: it also holds the
+legacy `history.db` used by the one-time Mem0 migration. A retry is often enough on its own, since the slow xet route is
 intermittent; seeding is only worth the manual steps when a recreate keeps
 stalling.

@@ -311,12 +311,12 @@ build() ──▶ compress(messages, tools_tokens) ──▶ model_request
 | 实现 | 特点 |
 |---|---|
 | `InMemorySessionStore` | 进程内、`RLock` 保护、返回深拷贝；适合测试和短生命周期 Agent |
-| `PostgresSessionStore` | psycopg3 连接池 + 原生 SQL；与 mem0 共用数据库；可配置表前缀 |
+| `PostgresSessionStore` | psycopg3 连接池 + 原生 SQL；与 BokaClaw 应用共用数据库；可配置表前缀 |
 
 `PostgresConfig` 的关键点：
 
 - `dsn` 优先级最高；否则读取 `BOKACLAW_AGENT_POSTGRES_DSN` / `POSTGRES_DSN`，再回退 `POSTGRES_HOST` / `POSTGRES_PORT` / `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD`。
-- 默认库为 `postgres`（与 mem0 的 `memories` 表同库），默认表前缀 `bokaclaw_agent`。
+- 默认库为 `postgres`，默认表前缀 `bokaclaw_agent`；部署时通常指向应用数据库。
 - `table_prefix` 必须匹配 `^[a-z_][a-z0-9_]*$`，防止 SQL 注入。
 - `pool` 可注入，便于测试或与宿主共享连接池；只有自建池才会在 `close()` 时关闭。
 
@@ -693,7 +693,7 @@ dashboard ── POST /agent ──▶ server（鉴权 / 创建 agent_runs / 订
 | system prompt 不持久化 | 支持跨 run 调整提示词、避免重复；代价是持久化历史不含 system |
 | 裁剪/压缩只改模型视图 | 数据库保留完整对话、恢复后仍可用全文；代价是原会话越长，压缩时的摘要调用越多 |
 | token 预算用字符近似估算 | 不引入 tokenizer 依赖、实现简单；代价是预算不是精确 token 数，需要留余量 |
-| SDK 自带幂等 DDL | 无需迁移框架、可与 mem0 共库；代价是 schema 演进能力有限 |
+| SDK 自带幂等 DDL | 无需迁移框架、可与应用表共库；代价是 schema 演进能力有限 |
 | 失败时补齐 tool 消息 | 会话始终符合协议、可继续恢复；代价是数据库中出现合成的错误结果 |
 | Postgres 依赖放在 `postgres` extra | 纯内存场景无需安装数据库驱动；代价是用户需显式安装 |
 | 同步生成器流式 + 工作线程桥接 | 核心与 Provider 保持同步、实现简单；代价是异步宿主需要队列/线程桥接，取消只能协作式检查（不能抢占模型/工具） |

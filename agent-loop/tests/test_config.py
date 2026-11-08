@@ -34,7 +34,7 @@ def test_model_config_defaults():
 def test_postgres_config_from_env(monkeypatch):
     monkeypatch.setenv("POSTGRES_HOST", "db.local")
     monkeypatch.setenv("POSTGRES_PORT", "6543")
-    monkeypatch.setenv("POSTGRES_DB", "mem0_app")
+    monkeypatch.setenv("POSTGRES_DB", "bokaclaw_app")
     monkeypatch.setenv("POSTGRES_USER", "alice")
     monkeypatch.setenv("POSTGRES_PASSWORD", "secret")
     monkeypatch.delenv("BOKACLAW_AGENT_POSTGRES_DSN", raising=False)
@@ -44,7 +44,7 @@ def test_postgres_config_from_env(monkeypatch):
 
     assert config.host == "db.local"
     assert config.port == 6543
-    assert config.dbname == "mem0_app"
+    assert config.dbname == "bokaclaw_app"
     assert config.user == "alice"
     assert config.password == "secret"
     assert config.dsn is None

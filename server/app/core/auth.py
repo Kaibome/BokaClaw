@@ -3,14 +3,15 @@ import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from app.core.db import SessionLocal
 from fastapi import Depends, HTTPException, Request
 from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
-from app.models import APIKey, RefreshTokenJti, User
 from passlib.context import CryptContext
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
+
+from app.core.db import SessionLocal
+from app.models import APIKey, RefreshTokenJti, User
 
 JWT_SECRET = os.environ.get("JWT_SECRET", "")
 JWT_ALGORITHM = "HS256"

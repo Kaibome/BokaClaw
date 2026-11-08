@@ -16,7 +16,10 @@ function WebhooksMockup() {
       <CardContent className="p-6 space-y-4">
         <div className="space-y-2">
           <Label>{t("webhooks.form.endpointUrl")}</Label>
-          <Input placeholder="https://your-app.com/webhooks/mem0" disabled />
+          <Input
+            placeholder="https://your-app.com/webhooks/bokaclaw"
+            disabled
+          />
         </div>
         <div className="space-y-2">
           <Label>{t("webhooks.form.events")}</Label>
@@ -52,7 +55,6 @@ export default function WebhooksPage() {
       title={t("webhooks.title")}
       description={t("webhooks.description")}
       previewContent={<WebhooksMockup />}
-      utmMedium="dashboard-locked-webhooks"
     />
   );
 }

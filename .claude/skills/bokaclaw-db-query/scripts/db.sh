@@ -40,7 +40,7 @@ Commands:
 
 Examples:
   db.sh tables
-  db.sh -d postgres tables                 # mem0 database
+  db.sh -d postgres tables                 # legacy Mem0 tables
   db.sh schema conversations
   db.sh count request_logs
   db.sh query "SELECT id, title FROM conversations ORDER BY created_at DESC LIMIT 5"

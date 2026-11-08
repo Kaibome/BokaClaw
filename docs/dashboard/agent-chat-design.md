@@ -10,7 +10,7 @@
 
 ## 1. 背景与目标
 
-`dashboard/` 原有记忆相关页面：Requests、Memories、Entities、Categories、Webhooks、Analytics、Export、API Keys、Configuration、Settings。后端 `server/` 提供 mem0 记忆 CRUD 与配置接口。根目录 `agent-loop/` 已实现为可独立发布的 ReAct SDK（`bokaclaw-agent`），由 `server/` 进程内调用；`AGENT_LOOP_URL` 仅作为外部执行器的可选覆盖。
+`dashboard/` 原有记忆相关页面：Requests、Memories、Entities、Categories、Webhooks、Analytics、Export、API Keys、Configuration、Settings。后端 `server/` 提供记忆 CRUD 与配置接口。根目录 `agent-loop/` 已实现为可独立发布的 ReAct SDK（`bokaclaw-agent`），由 `server/` 进程内调用；`AGENT_LOOP_URL` 仅作为外部执行器的可选覆盖。
 
 本次改造落地一个与「记忆功能」平级的 **Agent 对话** 能力：
 
@@ -109,7 +109,7 @@ Content-Type: application/json
 - `conversation_id`：为空时自动创建会话，标题取首条消息前 80 个字符。
 - `message`：去空白后不能为空，服务端上限 32,000 字符。
 - `agent_id`：透传给执行层，用于记忆作用域。
-- `run_id`：已废弃的 mem0 记忆作用域字段，不再表示执行标识；执行的 run id 由服务端生成并在 `meta` 中返回。
+- `run_id`：已废弃的旧版记忆作用域字段，不再表示执行标识；执行的 run id 由服务端生成并在 `meta` 中返回。
 - `client_run_id`：客户端自带的关联标识，仅用于日志排查，不参与去重。
 - `metadata`：随 run 持久化到 `agent_runs.request_payload.metadata`，同时写入本轮用户消息。普通对话由 Agent 页面发起时不带该字段，run 不会被任何 case 绑定；评测回归由 Eval 页面的 `Run eval` 流水线发起（先按 case 输入跑 Agent，再评测），请求体附加 `{"eval_case_id": "<case>"}`。该值也会出现在 span 根节点 `input.eval_case_id`，`POST /evals` 据此校验 run 与所选 golden 是否一致，不一致返回 409 `eval_case_mismatch`。
 - `stream`：`false` 返回 JSON，`true` 返回 SSE。默认 `false`，Dashboard 固定传 `true`。
@@ -231,7 +231,7 @@ data: {"run_id":"uuid","conversation_id":"uuid","seq":6,"message_id":"uuid","que
 | 字段 | 含义 |
 |---|---|
 | `hits[]` | 实际注入本轮上下文的结论；`source=exact` 表示问题完全一致（按 `question_key` 命中），`source=vector` 表示语义召回 |
-| `score` / `combined_score` | 语义分和 mem0 混合分（`(semantic + bm25 + entity) / max_possible`）。阈值只比较 `score`；`combined_score` 仅供排查 |
+| `score` / `combined_score` | 语义分和混合检索分（`(semantic + bm25 + entity) / max_possible`）。阈值只比较 `score`；`combined_score` 仅供排查 |
 | `floor` / `ttl_days` | 本轮生效的相似度下限和有效期 |
 | `candidates` | 相似度检索返回的候选数（不含问题完全一致的命中） |
 | `skipped_low_score` / `skipped_stale` / `skipped_invalid` | 分别因低于阈值、超过 TTL、元数据不完整被丢弃的数量 |
@@ -534,7 +534,7 @@ router = APIRouter(prefix="/agent", tags=["agent"])
 默认 `AGENT_RUN_BACKGROUND=true`，走后台 run 模型：
 
 1. 校验请求，读取当前用户；把 `request_id_var.get()` 保存到局部变量，供后续日志使用。
-2. 若 `AGENT_LOOP_MOCK != true`、`AGENT_LOOP_URL` 为空，且进程内运行时无法解析模型（`AGENT_MODEL` 与 mem0 LLM 均不可用，或 SDK 未安装），在创建 run 之前返回：
+2. 若 `AGENT_LOOP_MOCK != true`、`AGENT_LOOP_URL` 为空，且进程内运行时无法解析模型（`AGENT_MODEL` 与持久化 LLM 配置均不可用，或 SDK 未安装），在创建 run 之前返回：
 
    ```json
    {
@@ -580,7 +580,7 @@ router = APIRouter(prefix="/agent", tags=["agent"])
 
 | code | HTTP / 事件 | 含义 |
 | --- | --- | --- |
-| `agent_not_configured` | 503 | 无法解析模型（`AGENT_MODEL` / mem0 LLM 均不可用），或 SDK 未安装 |
+| `agent_not_configured` | 503 | 无法解析模型（`AGENT_MODEL` / 持久化 LLM 配置均不可用），或 SDK 未安装 |
 | `agent_unreachable` | error / 502 | 外部执行器连接失败、DNS 失败 |
 | `agent_timeout` | error / 504 | 读取超时或单轮总时长超限 |
 | `agent_upstream_error` | error / 502 | 上游返回非 2xx，或模型调用失败 |
@@ -600,7 +600,7 @@ router = APIRouter(prefix="/agent", tags=["agent"])
 
 ```bash
 # ---- Agent chat ----
-# 默认进程内执行，复用 mem0 的 openai/deepseek LLM 配置
+# 默认进程内执行，复用持久化的 openai/deepseek LLM 配置
 # AGENT_MODEL=
 # AGENT_API_KEY=
 # AGENT_BASE_URL=
@@ -651,7 +651,7 @@ AGENT_LOOP_HISTORY_MESSAGES=40
 
 部署注意：
 
-- `server/docker-compose.yaml` 的 `mem0` 已使用 `env_file: .env`，变量会自动透传；增加 `extra_hosts: ["host.docker.internal:host-gateway"]` 便于 Linux 访问宿主机上的远程执行器；
+- `server/docker-compose.yaml` 的 `server` 已使用 `env_file: .env`，变量会自动透传；增加 `extra_hosts: ["host.docker.internal:host-gateway"]` 便于 Linux 访问宿主机上的远程执行器；
 - `server/entrypoint.all-in-one.sh` 透传上述变量并给默认值，不设置默认 `AGENT_LOOP_URL`；
 - `server/dev.Dockerfile`、`server/Dockerfile.all-in-one`、`server/Dockerfile` 都会 `COPY agent-loop /opt/agent-loop` 并安装，三套镜像都自带进程内执行层；
 - `AgentRunManager` 是进程内单例，当前假设 `server/` **单副本**部署；多副本会各自执行与持有订阅，尚未实现分布式租约或外部队列；
@@ -932,8 +932,8 @@ contextUsage: ContextUsage | null; // 派生：最后一条非 streaming 助手�
 cd server && docker compose up --build
 
 # 迁移可回滚
-docker compose exec mem0 alembic downgrade -1
-docker compose exec mem0 alembic upgrade head
+docker compose exec server alembic downgrade -1
+docker compose exec server alembic upgrade head
 
 # 未配置：清空 AGENT_MODEL、OPENAI_API_KEY，且 AGENT_LOOP_URL/AGENT_LOOP_MOCK 为空/false
 # 期望 503，code=agent_not_configured
@@ -992,13 +992,13 @@ pnpm build
 5. 刷新恢复：执行中刷新页面，`GET /conversations/{id}` 返回 `active_run`，页面从 `seq=0` 重放并继续实时更新；
 6. 多标签：同一会话在第二个标签发送应收到 409 并转为订阅已有 run，而不是创建第二个执行；
 7. 会话自动命名、重命名、删除、切换；刷新后历史仍在；活跃 run 期间删除会话应提示 409；
-8. 关闭 mock，清空 `AGENT_LOOP_URL` 并移除所有模型配置（`AGENT_MODEL` 与 mem0 LLM 都不可用）后，页面显示 `agent_not_configured` 内联提示；
+8. 关闭 mock，清空 `AGENT_LOOP_URL` 并移除所有模型配置（`AGENT_MODEL` 与持久化 LLM 配置都不可用）后，页面显示 `agent_not_configured` 内联提示；
 9. 切换浅色/深色主题，颜色、边框、滚动条与现有页面一致；
 10. 缩到 390px，检查 Sheet 侧栏与输入区可用。
 
 ### 10.4 进程内执行与远程切换
 
-关闭 mock 后，默认由进程内 `bokaclaw-agent` 执行，模型来自 mem0 LLM 配置或 `AGENT_MODEL` / `AGENT_API_KEY` / `AGENT_BASE_URL`。要验证远程路径，启动一个实现 4.4 节契约的 stub，设置：
+关闭 mock 后，默认由进程内 `bokaclaw-agent` 执行，模型来自持久化 LLM 配置或 `AGENT_MODEL` / `AGENT_API_KEY` / `AGENT_BASE_URL`。要验证远程路径，启动一个实现 4.4 节契约的 stub，设置：
 
 ```bash
 AGENT_LOOP_URL=http://host.docker.internal:8890   # 或 compose 内的 http://agent-loop:8890

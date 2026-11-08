@@ -1,7 +1,7 @@
 name: bokaclaw-dev
 
 services:
-  mem0:
+  server:
     build:
       context: ..
       dockerfile: server/dev.Dockerfile
@@ -14,15 +14,16 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
-      - mem0_network
+      - bokaclaw_network
     volumes:
       - ./history:/app/history
+      - memory_data:/app/memory
       - .:/app
     depends_on:
       postgres:
         condition: service_healthy
     command: >
-      sh -c "rm -rf /app/packages && pip install -q --force-reinstall --no-deps mem0ai && alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+      sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
     environment:
       - PYTHONDONTWRITEBYTECODE=1
       - PYTHONUNBUFFERED=1
@@ -31,14 +32,16 @@ services:
       - APP_DB_NAME=mem0_app
       - JWT_SECRET=${JWT_SECRET}
       - AUTH_DISABLED=${AUTH_DISABLED:-false}
-      - MEM0_TELEMETRY=${MEM0_TELEMETRY:-true}
+      - BOKACLAW_TELEMETRY=${BOKACLAW_TELEMETRY:-true}
+      - MEMORY_BACKEND=${MEMORY_BACKEND:-markdown}
+      - AGENT_MEMORY_ROOT=/app/memory
 
   postgres:
       image: pgvector/pgvector:pg17
       restart: on-failure
       shm_size: "128mb"
       networks:
-        - mem0_network
+        - bokaclaw_network
       environment:
         - POSTGRES_USER=${POSTGRES_USER:-postgres}
         - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
@@ -53,18 +56,18 @@ services:
       ports:
         - "8432:5432"
 
-  mem0-dashboard:
+  dashboard:
     build: ../dashboard
     ports:
       - "3000:3000"
     networks:
-      - mem0_network
+      - bokaclaw_network
     environment:
       - NEXT_PUBLIC_API_URL=http://localhost:8888
-      - API_INTERNAL_URL=http://mem0:8000
+      - API_INTERNAL_URL=http://server:8000
       - NEXT_PUBLIC_INSTANCE_NAME=BokaClaw
     depends_on:
-      mem0:
+      server:
         condition: service_started
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/health"]
@@ -74,7 +77,8 @@ services:
 
 volumes:
   postgres_db:
+  memory_data:
 
 networks:
-  mem0_network:
+  bokaclaw_network:
     driver: bridge

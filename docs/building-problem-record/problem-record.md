@@ -772,6 +772,29 @@
 
 ---
 
+## P-26 工作区 Markdown 记忆迁移：CLI 未初始化状态、测试环境旧配置干扰
+
+- **状态**：已解决
+- **发现时间**：2026-11-09
+- **解决时间**：2026-11-09
+- **场景**：把 Mem0 替换为工作区 Markdown 权威存储后，在真实 Docker 栈中执行 `python -m app.memory.cli reconcile --all`，以及运行迁移后的 server/agent 测试套件。
+- **现象**：
+  1. CLI 直接报 `RuntimeError: Memory runtime has not been initialized.`，尽管 API 进程内记忆正常；
+  2. 测试套件中 `test_server_auth.py` / `test_server_params.py` 在单独执行时通过，全量执行时大量 401/断言失败；
+  3. 根目录测试仍引用已删除的 `install_memory_metering`、`mem0.Memory.from_config`、`server.main`。
+- **根因**：
+  1. `app.memory.cli` 只调用 `get_memory_instance()`，没有像 `app.main` 那样先执行 `initialize_state(DEFAULT_CONFIG)`；
+  2. `app.core.auth` 在 import 时缓存 `ADMIN_API_KEY` / `AUTH_DISABLED`，测试重载 `app.main` 不会刷新这两个全局变量，且容器环境自带 `AUTH_DISABLED=true` / `AGENT_TOOLS_ALLOW_SHELL=true`，造成跨用例污染；
+  3. 旧测试尚未随 Mem0 移除更新。
+- **解决措施**：
+  1. `cli.main()` 在解析参数前 `import app.main`，复用 API 的初始化路径；
+  2. 测试 fixture 在 reload 前后同步 `app.core.auth` 的全局变量，并显式设置 `AUTH_DISABLED`、清除 shell 相关 env；mock 目标改为 `app.main.get_memory_instance`；
+  3. 重写 `test_run_usage.py`、`test_server_params.py`、`test_server_auth.py` 等引用，更新记忆工具数量/参数断言与 `save_turn_memory` 事件断言。
+- **解决后效果**：`reconcile --all` 正常输出用户条目数；server + 根目录 512 passed / 1 skipped，agent-loop 194 passed / 1 skipped；真实栈中 `POST /search` 命中更新后的偏好，轮末 capture 写入当日 Markdown，MEMORY 工具触发的轮次按 `memory_tool_used` 跳过重复 capture。
+- **可复用结论**：任何依赖模块级 env 缓存的测试，重载入口模块时必须同时刷新被入口模块 import 的配置模块；容器环境变量会让“单独通过、全量失败”的用例暴露出来，fixture 应显式固定自己依赖的开关，而不是继承宿主环境。
+
+---
+
 ## 变更记录
 
 | 日期 | 变更 |
@@ -813,3 +836,4 @@
 | 2026-11-07 | 实现工具并发（P0 + server 接入）：`Tool.effect` / `concurrency_safe`、`ToolRegistry.plan_batches` / `invoke_batch` / `invoke_many`、`AgentConfig.tool_concurrency`；runtime 改为按批执行、按批次顺序回放事件与 run 级状态，保留取消与协议配对；server 新增 `AGENT_TOOL_CONCURRENCY`（默认 1），Read/Glob/Grep/WebFetch/WebSearch 标记为并发安全，写工具、shell、Monitor、子 Agent 保持串行；新增 13 个测试，agent-loop 194 passed / 1 skipped，ruff 通过 |
 | 2026-11-07 | 启用 Eval 页 LLM judge：确认按钮禁用源于 `EVAL_JUDGE_ENABLED` 默认 false（`server/app/eval/config.py`，前端 `judgeDisabled = !config?.judge_enabled`）；在 `server/.env` 写入 `EVAL_JUDGE_*`（provider `deepseek`、model `deepseek-chat`、key 复用 `AGENT_API_KEY`），重建 `bokaclaw-server` 与 `bokaclaw-eval`；`GET /evals/config` 返回 `judge_enabled=true`，容器内验证 DeepSeek key 可用且 deepeval `DeepSeekModel` 调用成功（发现时间 2026-11-07，解决时间 2026-11-07） |
 | 2026-11-07 | 追加 P-25（部分缓解）：新增系统提示指令层级条款、WebFetch 不可信内容包裹（带 source、防伪造边界）、研究记忆从 system prompt 降级为当前提问前的 user 参考消息；同步 `server/README.md` 的 Prompt-injection posture 与新单测（发现时间 2026-11-07，解决时间 2026-11-07） |
+| 2026-11-09 | 追加 P-26 并完成记忆架构迁移：工作区 Markdown（`USER.md` / `MEMORY.md` / `memory/YYYY-MM-DD.md`）成为唯一权威存储，Postgres 只保留可重建的 `memory_index_*` / `memory_history` 派生索引（迁移 014）；一次性导入旧 Mem0 行与 SQLite history；agent 暴露五个记忆工具，轮末无 LLM capture，召回以 user 角色 `<recalled-memories>` 注入；移除 `mem0ai` 依赖、CLI/integrations/旧测试与文档，dashboard 去除 Mem0 云版推广与品牌链接；真实栈验证 reconcile / search / capture / recall，512 + 194 tests 通过（发现时间 2026-11-09，解决时间 2026-11-09） |

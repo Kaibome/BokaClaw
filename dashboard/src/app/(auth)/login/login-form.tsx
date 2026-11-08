@@ -180,57 +180,9 @@ export default function LoginForm() {
 
       <div className="relative hidden h-screen flex-1 items-center justify-center overflow-hidden bg-gradient-to-b from-[#31275A] to-[#5C49A3] px-10 lg:flex">
         <div className="pointer-events-none absolute inset-0 bg-[url('/images/dither.svg')] bg-bottom bg-no-repeat bg-contain" />
-        <div className="relative z-10 flex w-full max-w-[564px] flex-col items-center gap-20 text-center text-white">
-          <div className="w-full space-y-5">
-            <p className="typo-h3 text-white">&quot;{t("auth.quote")}&quot;</p>
-            <div className="flex flex-col items-center gap-[7px]">
-              <div className="flex flex-col items-center gap-1">
-                <p className="typo-body-sm text-white">
-                  {t("auth.quoteAuthor")}
-                </p>
-                <p className="typo-body-xs text-white">{t("auth.quoteRole")}</p>
-              </div>
-              <Image
-                src="/images/micheal.png"
-                alt="Michael Tong"
-                width={32}
-                height={32}
-                className="size-8 rounded-full object-cover"
-              />
-            </div>
-          </div>
-          <div className="flex w-full flex-col items-center gap-3">
-            <p className="typo-body text-white">{t("auth.trustedBy")}</p>
-            <div className="flex items-center justify-center gap-8 text-white">
-              <div className="h-6 shrink-0">
-                <Image
-                  src="/images/logos/aws.svg"
-                  alt="AWS"
-                  width={41}
-                  height={24}
-                  className="size-full object-contain"
-                />
-              </div>
-              <div className="h-5 shrink-0">
-                <Image
-                  src="/images/logos/nvidia.svg"
-                  alt="NVIDIA"
-                  width={109}
-                  height={21}
-                  className="size-full object-contain"
-                />
-              </div>
-              <div className="h-[21px] shrink-0">
-                <Image
-                  src="/images/vercel.png"
-                  alt="Vercel"
-                  width={66}
-                  height={21}
-                  className="size-full object-contain"
-                />
-              </div>
-            </div>
-          </div>
+        <div className="relative z-10 flex w-full max-w-[564px] flex-col items-center gap-4 text-center text-white">
+          <p className="typo-h2 text-white">BokaClaw</p>
+          <p className="typo-body text-white/80">{t("auth.tagline")}</p>
         </div>
       </div>
     </div>

@@ -515,6 +515,9 @@ class SpanRecorder:
             output={
                 "hits": _bounded(_redact(event.hits), self.options.max_bytes),
                 "chars": event.chars,
+                "profile_chars": event.profile_chars,
+                "query_hits": event.query_hits,
+                "research_hits": event.research_hits,
             },
             attributes={
                 "floor": event.floor,
@@ -524,6 +527,8 @@ class SpanRecorder:
                 "skipped_stale": event.skipped_stale,
                 "skipped_invalid": event.skipped_invalid,
                 "skipped_reason": event.skipped_reason,
+                "budget_tokens": event.budget_tokens,
+                "categories": event.categories,
             },
             error=event.error,
         )
@@ -550,11 +555,17 @@ class SpanRecorder:
                 "memory_id": event.memory_id,
                 "sources": event.sources,
                 "chars": event.chars,
+                "kind": event.kind,
+                "path": event.path,
+                "captured": event.captured,
+                "entries": event.entries,
             },
             attributes={
                 "action": event.action,
                 "reason": event.reason,
                 "memory_id": event.memory_id,
+                "kind": event.kind,
+                "path": event.path,
             },
             error=event.error,
         )

@@ -41,11 +41,11 @@ from app.agent.interactions import RunInteraction
 from app.agent.loop import stream_agent
 from app.agent.payloads import attach_trace, should_persist_reply, tool_call_payload, tool_result_payload
 from app.agent.repo import RunRepository, utcnow
-from app.agent.research_memory import ResearchSave, save_research
 from app.agent.schemas import ActiveRunOut, AgentRunOut, ContextUsageOut
 from app.agent.spans import SpanOptions, SpanRecorder
 from app.agent.store import serialize_message
 from app.agent.trace import ToolTrace
+from app.agent.turn_memory import TurnMemorySave, save_turn_memory
 from app.agent.usage import (
     RunUsageMeter,
     meter_context,
@@ -845,14 +845,14 @@ class AgentRunManager:
             try:
                 with meter_context(usage_meter):
                     report = await asyncio.to_thread(
-                        save_research,
+                        save_turn_memory,
                         dict(run.request_payload or {}),
                         writer.content,
                         trace.snapshot(),
                     )
             except Exception as exc:
-                logger.warning("Failed to record research memory for run %s", run.id, exc_info=True)
-                report = ResearchSave(action="failed", error=f"{type(exc).__name__}: {exc}")
+                logger.warning("Failed to record turn memory for run %s", run.id, exc_info=True)
+                report = TurnMemorySave(action="failed", error=f"{type(exc).__name__}: {exc}")
             report.duration_ms = int((time.monotonic() - started) * 1000)
             save_event = AgentMemorySave(
                 action=report.action,
@@ -863,6 +863,10 @@ class AgentRunManager:
                 reason=report.reason,
                 error=report.error,
                 duration_ms=report.duration_ms,
+                kind=report.kind,
+                path=report.path,
+                captured=report.captured,
+                entries=report.entries,
             )
             await asyncio.to_thread(spans.handle, save_event)
             await writer.write("memory.save", {"message_id": _str_or_none(writer.assistant_id), **asdict(save_event)})

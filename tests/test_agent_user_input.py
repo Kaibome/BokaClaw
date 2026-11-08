@@ -21,6 +21,8 @@ _SERVER_DIR = os.path.join(os.path.dirname(_TESTS_DIR), "server")
 if _SERVER_DIR not in sys.path:
     sys.path.insert(0, _SERVER_DIR)
 
+from test_agent_runs import TEST_USER, FakeRepo, _config, _run  # noqa: E402
+
 import app.agent.interactions as interactions  # noqa: E402
 import app.routers.agent as agent_router  # noqa: E402
 from app.agent.events import (  # noqa: E402
@@ -35,7 +37,6 @@ from app.agent.schemas import AgentAnswerRequest  # noqa: E402
 from app.agent.user_input import build_user_input_tool  # noqa: E402
 from app.core.auth import require_auth  # noqa: E402
 from app.core.rate_limit import limiter  # noqa: E402
-from test_agent_runs import FakeRepo, TEST_USER, _config, _run  # noqa: E402
 
 
 class FakeWriter:

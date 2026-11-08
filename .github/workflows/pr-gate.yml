@@ -98,7 +98,7 @@ jobs:
               '',
               'Documentation-only changes skip this gate entirely.',
               '',
-              'See [CONTRIBUTING.md](https://github.com/mem0ai/mem0/blob/main/CONTRIBUTING.md) for the full policy.',
+              'See [CONTRIBUTING.md](https://github.com/Kaibome/BokaClaw/blob/main/CONTRIBUTING.md) for the full policy.',
             ].join('\n');
 
             await github.rest.issues.createComment({

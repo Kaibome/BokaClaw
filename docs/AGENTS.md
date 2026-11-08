@@ -1,6 +1,6 @@
 # Documentation (`docs/`)
 
-Mintlify site published at https://docs.mem0.ai.
+Mintlify site for BokaClaw.
 
 ## Commands
 
@@ -13,16 +13,14 @@ cd docs && mintlify dev
 
 | Path | Contents |
 |------|----------|
-| `api-reference/` | Platform REST endpoints |
-| `open-source/` | Self-hosted SDK guides |
-| `platform/` | Hosted platform guides |
-| `integrations/` | One page per integration |
-| `core-concepts/` | Memory model, graph memory, scoping |
-| `cookbooks/` | End-to-end recipes |
-| `contributing/` | Contributor guides |
+| `memory/` | Workspace-Markdown memory format, operations, migration |
+| `server/` | Server execution and human-in-the-loop design |
+| `agent-loop/` | ReAct runtime, tools, subagents, context compression |
+| `dashboard/` | Console behavior and i18n |
+| `eval/` | Evaluation architecture and the eval console |
+| `building-problem-record/` | Incident and problem records |
 | `docs.json` | Navigation tree |
-| `openapi.json` | Platform API spec |
-| `llms.txt` | Scope-tagged index for agents |
+| `llms.txt` | Index for agents reading the docs |
 
 ## Adding a page
 
@@ -30,20 +28,22 @@ Every new `.mdx` page needs three things, or CI fails:
 
 1. The page itself under the right section.
 2. A navigation entry in `docs.json`.
-3. A line in `llms.txt` with a scope tag (`[Platform]`, `[OSS]`, or `[Both]`) and a description that starts with `Use when ...`.
+3. A line in `llms.txt` with the `[Both]` scope tag and a description that starts with `Use when ...`.
 
-`docs-llms-txt-check.yml` runs on every PR touching `docs/**/*.mdx` and **blocks the merge** when `llms.txt` is out of sync. To fix:
+`docs-llms-txt-check.yml` runs on every PR touching `docs/**/*.mdx` and blocks the merge when
+`llms.txt` is out of sync. To fix:
 
 ```bash
 python scripts/check-llms-txt-coverage.py --write
 ```
 
-That scaffolds placeholders under `## Unclassified - needs triage`. Then replace each `[TODO: ...]` tag, rewrite the descriptions as `Use when ...`, move entries into the correct section, and delete the triage heading once it is empty.
+Replace each generated placeholder with a real `Use when ...` description, move it into the correct
+section, and delete the triage heading once it is empty.
 
 ## Conventions
 
 - Frontmatter needs `title`, `description`, and usually `icon`.
-- Mintlify components (`<Note>`, `<Card>`, `<Tabs>`, `<CodeGroup>`) are available; prefer them over raw HTML.
-- Code samples must be runnable. If a sample calls a public SDK method, it has to match the real signature.
-- Documentation-only PRs are exempt from the `accepted`-issue requirement in the PR gate, but not from the CLA.
-- Any change to a public SDK signature has to update the matching page here in the same PR.
+- Mintlify components (`<Note>`, `<Card>`, `<Tabs>`, `<CodeGroup>`) are available; prefer them over
+  raw HTML.
+- Code samples must be runnable. If a sample calls a public API, it has to match the real signature.
+- Any change to a public REST or SDK signature has to update the matching page here in the same PR.

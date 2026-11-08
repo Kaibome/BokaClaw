@@ -6,7 +6,7 @@ AGENT_RUN_RETENTION_DAYS (default 30). Spans also cascade with the run, so span
 retention can never exceed run retention. Only terminal runs are touched, so an
 active run can never lose its events mid-stream.
 
-Run inside the `mem0` container, or wire into cron / a systemd timer on the host.
+Run inside the `bokaclaw-server` container, or wire into cron / a systemd timer on the host.
 """
 
 import os

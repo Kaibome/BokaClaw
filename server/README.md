@@ -1,23 +1,18 @@
 # BokaClaw Self-Hosted Server
 
-Mem0 ships a self-hosted FastAPI server plus a local dashboard. It is secure by default, supports dashboard login and API keys, and exposes OpenAPI docs at `/docs`.
+BokaClaw ships a FastAPI server plus a local Next.js dashboard. Durable agent memory lives in
+workspace Markdown files; Postgres holds a rebuildable retrieval index plus sessions, runs,
+traces, and evaluation data. The server is secure by default, supports dashboard login and API
+keys, and exposes OpenAPI docs at `/docs`.
 
-> **Upgrading?** The Postgres image changed from the archived `ankane/pgvector:v0.5.1`
-> to the official `pgvector/pgvector:pg17`, and `POSTGRES_PASSWORD` is now a required
-> env var. If you have an existing install, see
-> [Migrating from ankane/pgvector to pgvector/pgvector](#migrating-from-ankanepgvector-to-pgvectorpgvector)
-> before running `docker compose up`.
-
-## Quick Start
+## Quick start
 
 ### Prerequisites
-
-Copy the example env file and set a Postgres password (required):
 
 ```bash
 cd server
 cp .env.example .env
-# Edit .env — at minimum set POSTGRES_PASSWORD and OPENAI_API_KEY
+# Edit .env — at minimum set POSTGRES_PASSWORD, JWT_SECRET, and a model API key
 ```
 
 ### Agent-first
@@ -29,11 +24,11 @@ cd server
 make bootstrap
 ```
 
-This starts the stack, waits for the API and dashboard to be ready, creates the first admin, and generates the first API key.
+This starts the stack, waits for the API and dashboard, creates the first admin, and generates the
+first API key.
 
-> The generated credentials print once in the `=== Ready ===` block. Save the password and API key before closing the terminal — the API key cannot be recovered afterwards.
-
-> `make bootstrap` skips the setup wizard, so the use-case → custom-instructions step doesn't run. To add custom instructions afterwards, `POST /configure` with `{"custom_instructions": "..."}`, or run the Browser-first flow on a fresh install.
+> The generated credentials print once in the `=== Ready ===` block. Save the password and API key
+> before closing the terminal — the API key cannot be recovered afterwards.
 
 You can override the generated credentials:
 
@@ -52,16 +47,11 @@ OUTPUT=json make seed
 Teardown:
 
 ```bash
-# Stop the stack
-cd server && make down
-
-# Wipe all data (including the Postgres volume)
-cd server && make clean
+cd server && make down      # stop the stack
+cd server && make clean     # stop and delete volumes, including memory workspaces
 ```
 
 ### Browser-first
-
-Start the stack and finish setup by walking through the wizard in your browser.
 
 ```bash
 cd server
@@ -70,35 +60,126 @@ make up
 
 Then open `http://localhost:3000` and complete the setup wizard.
 
-## Security Defaults
+## Memory
+
+### Workspace Markdown is authoritative
+
+Each dashboard user gets a workspace under `AGENT_MEMORY_ROOT/users/<user_id>/`:
+
+```
+USER.md                # identity and durable preferences, always injected
+MEMORY.md              # curated long-term facts
+memory/YYYY-MM-DD.md   # episodic captures and research conclusions
+```
+
+An entry is a Markdown bullet plus an indented `<!-- memory: {...} -->` metadata comment. The files
+are human-readable and diffable; `trust` is written by code and never parsed from Markdown.
+
+### Postgres is a derived index
+
+Alembic migration `014` creates:
+
+| Table | Purpose |
+|---|---|
+| `memory_index_entries` | One row per memory bullet; hybrid search fields and the embedding |
+| `memory_index_files` | File hash/mtime state used for incremental reconciliation |
+| `memory_history` | ADD/UPDATE/DELETE audit trail, in the legacy row shape |
+| `memory_embedding_cache` | `(model, dims, content_hash) -> embedding` |
+| `memory_index_state` | Per-user dirty flag, last reconcile, re-embed flag |
+
+The index can be dropped and rebuilt at any time:
+
+```bash
+docker exec bokaclaw-server python -m app.memory.cli reconcile --all
+docker exec bokaclaw-server python -m app.memory.cli reindex --user <user_id>
+```
+
+### Writes
+
+- After a completed turn, the server appends one filtered episode to `memory/YYYY-MM-DD.md`. This
+  is deterministic — no extraction model is called. Noise and secrets are filtered/redacted, and
+  turns that already used a memory write tool, came from a subagent, or were triggered by cron are
+  skipped.
+- Explicit `save_memory` writes a curated fact to `MEMORY.md` (or `USER.md` for identity). Research
+  conclusions are written to the day file under `## Research`.
+- The generic `Write`/`Edit` tools cannot modify memory files. Only the memory tools can.
+
+### Reads
+
+Before each turn the server builds a small always-on profile (`USER.md` plus curated
+identity/configuration/rule entries) and runs a hybrid query search. Results are injected as a
+user-role `<recalled-memories>` message, never into the system prompt, and are labeled as data.
+`trust="untrusted"` content is stored and searchable but never auto-injected.
+
+Relevance combines semantic similarity, keyword score, importance, and a recency half-life (90 days
+for episodes, 365 for curated facts; identity/configuration/rules do not decay). The query layer is
+capped at `AGENT_MEMORY_RECALL_TOKENS` / `AGENT_MEMORY_RECALL_MAX`, and the whole injection block is
+capped at 3000 characters.
+
+### Agent memory tools
+
+`POST /agent` exposes five tools, all scoped to the signed-in user's UUID:
+
+| Tool | Effect |
+|---|---|
+| `search_memories` | Hybrid search over the user's entries |
+| `get_memory` | Read one entry by id |
+| `save_memory` | Write a curated fact (`kind=identity` goes to `USER.md`) |
+| `update_memory` | Change text, kind, or importance |
+| `delete_memory` | Remove one entry |
+
+Set `AGENT_MEMORY_REQUIRE_APPROVAL=true` to confirm `update_memory` and `delete_memory` through the
+human-in-the-loop `ask_user` channel.
+
+### Embeddings
+
+Vectors are normalized and zero-padded to `halfvec(3072)`. Each row records `embedding_model` and
+`embedding_dims`; search only uses vectors from the current model, and other rows stay keyword
+searchable until a background re-embed completes. Changing the embedder through `/configure` marks
+the index for re-embedding.
+
+### Migration from Mem0
+
+Existing Mem0 rows and the legacy SQLite history file can be imported once:
+
+```bash
+docker exec bokaclaw-server python scripts/migrate_mem0_to_workspace_memory.py --dry-run
+docker exec bokaclaw-server python scripts/migrate_mem0_to_workspace_memory.py --verify
+```
+
+See [`docs/memory/migration.mdx`](../docs/memory/migration.mdx) for user mapping, backups, and
+rollback.
+
+## Security defaults
 
 - Dashboard login uses JWTs.
 - Programmatic access uses `X-API-Key`.
-- Auth is enabled by default.
-- `AUTH_DISABLED=true` exists for local development only and should not be used in production.
+- Auth is enabled by default. `AUTH_DISABLED=true` exists for local development only.
+- Memory workspaces are created `0o700` with `0o600` files, and `AGENT_MEMORY_ROOT` must not be
+  inside `AGENT_WORKSPACE_ROOT` or mounted into the executor container.
 
 ## Forgotten password
-
-Reset an admin password from the host while the stack is running:
 
 ```bash
 cd server
 make reset-admin-password EMAIL=admin@example.com PASSWORD='new-strong-password'
 ```
 
-This is the supported recovery path. Anyone with shell access to the host already has full access to the database and secrets, so this command does not expand the attack surface.
+Anyone with shell access to the host already has full access to the database and secrets, so this
+command does not expand the attack surface.
 
 ## Request log retention
 
-The `request_logs` table is append-only and grows with traffic (~864k rows/day at 10 req/s). Prune it periodically:
+`request_logs` is append-only. Prune it periodically:
 
 ```bash
 cd server
 make prune-logs                               # defaults to 30 days
-make prune-logs REQUEST_LOG_RETENTION_DAYS=7  # shorter window
+make prune-logs REQUEST_LOG_RETENTION_DAYS=7
 ```
 
-Wire the command into cron or a systemd timer in production. The `created_at` column uses a BRIN index, so range deletes stay cheap even on large tables.
+Wire the command into cron or a systemd timer in production. The `created_at` column uses a BRIN
+index, so range deletes stay cheap on large tables.
 
 ## Local URLs
 
@@ -108,80 +189,36 @@ Wire the command into cron or a systemd timer in production. The `created_at` co
 
 ## Dashboard
 
-Once logged in, the dashboard exposes:
-
-- **Requests** — live audit log of API calls (method, path, status, latency).
-- **Memories** — browse memories, filter by user ID.
-- **Agent** — chat with the agent runtime. Conversations and messages are stored in the app database.
-- **Entities** — list every `user_id`, `agent_id`, and `run_id` that owns memories, with counts. Delete an entity to cascade-delete its memories.
+- **Requests** — live audit log of API calls.
+- **Memories** — browse, search, create, edit, and delete memory entries.
+- **Agent** — chat with the agent runtime. Conversations and runs are stored in the app database.
+- **Entities** — list every `user_id`, `agent_id`, and `run_id` with entry counts.
 - **API Keys** — create, label, and revoke per-user keys.
-- **Configuration** — runtime LLM and embedder override. Changes persist to the app database and reapply on restart, layered over the values from your `.env`.
+- **Configuration** — runtime LLM and embedder override, persisted in the app database.
 - **Settings** — account profile and password.
 
 ## Agent chat
 
 `POST /agent` runs one agent turn for the signed-in user with the bundled
-[`bokaclaw-agent`](../agent-loop/README.md) ReAct runtime, in-process. The
-runtime reuses the LLM configured for mem0 (provider `openai` or `deepseek`),
-so `OPENAI_API_KEY` or `DEEPSEEK_API_KEY` is enough; set `AGENT_MODEL` /
-`AGENT_API_KEY` / `AGENT_BASE_URL` to use another OpenAI-compatible endpoint.
-Context-compression summaries can run on a separate, cheaper model through
-`AGENT_COMPRESSION_MODEL` (plus optional `AGENT_COMPRESSION_API_KEY` /
-`AGENT_COMPRESSION_BASE_URL`); the key and URL default to the agent's.
-Two memory tools are exposed to the model, both scoped to the signed-in user's
-UUID: `search_memories` and `save_memory`. The Claude Code-style developer
-tools are also registered by default: `Read`, `Write`, `Edit`, `NotebookEdit`,
-`Glob`, `Grep`, `WebFetch`, `WebSearch`, and the presentation tools
-`PptxBuild`, `PptxUpdateSlide`, `PptxAddSlide`, and `PptxDeleteSlide`. The
-Pptx tools take a structured slide spec, so the model writes slide content and
-the server owns layout, wrapping, font sizing, and page numbers; changes are
-applied one slide at a time. `Bash`, `PowerShell`, and `Monitor` are added only
-when `AGENT_TOOLS_ALLOW_SHELL=true`. `AGENT_OFFICE_TOOLS=false` removes the
-Pptx tools; they are also skipped automatically when python-pptx is missing.
+[`bokaclaw-agent`](../agent-loop/README.md) ReAct runtime, in-process. It reuses the configured LLM
+(provider `openai` or `deepseek`); set `AGENT_MODEL` / `AGENT_API_KEY` / `AGENT_BASE_URL` to use
+another OpenAI-compatible endpoint. Compression summaries can run on a separate, cheaper model via
+`AGENT_COMPRESSION_MODEL`.
 
-`WebFetch` caches every successful page for the duration of one run: repeating a
-URL (ignoring the fragment) returns the earlier result with `"cached": true`
-instead of making another request. Failed fetches are not cached. The cache is
-per run, so a new turn or a retry fetches pages again.
+The Claude Code-style developer tools are registered by default: `Read`, `Write`, `Edit`,
+`NotebookEdit`, `Glob`, `Grep`, `WebFetch`, `WebSearch`, and the presentation tools `PptxBuild`,
+`PptxUpdateSlide`, `PptxAddSlide`, and `PptxDeleteSlide`. `Bash`, `PowerShell`, and `Monitor` are
+added only when `AGENT_TOOLS_ALLOW_SHELL=true`. `AGENT_OFFICE_TOOLS=false` removes the Pptx tools.
 
-Fetched page text is returned inside
-`<<<BEGIN UNTRUSTED WEB CONTENT source=<url>>>>` … `<<<END UNTRUSTED WEB
-CONTENT>>>` markers, after any string that could forge those markers is
-neutralized. The system prompt tells the model to treat tool output as data:
-instructions embedded in a page must be reported to the user, not obeyed. This
-is a mitigation, not a guarantee — see [Prompt-injection
-posture](#prompt-injection-posture).
+`WebFetch` caches every successful page for the duration of one run. Fetched page text is returned
+inside `<<<BEGIN UNTRUSTED WEB CONTENT source=<url>>>>` … `<<<END UNTRUSTED WEB CONTENT>>>` markers.
 
-Across runs, the server persists each run's tool trace in the assistant
-message's `metadata.tool_trace` (and in `agent_run_events`). On the next turn it
-rebuilds those records as OpenAI wire-format `assistant.tool_calls` plus `tool`
-messages and sends them to the runtime as history, so the model can reuse pages,
-file reads, and command output it already gathered instead of starting from a
-blank slate. A failed or cancelled run contributes its tool trace but never a
-fabricated answer. Replayed results and arguments are capped individually and
-count toward the history character budget. Set
-`AGENT_LOOP_HISTORY_TOOL_TRACE=false` to send text-only history.
+File paths are resolved inside `AGENT_WORKSPACE_ROOT`, and `..` or symlink escapes are rejected.
+Set `AGENT_EXECUTOR_URL` to run shell tools in the sandboxed executor container; leaving it empty
+runs them inside the server process, where there is **no OS-level sandbox**.
 
-File paths are resolved inside `AGENT_WORKSPACE_ROOT`, and `..` or symlink
-escapes are rejected. Shell tools are best run in the bundled executor
-container. Set `AGENT_EXECUTOR_URL` (for the local stack:
-`http://bokaclaw-executor:8099`) and `Bash`, `PowerShell`, and `Monitor` are
-delegated to `server/app/agent/executor_app.py` there. That container mounts only the
-workspace read-write at `AGENT_WORKSPACE_ROOT`, uses a read-only root
-filesystem (so `/app`, the bundled source, is readable but immutable), runs as
-UID 1000 with all capabilities dropped, and sits on an internal Docker network
-with no route to the internet or the other containers. Commands get a
-sanitised environment, so API keys and database credentials are not visible.
-
-Leaving `AGENT_EXECUTOR_URL` empty keeps the old behaviour: commands run inside
-the server process, where there is **no OS-level sandbox** and the shell can
-reach `.env` and database credentials. `AGENT_DEV_TOOLS=false` removes the
-whole developer tool set.
-
-The server stores both sides of the conversation and is the only writer; the
-browser never talks to the model directly. Conversations are managed through
-`/conversations` (list, create, rename, delete, messages). Set `AGENT_LOOP_URL`
-to delegate the turn to an external executor over HTTP instead.
+Conversations are managed through `/conversations`. Set `AGENT_LOOP_URL` to delegate turns to an
+external executor over HTTP instead.
 
 ```bash
 curl -N -X POST http://localhost:8888/agent \
@@ -191,290 +228,119 @@ curl -N -X POST http://localhost:8888/agent \
   -d '{"message": "What did I save about the launch?", "stream": true}'
 ```
 
-The stream emits `meta`, `message.delta`, `message.completed`, and `done`,
-with `error` before `done` on failure. Omit `"stream": true` to get a single
-JSON response instead. Requests are rate limited to 30/minute per IP.
+The stream emits `meta`, `message.delta`, `message.completed`, and `done`, with `error` before
+`done` on failure. Requests are rate limited to 30/minute per IP.
+
+### Memory and agent variables
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `AGENT_MODEL` | mem0's LLM model | Override the model used for agent turns. |
-| `AGENT_API_KEY` | mem0's provider key | Override the API key. |
-| `AGENT_BASE_URL` | provider default | OpenAI-compatible base URL (Qwen, vLLM, Ollama, OpenRouter, ...). |
+| `MEMORY_BACKEND` | `markdown` | Workspace-Markdown backend; `mem0` is no longer supported. |
+| `AGENT_MEMORY_ROOT` | `/app/memory` | Authoritative memory workspace root. |
+| `AGENT_MEMORY_RECALL` | `true` | Enable per-turn profile and query recall. |
+| `AGENT_MEMORY_RECALL_TOKENS` | `1500` | Query-recall token budget. |
+| `AGENT_MEMORY_RECALL_MAX` | `15` | Maximum query-recall entries. |
+| `AGENT_MEMORY_RECALL_THRESHOLD` | `0.4` | Minimum semantic similarity. |
+| `AGENT_MEMORY_CAPTURE` | `true` | Append one filtered episode after a completed turn. |
+| `AGENT_MEMORY_EPISODIC_RETENTION_DAYS` | `180` | Episode retention used by `prune`. |
+| `AGENT_MEMORY_RECONCILE_ON_START` | `true` | Reconcile dirty workspaces at startup. |
+| `AGENT_MEMORY_RECONCILE_INTERVAL_SECONDS` | `300` | Background reconcile interval. |
+| `AGENT_MEMORY_REQUIRE_APPROVAL` | `false` | Ask before `update_memory` / `delete_memory`. |
+| `AGENT_MODEL` | configured LLM | Model used for agent turns. |
+| `AGENT_API_KEY` | configured provider key | Override the API key. |
+| `AGENT_BASE_URL` | provider default | OpenAI-compatible base URL. |
 | `AGENT_SYSTEM_PROMPT` | built-in prompt | Replace the system prompt. |
 | `AGENT_MAX_ITERATIONS` | `10` | ReAct steps before the turn stops calling tools. |
-| `AGENT_FINAL_ANSWER_ON_MAX_ITERATIONS` | `true` | On the step limit, make one final tool-free request so the model answers from what it gathered; `false` restores the hard failure. |
+| `AGENT_FINAL_ANSWER_ON_MAX_ITERATIONS` | `true` | On the step limit, make one final tool-free request. |
 | `AGENT_TEMPERATURE` | `0.2` | Sampling temperature. |
 | `AGENT_MAX_TOKENS` | provider default | Max tokens per model call. |
 | `AGENT_REQUEST_TIMEOUT_SECONDS` | `60` | Timeout for one model call. |
 | `AGENT_MAX_RETRIES` | `2` | Model client retries. |
-| `AGENT_CONTEXT_MAX_TOKENS` | `32000` | Token budget for the in-process runtime's model view; `0` / `off` disables compression. |
-| `AGENT_CONTEXT_WINDOW` | `AGENT_CONTEXT_MAX_TOKENS` | Model context window shown in the dashboard context meter (display only, not sent to the SDK); `0` / `off` hides the meter. |
-| `AGENT_CONTEXT_KEEP_RECENT_TOKENS` | half the budget | Recent tokens kept verbatim by compression. |
-| `AGENT_CONTEXT_COMPRESSION` | `summary` | `summary` (model summary, truncation fallback) or `truncate` (drop only). |
-| `AGENT_COMPRESSION_MODEL` | `AGENT_MODEL` | Model used only for compression summaries. Empty reuses the agent model; point it at a cheaper model to cut summary cost. |
-| `AGENT_COMPRESSION_API_KEY` | `AGENT_API_KEY` | API key for the compression endpoint (falls back to the agent's key). |
-| `AGENT_COMPRESSION_BASE_URL` | `AGENT_BASE_URL` | OpenAI-compatible base URL for the compression endpoint (falls back to the agent's URL). |
-| `AGENT_TOOL_RESULT_MAX_CHARS` | `16000` | Per-tool-result cap in the model view; full content is still stored. `0` / `off` disables it. |
-| `AGENT_TOOL_CONCURRENCY` | `1` | Run consecutive read-only tool calls in parallel (1 disables). Writes, shell commands, and monitors always stay serial and act as batch barriers. Range 1–8. |
-| `AGENT_USER_INPUT_ENABLED` | `true` | Register `ask_user`; the agent can pause and ask the user for information only it knows. Questions stream as `user.question` and are answered through `POST /agent/runs/{run_id}/answers`. |
-| `AGENT_USER_INPUT_TIMEOUT_SECONDS` | `240` | How long one question waits for an answer, clamped to 5–600 seconds. Effective value is also capped below `AGENT_LOOP_MAX_SECONDS`. |
-| `AGENT_FACT_LEDGER` | `true` | Keep a run-scoped ledger of tool calls and findings in the model view so early facts survive compression. Set to `false` to disable. |
-| `AGENT_FACT_LEDGER_MAX_CHARS` | `2500` | Ledger cap; values below 256 are raised to 256. |
-| `AGENT_STEP_BUDGET_NOTICE` | `true` | Append `Step X of N` and a wrap-up directive near the step limit so the agent stops researching. Set to `false` to disable. |
-| `AGENT_PROGRESS_GUARD` | `true` | Detect tool calls that return no new evidence; after a few the agent is nudged to change course, then forced to answer. Set to `false` to disable. |
-| `AGENT_PROGRESS_NUDGE_AFTER` | `3` | Consecutive no-progress calls before the nudge; values below 2 are raised to 2. |
-| `AGENT_PROGRESS_STOP_AFTER` | `5` | Consecutive no-progress calls before the forced final answer; raised to the nudge threshold when lower. |
-| `AGENT_RESEARCH_MEMORY` | `true` | Save conclusions from completed web-research turns to mem0, and offer fresh similar conclusions to later turns. Set to `false` to disable both halves. |
-| `AGENT_RESEARCH_MEMORY_TTL_DAYS` | `30` | Saved conclusions older than this are not offered to the model; values below 1 are raised to 1. |
-| `AGENT_RESEARCH_MEMORY_MIN_SCORE` | `0.5` | Minimum similarity for a saved conclusion to be offered; clamped to 0–1. |
-| `AGENT_SUBAGENTS_ENABLED` | `false` | Register the `explore` and `research_agent` subagents. When off, the runtime behaves exactly as before. |
-| `AGENT_SUBAGENT_MODEL` | `AGENT_MODEL` | Model used by child agents. Empty inherits the main model. |
-| `AGENT_SUBAGENT_MAX_DEPTH` | `2` | Maximum nesting depth; child runtimes currently never register nested subagents. |
-| `AGENT_SUBAGENT_MAX_CALLS_PER_RUN` | `4` | Delegations allowed per parent run; `0` disables delegation without unregistering the tools. |
+| `AGENT_CONTEXT_MAX_TOKENS` | `32000` | Model-view budget; `0` / `off` disables compression. |
+| `AGENT_CONTEXT_WINDOW` | `AGENT_CONTEXT_MAX_TOKENS` | Context meter denominator (display only). |
+| `AGENT_CONTEXT_COMPRESSION` | `summary` | `summary` or `truncate`. |
+| `AGENT_COMPRESSION_MODEL` | `AGENT_MODEL` | Model used only for compression summaries. |
+| `AGENT_TOOL_RESULT_MAX_CHARS` | `16000` | Per-tool-result cap in the model view. |
+| `AGENT_TOOL_CONCURRENCY` | `1` | Parallel read-only tool calls (1 disables). |
+| `AGENT_USER_INPUT_ENABLED` | `true` | Register `ask_user`. |
+| `AGENT_USER_INPUT_TIMEOUT_SECONDS` | `240` | How long one question waits for an answer. |
+| `AGENT_FACT_LEDGER` | `true` | Keep a run-scoped fact ledger in the model view. |
+| `AGENT_STEP_BUDGET_NOTICE` | `true` | Append `Step X of N` near the step limit. |
+| `AGENT_PROGRESS_GUARD` | `true` | Detect no-progress tool calls and force an answer. |
+| `AGENT_RESEARCH_MEMORY` | `true` | Save and reuse web-research conclusions. |
+| `AGENT_RESEARCH_MEMORY_TTL_DAYS` | `30` | Ignore saved conclusions older than this. |
+| `AGENT_RESEARCH_MEMORY_MIN_SCORE` | `0.5` | Minimum similarity for a saved conclusion. |
+| `AGENT_SUBAGENTS_ENABLED` | `false` | Register the `explore` and `research_agent` subagents. |
 | `AGENT_SUBAGENT_TIMEOUT_SECONDS` | `120` | Wall-clock timeout for one child run. |
 | `AGENT_SUBAGENT_MAX_TURNS` | `8` | ReAct step budget for one child run. |
-| `AGENT_SUBAGENT_MAX_RESULT_CHARS` | `8000` | Cap on the report returned to the parent context. |
-| `AGENT_SUBAGENT_TOKEN_BUDGET` | — | Total child tokens allowed per parent run; empty means no cap. |
-| `AGENT_SUBAGENT_VERIFICATION` | `spot_check` | How the parent is told to verify child claims: `none`, `spot_check`, or `strict`. |
-| `AGENT_SUBAGENT_ALLOW_ABSOLUTE_PATHS` | `false` | Allow a task's `scope` to name absolute paths outside `AGENT_WORKSPACE_ROOT`. |
-| `AGENT_CONTEXT_DEBUG` | on | Log the resolved model-view settings once per turn and each `context_compressed` decision at INFO. Diagnostics only; the event is never sent to the client. Set to `0` / `false` / `no` / `off` to silence. |
 | `AGENT_DEV_TOOLS` | `true` | Register the developer tool set. |
-| `AGENT_OFFICE_TOOLS` | `true` | Register `PptxBuild` / `PptxUpdateSlide` / `PptxAddSlide` / `PptxDeleteSlide`; skipped when python-pptx is absent. |
-| `AGENT_WORKSPACE_ROOT` | `/app/workspace` | File tools cannot escape this directory. Created on first use. |
+| `AGENT_OFFICE_TOOLS` | `true` | Register the Pptx tools. |
+| `AGENT_WORKSPACE_ROOT` | `/app/workspace` | File tools cannot escape this directory. |
 | `AGENT_TOOLS_ALLOW_SHELL` | `false` | Register `Bash`, `PowerShell`, and `Monitor`. |
-| `AGENT_EXECUTOR_URL` | — | Base URL of the sandboxed executor; empty runs shell tools in-process. |
+| `AGENT_EXECUTOR_URL` | — | Base URL of the sandboxed executor. |
 | `AGENT_EXECUTOR_TOKEN` | — | Bearer token sent to the executor. |
-| `AGENT_EXECUTOR_TIMEOUT_SECONDS` | `120` | HTTP timeout for executor requests. |
 | `AGENT_TOOL_TIMEOUT_SECONDS` | `120` | Maximum runtime for one command. |
-| `AGENT_TOOL_MAX_OUTPUT_BYTES` | `200000` | Output cap per command or fetch. |
-| `AGENT_TOOL_MAX_FILE_BYTES` | `2000000` | Largest file the file tools will read or write. |
 | `AGENT_WEB_FETCH_TIMEOUT_SECONDS` | `30` | `WebFetch` request timeout. |
-| `AGENT_WEB_FETCH_MAX_BYTES` | `1000000` | `WebFetch` download cap. |
-| `AGENT_WEB_FETCH_ALLOW_PRIVATE` | `false` | Allow `WebFetch` and `WebSearch` to reach localhost / private networks. |
-| `AGENT_WEB_SEARCH_URL` | — | SearXNG base URL for `WebSearch`; empty uses Bing's RSS endpoint. |
-| `AGENT_LOOP_URL` | — | External executor base URL, without `/invoke`. Takes precedence over the in-process runtime. |
-| `AGENT_LOOP_API_KEY` | — | Sent as `Authorization: Bearer ...` to the external executor. |
+| `AGENT_WEB_FETCH_ALLOW_PRIVATE` | `false` | Allow fetches to localhost / private networks. |
+| `AGENT_LOOP_URL` | — | External executor base URL, without `/invoke`. |
 | `AGENT_LOOP_MOCK` | `false` | Stream a canned reply for local UI work. |
-| `AGENT_LOOP_CONNECT_TIMEOUT_SECONDS` | `5` | Executor connect timeout. |
-| `AGENT_LOOP_READ_TIMEOUT_SECONDS` | `120` | Executor read timeout. |
-| `AGENT_LOOP_MAX_SECONDS` | `300` | Total wall clock for one turn. |
 | `AGENT_LOOP_HISTORY_MESSAGES` | `40` | Prior turns forwarded as context. |
-| `AGENT_LOOP_HISTORY_TOOL_TRACE` | `true` | Replay each prior run's persisted tool calls and results into the next turn's history. Set to `false` for text-only history. |
-| `AGENT_LOOP_HISTORY_TOOL_RESULT_MAX_CHARS` | `2000` | Per-tool-result cap while replaying history; `0` disables the cap. |
-| `AGENT_LOOP_HISTORY_TOOL_ARGUMENT_MAX_CHARS` | `1000` | Per-tool-call argument cap while replaying history; `0` disables the cap. |
+| `AGENT_LOOP_HISTORY_TOOL_TRACE` | `true` | Replay persisted tool calls and results into history. |
 
-The `AGENT_CONTEXT_*` / `AGENT_TOOL_RESULT_*` variables apply only to the
-in-process runtime. A remote executor set through `AGENT_LOOP_URL` uses its own
-configuration.
+The full list, including subagent and span-capture settings, is in
+[`.env.example`](.env.example).
 
 ### Reusable research memory
 
-After a completed turn whose tool trace contains a successful `WebSearch` or
-`WebFetch`, the server stores the final answer, the deduplicated source URLs,
-the question, and the capture time as one mem0 memory scoped to the signed-in
-user (`kind="research_conclusion"`, written with `infer=False` so nothing is
-paraphrased). An identical question updates that memory instead of appending a
-duplicate.
+After a completed turn whose tool trace contains a successful `WebSearch` or `WebFetch`, the server
+stores the final answer, deduplicated source URLs, the question, and the capture time as one
+workspace entry (`kind="research_conclusion"`). An identical question updates that entry instead of
+appending a duplicate.
 
-Before a turn, the in-process runtime looks up an identical question by its
-stable key, then searches those memories by similarity for other phrasings.
-The exact lookup matters because a long stored conclusion can score below the
-similarity floor against its own question; the vector floor then separates
-paraphrases from unrelated questions. Matches older than
-`AGENT_RESEARCH_MEMORY_TTL_DAYS` or below `AGENT_RESEARCH_MEMORY_MIN_SCORE` are
-dropped; the rest are added as a user-role message immediately before the
-current turn, with their age and an instruction to reuse the conclusion instead
-of repeating the same web research. The block is view-only and is not persisted
-as a message. It is deliberately **not** part of the system prompt: saved
-conclusions derive from untrusted web pages, so they must not gain
-system-level authority. Memory failures never fail the turn.
-
-This half applies to the in-process runtime only; a remote executor does not
-receive the block. Saving, however, runs for any completed turn whose trace
-contains web tool events, including a remote executor that emits `tool.*`
-events. Set `AGENT_RESEARCH_MEMORY=false` to disable both storing and
-retrieval.
+Before a turn, the in-process runtime looks up an identical question by its stable key, then
+searches by similarity for paraphrases. Matches older than `AGENT_RESEARCH_MEMORY_TTL_DAYS` or below
+`AGENT_RESEARCH_MEMORY_MIN_SCORE` are dropped; the rest are added as a user-role message immediately
+before the current turn. The block is view-only, never part of the system prompt, and memory
+failures never fail the turn.
 
 ### Prompt-injection posture
 
-Tool output is untrusted input. A model cannot reliably tell an instruction from
-data inside a tool result, so the server applies three mitigations:
+Tool output is untrusted input. The server applies three mitigations:
 
-- The base system prompt defines an instruction hierarchy: only the system
-  prompt and the user's messages carry instructions. Tool output is data, and
-  text that tries to redirect the run is reported to the user instead of obeyed.
-- `WebFetch` returns page text inside explicit untrusted-content markers with
-  its source URL, and neutralizes anything that could forge the closing marker.
-- Reused research conclusions are injected as a user-role message immediately
-  before the question — never into the system prompt — and the block labels
-  itself as reference data.
+- The base system prompt defines an instruction hierarchy: only the system prompt and the user's
+  messages carry instructions. Tool output is data.
+- `WebFetch` returns page text inside explicit untrusted-content markers and neutralizes anything
+  that could forge the closing marker.
+- Recalled memory and reused research conclusions are injected as a user-role message, labeled as
+  reference data, and never into the system prompt. `trust="untrusted"` entries are never
+  auto-injected.
 
-These are mitigations, not a guarantee. There is no input sanitizer and no
-approval step before `Write`, `Edit`, or `Bash`: the executor container limits
-what a hijacked model can reach, but not which of its granted tools it may use.
-Treat the agent workspace as writable by the model and keep credentials out of
-it.
+These are mitigations, not a guarantee. There is no approval step before `Write`, `Edit`, or
+`Bash`: the executor container limits what a hijacked model can reach, but not which of its granted
+tools it may use. Keep credentials out of the agent workspace.
 
-If no model can be resolved, `POST /agent` returns 503 `agent_not_configured`;
-set `AGENT_MODEL` (plus `AGENT_BASE_URL` for non-OpenAI providers). From inside
-the compose network, an external executor running on the host is reachable at
-`http://host.docker.internal:<port>`. The external executor contract is
-documented in [`../agent-loop/README.md`](../agent-loop/README.md).
+If no model can be resolved, `POST /agent` returns 503 `agent_not_configured`.
 
 ## Telemetry
 
-Enabled by default, matching the Mem0 OSS library. Sends at most two events per install to the same anonymous PostHog project the library uses:
+Anonymous telemetry sends at most two events per install:
 
-- `admin_registered` — fired when the first admin is created (wizard or direct API call). Properties: email domain, server version, install UUID.
-- `onboarding_completed` — fired when the setup wizard reaches its final success state. Carries the same properties plus the freeform `use_case` the operator entered. API-only bootstraps never emit this event.
+- `admin_registered` — when the first admin is created.
+- `onboarding_completed` — when the setup wizard reaches its final success state.
 
-Set `MEM0_TELEMETRY=false` to opt out.
+Properties are limited to the email domain, server version, install UUID, and the optional
+freeform use case. Set `BOKACLAW_TELEMETRY=false` to opt out.
 
 ## Security headers
 
-The dashboard sets the following response headers on every path (see `dashboard/next.config.mjs`):
-
-- `X-Frame-Options: DENY`
-- `Content-Security-Policy: frame-ancestors 'none'`
-- `X-Content-Type-Options: nosniff`
-- `Referrer-Policy: strict-origin-when-cross-origin`
-
-Together these prevent iframe embedding, sniffing of mislabelled MIME types, and cross-origin referrer leaks. Harden further behind your own reverse proxy if needed.
-
-## Migrating from `ankane/pgvector` to `pgvector/pgvector`
-
-The `ankane/pgvector` Docker image is archived and no longer maintained. This release
-replaces it with the official `pgvector/pgvector:pg17` image (PostgreSQL 17, pgvector 0.8.0).
-
-**What changed:**
-
-| | Before | After |
-|---|---|---|
-| Docker image | `ankane/pgvector:v0.5.1` | `pgvector/pgvector:pg17` |
-| PostgreSQL version | 15 | 17 |
-| pgvector version | 0.5.1 | 0.8.0 |
-| Credentials | Hardcoded `postgres`/`postgres` | Driven by `POSTGRES_USER` / `POSTGRES_PASSWORD` env vars |
-
-### Fresh installs (no existing data)
-
-No migration needed. Copy `.env.example` to `.env`, set `POSTGRES_PASSWORD`, and run:
-
-```bash
-cd server
-make up
-```
-
-### Existing installs (preserving data)
-
-PostgreSQL 17 cannot read data files written by PostgreSQL 15 directly.
-You must export your data first, then import it into the new container.
-
-**1. Export your data from the old container**
-
-With the old stack still running:
-
-```bash
-cd server
-
-# Dump all databases (mem0 memories + mem0_app auth/config data)
-docker compose exec -T postgres pg_dumpall -U postgres > mem0_backup.sql
-```
-
-Verify the dump file is non-empty:
-
-```bash
-ls -lh mem0_backup.sql
-```
-
-**2. Stop the old stack and remove the old volume**
-
-```bash
-# Stop containers
-docker compose down
-
-# Remove the old Postgres data volume
-docker compose down -v
-```
-
-> **Warning:** `docker compose down -v` deletes the `postgres_db` volume permanently.
-> Only run this after you have verified your backup.
-
-**3. Update your `.env`**
-
-The Postgres credentials are no longer hardcoded in `docker-compose.yaml`.
-Add them to your `.env` file (or verify they match your old setup):
-
-```bash
-POSTGRES_HOST=postgres
-POSTGRES_PORT=5432
-POSTGRES_DB=postgres
-POSTGRES_USER=postgres
-POSTGRES_PASSWORD=<your-password>    # required — compose will refuse to start without it
-POSTGRES_COLLECTION_NAME=memories
-```
-
-If you previously relied on the hardcoded defaults (`postgres`/`postgres`), set
-`POSTGRES_PASSWORD=postgres` to keep the same credentials.
-
-**4. Start only Postgres**
-
-Start **only** the Postgres container first — do not start the mem0 API yet.
-The API runs `alembic upgrade head` on startup, which creates empty tables that
-would conflict with the restore.
-
-```bash
-docker compose up -d postgres
-```
-
-Wait for the Postgres healthcheck to pass:
-
-```bash
-docker compose exec -T postgres pg_isready -q && echo "ready" || echo "not ready"
-```
-
-**5. Restore your data**
-
-```bash
-docker compose exec -T postgres psql -U postgres < mem0_backup.sql
-```
-
-You may see notices like `role "postgres" already exists` — these are harmless.
-
-> **Important:** You must restore before starting the mem0 API container. The API
-> runs database migrations on startup which create empty tables — restoring after
-> that would fail with duplicate-key errors and lose your API keys and settings.
-
-**6. Start the API**
-
-Now start the mem0 API container. Alembic will detect the existing tables and
-only apply any new migrations:
-
-```bash
-docker compose up -d mem0
-```
-
-**7. Verify**
-
-```bash
-# Check the API is healthy
-make health
-
-# Confirm your memories are present
-curl -s http://localhost:8888/memories?user_id=<your-user-id> -H "X-API-Key: <your-api-key>"
-```
-
-### Rollback
-
-If you need to revert, restore the old image tag in `docker-compose.yaml`:
-
-```yaml
-postgres:
-    image: ankane/pgvector:v0.5.1
-```
-
-Then `docker compose down -v`, `docker compose up -d --build`, and restore from
-`mem0_backup.sql` into the old container the same way.
+The dashboard sets `X-Frame-Options: DENY`, `Content-Security-Policy: frame-ancestors 'none'`,
+`X-Content-Type-Options: nosniff`, and `Referrer-Policy: strict-origin-when-cross-origin` on every
+path (see `dashboard/next.config.mjs`).
 
 ## Reference
 
-Additional product and API documentation lives at [docs.mem0.ai](https://docs.mem0.ai/open-source/overview).
+Product documentation is in [`docs/`](../docs/README.md), including the memory format, operations,
+and migration guides.
+
+BokaClaw's early versions were built on Mem0. The runtime no longer depends on it; the original
+Apache-2.0 license and attribution remain in `LICENSE`.

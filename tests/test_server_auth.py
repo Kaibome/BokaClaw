@@ -11,14 +11,18 @@ round-trip) covering:
 import importlib
 import logging
 import os
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+_SERVER_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "server")
+if _SERVER_DIR not in sys.path:
+    sys.path.insert(0, _SERVER_DIR)
+
 pytest.importorskip("fastapi", reason="fastapi not installed")
 
-from fastapi.testclient import TestClient
-
+from fastapi.testclient import TestClient  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -41,17 +45,32 @@ def _mock_memory():
     mock_instance.delete_all.return_value = {"message": "Memories deleted successfully!"}
     mock_instance.reset.return_value = None
 
-    with patch.dict(os.environ, {"OPENAI_API_KEY": "fake-key"}):
-        with patch("mem0.Memory.from_config", return_value=mock_instance):
-            yield mock_instance
+    yield mock_instance
 
 
-def _load_app(env_overrides: dict):
-    """Reload server/main.py with the given environment and return the FastAPI app."""
-    import server.main as server_main
+def _load_app(env_overrides: dict, memory=None):
+    """Reload app/main.py with the given environment and return the FastAPI app.
 
-    with patch.dict(os.environ, env_overrides, clear=False):
+    ``memory`` is installed after the reload because reloading rebinds the
+    module-level ``get_memory_instance`` imported from ``app.core.server_state``.
+    """
+    overrides = dict(env_overrides)
+    if "AUTH_DISABLED" not in overrides:
+        overrides["AUTH_DISABLED"] = "false" if overrides.get("ADMIN_API_KEY") else "true"
+    overrides.setdefault("JWT_SECRET", "test-jwt-secret")
+    with patch.dict(os.environ, overrides, clear=False):
+        import app.core.auth as auth
+
+        # app.core.auth caches these at import; refresh them before main reads them.
+        auth.ADMIN_API_KEY = os.environ.get("ADMIN_API_KEY", "")
+        auth.AUTH_DISABLED = os.environ.get("AUTH_DISABLED", "").lower() in {"1", "true", "yes", "on"}
+        auth.JWT_SECRET = os.environ["JWT_SECRET"]
+
+        import app.main as server_main
+
         importlib.reload(server_main)
+    if memory is not None:
+        patch("app.main.get_memory_instance", return_value=memory).start()
     return server_main.app
 
 
@@ -64,7 +83,7 @@ class TestAuthDisabled:
 
     @pytest.fixture(autouse=True)
     def _setup(self, _mock_memory):
-        self.app = _load_app({"ADMIN_API_KEY": ""})
+        self.app = _load_app({"ADMIN_API_KEY": ""}, _mock_memory)
         self.client = TestClient(self.app)
         self.mock = _mock_memory
 
@@ -118,12 +137,12 @@ class TestAuthDisabled:
         resp = self.client.post("/configure", json={"version": "v1.1"})
         assert resp.status_code == 200
 
-    def test_supplying_key_still_works_when_auth_disabled(self):
-        """A client that sends X-API-Key should not be penalized when auth is off."""
+    def test_supplied_key_is_still_validated_when_auth_disabled(self):
+        """An explicit credential is checked even while anonymous access is open."""
         resp = self.client.get(
             "/memories/mem-1", headers={"X-API-Key": "some-random-key"}
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 401
 
     @pytest.mark.parametrize(
         "method,path",
@@ -156,7 +175,7 @@ class TestAuthEnabled:
 
     @pytest.fixture(autouse=True)
     def _setup(self, _mock_memory):
-        self.app = _load_app({"ADMIN_API_KEY": self.API_KEY})
+        self.app = _load_app({"ADMIN_API_KEY": self.API_KEY}, _mock_memory)
         self.client = TestClient(self.app)
         self.mock = _mock_memory
 
@@ -184,7 +203,7 @@ class TestAuthEnabled:
 
     def test_401_includes_www_authenticate_header(self):
         resp = self.client.get("/memories/mem-1")
-        assert resp.headers.get("www-authenticate") == "ApiKey"
+        assert resp.headers.get("www-authenticate") == "Bearer"
 
     def test_near_miss_key_rejected(self):
         """Key that differs by one character should be rejected."""
@@ -312,7 +331,7 @@ class TestAuthenticatedCRUDFlow:
 
     @pytest.fixture(autouse=True)
     def _setup(self, _mock_memory):
-        self.app = _load_app({"ADMIN_API_KEY": self.API_KEY})
+        self.app = _load_app({"ADMIN_API_KEY": self.API_KEY}, _mock_memory)
         self.client = TestClient(self.app)
         self.mock = _mock_memory
 
@@ -338,7 +357,7 @@ class TestAuthenticatedCRUDFlow:
         # 3. Read all
         resp = self._authed("GET", "/memories", params={"user_id": "alice"})
         assert resp.status_code == 200
-        self.mock.get_all.assert_called_once_with(user_id="alice")
+        self.mock.get_all.assert_called_once_with(filters={"user_id": "alice"}, show_expired=False)
 
         # 4. Search
         resp = self._authed("POST", "/search", json={"query": "pizza", "user_id": "alice"})
@@ -408,7 +427,7 @@ class TestAuthEdgeCases:
     def test_very_long_api_key(self):
         """Server should handle a very long key without crashing."""
         long_key = "k" * 4096
-        app = _load_app({"ADMIN_API_KEY": long_key})
+        app = _load_app({"ADMIN_API_KEY": long_key}, self.mock)
         client = TestClient(app)
         resp = client.get("/memories/mem-1", headers={"X-API-Key": long_key})
         assert resp.status_code == 200
@@ -416,7 +435,7 @@ class TestAuthEdgeCases:
     def test_special_characters_in_api_key(self):
         """Keys with special ASCII characters should work."""
         special_key = "sk-!@#$%^&*()_+-=[]{}|;:',.<>?/~`"
-        app = _load_app({"ADMIN_API_KEY": special_key})
+        app = _load_app({"ADMIN_API_KEY": special_key}, self.mock)
         client = TestClient(app)
 
         resp = client.get("/memories/mem-1", headers={"X-API-Key": special_key})
@@ -427,12 +446,9 @@ class TestAuthEdgeCases:
 
     def test_key_env_var_not_present_at_all(self):
         """When the env var is completely absent, auth should be disabled."""
-        import server.main as server_main
-        env = os.environ.copy()
-        env.pop("ADMIN_API_KEY", None)
-        with patch.dict(os.environ, env, clear=True):
-            importlib.reload(server_main)
-        client = TestClient(server_main.app)
+        with patch.dict(os.environ, {}, clear=True):
+            app = _load_app({}, self.mock)
+        client = TestClient(app)
         resp = client.get("/memories/mem-1")
         assert resp.status_code != 401
 
@@ -444,7 +460,7 @@ class TestAuthEdgeCases:
         assert c1.get("/memories/mem-1").status_code == 401
 
         # Then: auth disabled
-        app2 = _load_app({"ADMIN_API_KEY": ""})
+        app2 = _load_app({"ADMIN_API_KEY": ""}, self.mock)
         c2 = TestClient(app2)
         assert c2.get("/memories/mem-1").status_code != 401
 
@@ -483,12 +499,12 @@ class TestStartupLogging:
     def test_warning_when_auth_disabled(self, caplog):
         with caplog.at_level(logging.WARNING):
             _load_app({"ADMIN_API_KEY": ""})
-        assert any("UNSECURED" in r.message for r in caplog.records)
+        assert any("AUTH_DISABLED is enabled" in r.message for r in caplog.records)
 
     def test_info_when_auth_enabled(self, caplog):
         with caplog.at_level(logging.INFO):
             _load_app({"ADMIN_API_KEY": "a-long-enough-secret-key"})
-        assert any("authentication enabled" in r.message for r in caplog.records)
+        assert any("authentication enabled" in r.message.lower() for r in caplog.records)
 
     def test_warning_when_key_too_short(self, caplog):
         with caplog.at_level(logging.WARNING):

@@ -11,7 +11,7 @@ POSTGRES_PORT=${POSTGRES_PORT:-5432}
 APP_DB_NAME=${APP_DB_NAME:-mem0_app}
 AUTH_DISABLED=${AUTH_DISABLED:-false}
 
-log() { printf '[mem0] %s\n' "$*"; }
+log() { printf '[bokaclaw] %s\n' "$*"; }
 
 # JWT_SECRET is only required when auth is enabled (server/main.py enforces the same).
 if [ "${AUTH_DISABLED,,}" != "true" ] && [ -z "${JWT_SECRET:-}" ]; then
@@ -28,16 +28,17 @@ export API_INTERNAL_URL=${API_INTERNAL_URL:-http://127.0.0.1:8000}
 export DASHBOARD_URL=${DASHBOARD_URL:-http://localhost:3000}
 export NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8000}
 export NEXT_PUBLIC_INSTANCE_NAME=${NEXT_PUBLIC_INSTANCE_NAME:-BokaClaw}
-export HISTORY_DB_PATH=${HISTORY_DB_PATH:-/app/history/history.db}
+export AGENT_MEMORY_ROOT=${AGENT_MEMORY_ROOT:-/app/memory}
+export MEMORY_BACKEND=${MEMORY_BACKEND:-markdown}
 
 # Default to a CPU-only local embedder so the image works without an embedding
 # API key. Override these for a different model or a cloud embedder.
-export MEM0_DEFAULT_EMBEDDER_PROVIDER=${MEM0_DEFAULT_EMBEDDER_PROVIDER:-fastembed}
-export MEM0_DEFAULT_EMBEDDER_MODEL=${MEM0_DEFAULT_EMBEDDER_MODEL:-BAAI/bge-small-zh-v1.5}
-export MEM0_DEFAULT_EMBEDDING_DIMS=${MEM0_DEFAULT_EMBEDDING_DIMS:-512}
+export MEMORY_DEFAULT_EMBEDDER_PROVIDER=${MEMORY_DEFAULT_EMBEDDER_PROVIDER:-fastembed}
+export MEMORY_DEFAULT_EMBEDDER_MODEL=${MEMORY_DEFAULT_EMBEDDER_MODEL:-BAAI/bge-small-zh-v1.5}
+export MEMORY_DEFAULT_EMBEDDER_DIMS=${MEMORY_DEFAULT_EMBEDDER_DIMS:-512}
 
 # ---- agent chat -----------------------------------------------------------
-# POST /agent uses the bundled in-process runtime and the mem0 LLM config.
+# POST /agent uses the bundled in-process runtime and the configured LLM.
 # AGENT_MODEL / AGENT_API_KEY / AGENT_BASE_URL override it for another
 # OpenAI-compatible endpoint. AGENT_LOOP_URL optionally delegates the turn to
 # an external executor instead.
@@ -72,7 +73,7 @@ export HF_ENDPOINT=${HF_ENDPOINT:-https://hf-mirror.com}
 # hf-mirror does not proxy Xet, which makes huggingface_hub fail with 401.
 export HF_HUB_DISABLE_XET=${HF_HUB_DISABLE_XET:-1}
 
-mkdir -p "$(dirname "$HISTORY_DB_PATH")"
+mkdir -p "$AGENT_MEMORY_ROOT"
 
 psql_app() {
     PGPASSWORD="$POSTGRES_PASSWORD" psql -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" \

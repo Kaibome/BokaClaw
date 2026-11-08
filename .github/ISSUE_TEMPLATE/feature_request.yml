@@ -1,5 +1,5 @@
 name: Feature Request
-description: Suggest a new feature or improvement for mem0
+description: Suggest a new feature or improvement for BokaClaw
 labels: ["enhancement"]
 
 body:
@@ -7,12 +7,13 @@ body:
     id: component
     attributes:
       label: Component
-      description: Which part of mem0 does this relate to?
+      description: Which part of BokaClaw does this relate to?
       options:
-        - Python SDK
-        - Vector Store
-        - Plugin
-        - REST API
+        - Server / REST API
+        - Agent runtime
+        - Dashboard
+        - Memory
+        - Documentation
         - Other
     validations:
       required: true

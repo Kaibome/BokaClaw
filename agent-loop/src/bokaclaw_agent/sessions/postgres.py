@@ -1,8 +1,8 @@
 """Postgres-backed session persistence.
 
 Two tables are created lazily with ``CREATE TABLE IF NOT EXISTS`` so the SDK
-can share a database with mem0's ``memories`` table without a migration
-framework. The Postgres driver is optional; install
+can share a database with the rest of the BokaClaw application tables without
+a migration framework. The Postgres driver is optional; install
 ``bokaclaw-agent[postgres]``.
 """
 

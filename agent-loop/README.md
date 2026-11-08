@@ -5,7 +5,7 @@ A minimal **ReAct agent runtime** as a Python SDK:
 - Sends messages and tool definitions to an OpenAI-compatible model.
 - Executes registered tools from the model's `tool_calls`, feeds results back, and loops until a final answer.
 - Keeps the conversation in memory during a run and persists it to Postgres (`sessions` + `messages`) when the run ends.
-- Uses the same Postgres database as mem0 by default, with a `bokaclaw_agent_` table prefix so it never collides with `memories`.
+- Uses the same Postgres database as the BokaClaw server by default, with a `bokaclaw_agent_` table prefix so its tables never collide with application tables.
 
 ## Install
 
@@ -508,7 +508,7 @@ text, the run raises `MaxIterationsExceeded` exactly as before.
 | `BOKACLAW_AGENT_POSTGRES_DSN` / `POSTGRES_DSN` | unset; when set it overrides the fields below |
 | `POSTGRES_HOST` | `postgres` |
 | `POSTGRES_PORT` | `5432` |
-| `POSTGRES_DB` | `postgres` (the database that holds mem0's `memories` table) |
+| `POSTGRES_DB` | `postgres` (the BokaClaw application database) |
 | `POSTGRES_USER` | `postgres` |
 | `POSTGRES_PASSWORD` | `postgres` |
 
@@ -618,7 +618,7 @@ X-Request-ID: <server request id>
 | `message_id` | UUID of the user message the server already stored. |
 | `message` | The current user turn. It is **not** included in `history`. |
 | `history` | Recent completed turns, oldest first, already truncated by the server (40 messages / ~24k characters by default). |
-| `user_id` | Dashboard account UUID. Use it as the mem0 memory scope so the Agent page and Memories page agree. |
+| `user_id` | Dashboard account UUID. Use it as the workspace memory scope so the Agent page and Memories page agree. |
 | `agent_id`, `run_id`, `metadata` | Passed through from the browser; may be null or empty. |
 
 ### Response
@@ -691,7 +691,7 @@ closing the request cancels the upstream turn.
 | `AGENT_PROGRESS_GUARD` | `true` | In-process runtime: detect tool calls that return no new evidence and stop the loop when the model keeps repeating itself. |
 | `AGENT_PROGRESS_NUDGE_AFTER` | `3` | Consecutive no-progress calls before the model is nudged; values below 2 are raised to 2. |
 | `AGENT_PROGRESS_STOP_AFTER` | `5` | Consecutive no-progress calls before a final answer is forced; raised to the nudge threshold when lower. |
-| `AGENT_RESEARCH_MEMORY` | `true` | Save conclusions from completed web-research runs to mem0; the in-process runtime also offers fresh similar ones on later turns. |
+| `AGENT_RESEARCH_MEMORY` | `true` | Save conclusions from completed web-research runs to workspace memory; the in-process runtime also offers fresh similar ones on later turns. |
 | `AGENT_RESEARCH_MEMORY_TTL_DAYS` | `30` | Saved conclusions older than this are not offered; values below 1 are raised to 1. |
 | `AGENT_RESEARCH_MEMORY_MIN_SCORE` | `0.5` | Minimum similarity for a saved conclusion to be offered; clamped to 0–1. |
 | `AGENT_CONTEXT_DEBUG` | off | Log the resolved context settings once per turn and each `context_compressed` event at INFO. Diagnostics only; the event is never forwarded to clients. |
@@ -718,4 +718,4 @@ BOKACLAW_AGENT_TEST_DSN="postgresql://postgres:<password>@localhost:8432/postgre
   hatch run test -m integration
 ```
 
-CI/CD workflow registration is intentionally not included: `.github/workflows/` changes require maintainer approval. Before publishing to PyPI, add a `<package>-checks.yml` / `<package>-cd.yml` pair and register the path filter and release tag prefix.
+CI runs through `.github/workflows/agent-loop-checks.yml` on Python 3.10 and 3.12 and is wired into the required `CI Gate`. There is no PyPI publisher yet; adding one requires maintainer approval, registry trusted-publisher configuration, and a `cd` workflow.

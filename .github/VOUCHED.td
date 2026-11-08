@@ -18,7 +18,7 @@
 # vouch-check-pr.yml skips the check for OWNER, MEMBER, and COLLABORATOR
 # authors, and for any branch pushed to this repository.
 #
-# Keep every mem0ai member listed below anyway. The author_association arm of
+# Keep every maintainer listed below anyway. The author_association arm of
 # that guard is weaker than it looks: MEMBER needs the member's org membership
 # to be public and COLLABORATOR needs a direct repo invite, so a member with
 # private membership and a team-derived role reads as CONTRIBUTOR. Working from

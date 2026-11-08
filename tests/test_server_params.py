@@ -8,15 +8,20 @@ previously silently dropped by Pydantic v2's default extra='ignore' behavior.
 
 import importlib
 import os
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from mem0.exceptions import ValidationError as Mem0ValidationError
+_SERVER_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "server")
+if _SERVER_DIR not in sys.path:
+    sys.path.insert(0, _SERVER_DIR)
+
+from app.memory.errors import MemoryValidationError  # noqa: E402
 
 pytest.importorskip("fastapi", reason="fastapi not installed")
 
-from fastapi.testclient import TestClient
+from fastapi.testclient import TestClient  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -36,18 +41,32 @@ def _mock_memory():
     mock_instance.delete_all.return_value = {"message": "Memories deleted"}
     mock_instance.reset.return_value = None
 
-    with patch.dict(os.environ, {"OPENAI_API_KEY": "fake-key", "ADMIN_API_KEY": ""}):
-        with patch("mem0.Memory.from_config", return_value=mock_instance):
-            yield mock_instance
+    yield mock_instance
 
 
 @pytest.fixture
 def client(_mock_memory):
     """Return a TestClient wired to the server app with mocked Memory."""
-    import server.main as server_main
-    with patch.dict(os.environ, {"ADMIN_API_KEY": ""}):
+    with patch.dict(
+        os.environ,
+        {
+            "OPENAI_API_KEY": "fake-key",
+            "ADMIN_API_KEY": "",
+            "AUTH_DISABLED": "true",
+            "JWT_SECRET": "test-jwt-secret",
+        },
+    ):
+        import app.core.auth as auth
+
+        auth.ADMIN_API_KEY = ""
+        auth.AUTH_DISABLED = True
+        auth.JWT_SECRET = "test-jwt-secret"
+
+        import app.main as server_main
+
         importlib.reload(server_main)
-    return TestClient(server_main.app)
+    with patch("app.main.get_memory_instance", return_value=_mock_memory):
+        yield TestClient(server_main.app)
 
 
 @pytest.fixture
@@ -638,13 +657,12 @@ class TestGetMemories:
         assert kwargs["top_k"] == 1000
 
     def test_get_memories_admin_top_k_zero_not_defaulted(self, client, mock_memory):
-        mock_memory.vector_store.list.return_value = []
+        mock_memory.list_all.return_value = {"results": []}
 
         response = client.get("/memories?top_k=0")
 
         assert response.status_code == 200
-        _, kwargs = mock_memory.vector_store.list.call_args
-        assert kwargs["top_k"] == 0
+        assert mock_memory.list_all.call_args.kwargs["top_k"] == 0
 
     def test_get_memories_rejects_top_k_above_limit(self, client, mock_memory):
         response = client.get("/memories?user_id=test_routing_user&top_k=1001")
@@ -743,7 +761,7 @@ class TestSearchValidationErrors:
 # ===========================================================================
 
 class TestWriteHandlerErrorMapping:
-    """ValueError("... not found") -> 404, other ValueError / Mem0ValidationError
+    """ValueError("... not found") -> 404, other ValueError / MemoryValidationError
     -> 400. A real outage still surfaces as 502 via upstream_error()."""
 
     def test_update_not_found_returns_404(self, client, mock_memory):
@@ -763,8 +781,8 @@ class TestWriteHandlerErrorMapping:
         assert resp.status_code == 400
 
     def test_add_validation_error_returns_400(self, client, mock_memory):
-        mock_memory.add.side_effect = Mem0ValidationError(
-            message="messages must be str, dict, or list[dict]", error_code="VALIDATION_003"
+        mock_memory.add.side_effect = MemoryValidationError(
+            "messages must be str, dict, or list[dict]"
         )
         resp = client.post("/memories", json={
             "messages": [{"role": "user", "content": "hi"}], "user_id": "u1",

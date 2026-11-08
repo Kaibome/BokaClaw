@@ -1,32 +1,27 @@
-# Mintlify Starter Kit
+# BokaClaw Documentation
 
-Click on `Use this template` to copy the Mintlify starter kit. The starter kit contains examples including
+Mintlify documentation for BokaClaw: the workspace-Markdown memory format and operations, the
+FastAPI server, the `bokaclaw-agent` runtime, the dashboard, and the evaluation console.
 
-- Guide pages
-- Navigation
-- Customizations
-- API Reference pages
-- Use of popular components
+## Development
 
-### Development
-
-Install the [Mintlify CLI](https://www.npmjs.com/package/mintlify) to preview the documentation changes locally. To install, use the following command
-
-```
-npm i -g mintlify
+```bash
+mintlify dev     # from docs/
+make docs        # from the repository root
 ```
 
-Run the following command at the root of your documentation (where mint.json is)
+Authoring rules, navigation requirements, and the `llms.txt` coverage check are documented in
+[`AGENTS.md`](AGENTS.md).
 
-```
-mintlify dev
-```
+## Structure
 
-### Publishing Changes
+| Path | Contents |
+|------|----------|
+| `memory/` | Workspace memory overview, Markdown format, operations, migration |
+| `server/` | Server execution and human-in-the-loop design |
+| `agent-loop/` | ReAct runtime, tools, subagents, context compression |
+| `dashboard/` | Console behavior and i18n |
+| `eval/` | Evaluation architecture and the eval console |
+| `building-problem-record/` | Incident and problem records |
 
-Install our GitHub App to auto-propagate changes from your repo to your deployment. Changes will be deployed to production automatically after pushing to the default branch. Find the link to install on your dashboard. 
-
-#### Troubleshooting
-
-- Mintlify dev isn't running - Run `mintlify install` it'll re-install dependencies.
-- Page loads as a 404 - Make sure you are running in a folder with `mint.json`
+`docs.json` is the navigation tree and `llms.txt` is the agent-readable index.

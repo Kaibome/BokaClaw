@@ -1,13 +1,13 @@
-from collections import defaultdict
 from datetime import datetime
 from typing import Any, Literal, Optional
 
-from app.core.auth import require_admin, verify_auth
-from app.core.errors import upstream_error
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
-from app.schemas import MessageResponse
+
+from app.core.auth import require_admin, verify_auth
+from app.core.errors import upstream_error
 from app.core.server_state import get_memory_instance
+from app.schemas import MessageResponse
 
 router = APIRouter(prefix="/entities", tags=["entities"])
 
@@ -25,12 +25,6 @@ class Entity(BaseModel):
     updated_at: Optional[datetime] = None
 
 
-def _iter_payloads() -> list[dict[str, Any]]:
-    results = get_memory_instance().vector_store.list(top_k=SCAN_LIMIT)
-    rows = results[0] if results and isinstance(results, list) and isinstance(results[0], list) else results or []
-    return [getattr(row, "payload", None) or {} for row in rows]
-
-
 def _parse_timestamp(value: Any) -> Optional[datetime]:
     if not value:
         return None
@@ -42,28 +36,16 @@ def _parse_timestamp(value: Any) -> Optional[datetime]:
 
 @router.get("", response_model=list[Entity])
 def list_entities(_auth=Depends(verify_auth)):
-    buckets: dict[tuple[EntityType, str], dict[str, Any]] = defaultdict(
-        lambda: {"total_memories": 0, "created_at": None, "updated_at": None}
-    )
-
-    for payload in _iter_payloads():
-        created = _parse_timestamp(payload.get("created_at"))
-        updated = _parse_timestamp(payload.get("updated_at")) or created
-
-        for entity_type, field in TYPE_TO_FIELD.items():
-            value = payload.get(field)
-            if not value:
-                continue
-            bucket = buckets[(entity_type, str(value))]
-            bucket["total_memories"] += 1
-            if created and (bucket["created_at"] is None or created < bucket["created_at"]):
-                bucket["created_at"] = created
-            if updated and (bucket["updated_at"] is None or updated > bucket["updated_at"]):
-                bucket["updated_at"] = updated
-
+    rows = get_memory_instance().repository.entities(limit=SCAN_LIMIT)
     return [
-        Entity(id=entity_id, type=entity_type, **data)
-        for (entity_type, entity_id), data in sorted(buckets.items(), key=lambda item: (item[0][0], item[0][1]))
+        Entity(
+            id=str(row["id"]),
+            type=row["type"],
+            total_memories=int(row["total_memories"]),
+            created_at=_parse_timestamp(row.get("created_at")),
+            updated_at=_parse_timestamp(row.get("updated_at")),
+        )
+        for row in rows
     ]
 
 

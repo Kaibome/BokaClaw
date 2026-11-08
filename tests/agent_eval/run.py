@@ -26,6 +26,5 @@ if str(_SERVER_DIR) not in sys.path:
 
 from app.eval.cli import main  # noqa: E402
 
-
 if __name__ == "__main__":
     raise SystemExit(main())

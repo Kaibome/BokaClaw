@@ -18,10 +18,10 @@ from app.core.auth import (
     verify_password,
 )
 from app.core.db import get_db
-from app.models import User
 from app.core.rate_limit import limiter
-from app.schemas import MessageResponse
 from app.core.telemetry import capture_admin_registered, capture_onboarding_completed
+from app.models import User
+from app.schemas import MessageResponse
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 

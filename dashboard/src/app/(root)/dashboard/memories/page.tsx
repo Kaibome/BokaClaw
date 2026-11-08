@@ -17,7 +17,6 @@ import {
   SheetTitle,
   SheetDescription,
 } from "@/components/ui/sheet";
-import { UpgradeBanner } from "@/components/self-hosted/upgrade-banner";
 import { toast } from "@/components/ui/use-toast";
 import { getErrorMessage } from "@/lib/error-message";
 import { api } from "@/utils/api";
@@ -110,16 +109,6 @@ export default function MemoriesPage() {
         {t("memories.title")}
       </h1>
 
-      {memories.length >= MEMORY_FETCH_LIMIT && (
-        <UpgradeBanner
-          id="memories-1k"
-          message={t("memories.upgrade.message")}
-          ctaLabel={t("memories.upgrade.cta")}
-          ctaUrl="https://app.mem0.ai?utm_source=oss&utm_medium=dashboard-memories"
-          variant="cloud"
-        />
-      )}
-
       <div className="flex gap-3">
         <Input
           placeholder={t("memories.filterPlaceholder")}
@@ -149,7 +138,7 @@ export default function MemoriesPage() {
   -d '{"messages": [{"role": "user", "content": "I like hiking"}], "user_id": "alice"}'`}
           </pre>
           <a
-            href="https://docs.mem0.ai/open-source/features/rest-api#memory-operations"
+            href="https://docs.bokaclaw.ai/memory/overview"
             target="_blank"
             rel="noopener noreferrer"
             className="text-xs text-onSurface-default-tertiary underline underline-offset-4 hover:text-onSurface-default-primary mt-2"
