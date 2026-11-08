@@ -6,6 +6,7 @@ import { getErrorMessage } from "@/lib/error-message";
 import { ApiStreamError, api, getStream, postStream } from "@/utils/api";
 import { AGENT_ENDPOINTS } from "@/utils/api-endpoints";
 import { SseParser, type SseMessage } from "@/utils/sse";
+import { useI18n } from "@/i18n/provider";
 import type {
   ActiveRun,
   AgentRun,
@@ -227,9 +228,6 @@ function finalizeRunningToolTrace(
   );
 }
 
-const NOT_CONFIGURED_MESSAGE =
-  "Agent execution is not configured yet. Set AGENT_MODEL and AGENT_API_KEY (or OPENAI_API_KEY) on the API server, or AGENT_LOOP_MOCK=true for local UI work.";
-
 function upsertConversation(
   conversations: Conversation[],
   next: Conversation,
@@ -293,6 +291,7 @@ function parse<T>(message: SseMessage): T | null {
 }
 
 export function useAgentChat() {
+  const { t } = useI18n();
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessageView[]>([]);
@@ -851,8 +850,8 @@ export function useAgentChat() {
         if (status !== "cancelled") {
           setError(
             payload.code === "agent_not_configured"
-              ? NOT_CONFIGURED_MESSAGE
-              : payload.detail || "The agent could not complete this turn.",
+              ? t("agent.errors.notConfigured")
+              : payload.detail || t("agent.errors.couldNotComplete"),
           );
         }
 
@@ -945,13 +944,14 @@ export function useAgentChat() {
       patchAssistant,
       persistCursor,
       stopPolling,
+      t,
     ],
   );
 
   const consumeRun = useCallback(
     async (response: Response, controller: AbortController, epoch: number) => {
       if (!response.body) {
-        throw new ApiStreamError("The agent returned an empty stream.", 502);
+        throw new ApiStreamError(t("agent.errors.emptyStream"), 502);
       }
 
       const reader = response.body.getReader();
@@ -980,7 +980,7 @@ export function useAgentChat() {
         } catch {}
       }
     },
-    [armWatchdog, handleEvent],
+    [armWatchdog, handleEvent, t],
   );
 
   const handleRunGone = useCallback(() => {
@@ -990,11 +990,11 @@ export function useAgentChat() {
     if (conversationId) clearCursor(conversationId);
     stopLocalRun("closed");
     toast({
-      title: "This reply has ended",
-      description: "Reloading the saved conversation.",
+      title: t("agent.toast.replyEnded.title"),
+      description: t("agent.toast.replyEnded.description"),
     });
     if (conversationId) void loadMessagesRef.current(conversationId);
-  }, [clearCursor, stopLocalRun]);
+  }, [clearCursor, stopLocalRun, t]);
 
   const handleEventsExpired = useCallback(() => {
     const runId = runIdRef.current;
@@ -1003,16 +1003,16 @@ export function useAgentChat() {
     if (conversationId) clearCursor(conversationId);
     stopLocalRun("closed");
     toast({
-      title: "History for this reply has expired",
-      description: "Showing the final saved messages instead.",
+      title: t("agent.toast.historyExpired.title"),
+      description: t("agent.toast.historyExpired.description"),
     });
     if (conversationId) void loadMessagesRef.current(conversationId);
-  }, [clearCursor, stopLocalRun]);
+  }, [clearCursor, stopLocalRun, t]);
 
   const handleForbidden = useCallback(() => {
     stopLocalRun("closed");
-    setError("You do not have access to this conversation.");
-  }, [stopLocalRun]);
+    setError(t("agent.errors.noAccess"));
+  }, [stopLocalRun, t]);
 
   const connect = useCallback(
     async (runId: string, afterSeq: number) => {
@@ -1276,13 +1276,13 @@ export function useAgentChat() {
         setConnection("idle");
       } catch (err) {
         if (activeIdRef.current === conversationId) {
-          setError(getErrorMessage(err, "Failed to load conversation"));
+          setError(getErrorMessage(err, t("agent.errors.loadConversation")));
         }
       } finally {
         setIsLoadingMessages(false);
       }
     },
-    [clearCursor, connect, ensureAssistantBubble],
+    [clearCursor, connect, ensureAssistantBubble, t],
   );
   loadMessagesRef.current = loadMessages;
 
@@ -1296,38 +1296,41 @@ export function useAgentChat() {
     void connectRef.current(runId, lastSeqRef.current);
   }, [clearRetryTimer, clearWatchdog, stopPolling]);
 
-  const handleLegacyFailure = useCallback((err?: unknown) => {
-    terminalRef.current = true;
-    runIdRef.current = null;
-    lastSeqRef.current = 0;
-    runStatusRef.current = "failed";
-    setRunStatus("failed");
-    setActiveRunId(null);
-    cancelRequestedRef.current = false;
-    setCancelRequested(false);
-    sendingRef.current = false;
-    setIsSending(false);
-    connectionRef.current = "closed";
-    setConnection("closed");
-    if (err) {
-      setError(getErrorMessage(err, "Failed to reach the agent"));
-    }
-    setMessages((previous) =>
-      previous.map((message) =>
-        message.role === "assistant" &&
-        (message.streaming || message.id === assistantIdRef.current)
-          ? {
-              ...message,
-              streaming: false,
-              reconnecting: false,
-              failed: true,
-              runStatus: "failed",
-              toolTrace: finalizeRunningToolTrace(message.toolTrace),
-            }
-          : message,
-      ),
-    );
-  }, []);
+  const handleLegacyFailure = useCallback(
+    (err?: unknown) => {
+      terminalRef.current = true;
+      runIdRef.current = null;
+      lastSeqRef.current = 0;
+      runStatusRef.current = "failed";
+      setRunStatus("failed");
+      setActiveRunId(null);
+      cancelRequestedRef.current = false;
+      setCancelRequested(false);
+      sendingRef.current = false;
+      setIsSending(false);
+      connectionRef.current = "closed";
+      setConnection("closed");
+      if (err) {
+        setError(getErrorMessage(err, t("agent.errors.reachAgent")));
+      }
+      setMessages((previous) =>
+        previous.map((message) =>
+          message.role === "assistant" &&
+          (message.streaming || message.id === assistantIdRef.current)
+            ? {
+                ...message,
+                streaming: false,
+                reconnecting: false,
+                failed: true,
+                runStatus: "failed",
+                toolTrace: finalizeRunningToolTrace(message.toolTrace),
+              }
+            : message,
+        ),
+      );
+    },
+    [t],
+  );
 
   const send = useCallback(
     async (rawText: string): Promise<SendResult> => {
@@ -1469,9 +1472,8 @@ export function useAgentChat() {
           );
 
           toast({
-            title: "A reply is still in progress",
-            description:
-              "Your message was not sent. Wait for it to finish or stop it, then try again.",
+            title: t("agent.toast.replyInProgress.title"),
+            description: t("agent.toast.replyInProgress.sendDescription"),
           });
 
           const nextRunId =
@@ -1493,8 +1495,8 @@ export function useAgentChat() {
 
         const message =
           err instanceof ApiStreamError && err.code === "agent_not_configured"
-            ? NOT_CONFIGURED_MESSAGE
-            : getErrorMessage(err, "Failed to reach the agent");
+            ? t("agent.errors.notConfigured")
+            : getErrorMessage(err, t("agent.errors.reachAgent"));
         setError(message);
         abortRef.current = null;
         terminalRef.current = true;
@@ -1549,6 +1551,7 @@ export function useAgentChat() {
       handleForbidden,
       handleLegacyFailure,
       handleRunGone,
+      t,
     ],
   );
 
@@ -1611,12 +1614,12 @@ export function useAgentChat() {
         ),
       );
       toast({
-        title: "Failed to stop the agent",
-        description: getErrorMessage(err, "Please try again."),
+        title: t("agent.errors.stopAgent"),
+        description: getErrorMessage(err, t("agent.errors.tryAgain")),
         variant: "destructive",
       });
     }
-  }, [closeSubscription]);
+  }, [closeSubscription, t]);
 
   const selectConversation = useCallback(
     (conversationId: string) => {
@@ -1677,7 +1680,7 @@ export function useAgentChat() {
         void loadMessages(list[0].id);
       } catch (err) {
         if (!disposed) {
-          setError(getErrorMessage(err, "Failed to load conversations"));
+          setError(getErrorMessage(err, t("agent.errors.loadConversations")));
         }
       } finally {
         if (!disposed) setIsLoadingConversations(false);
@@ -1687,7 +1690,7 @@ export function useAgentChat() {
     return () => {
       disposed = true;
     };
-  }, [loadConversations, loadMessages]);
+  }, [loadConversations, loadMessages, t]);
 
   useEffect(() => {
     return () => {
@@ -1737,13 +1740,13 @@ export function useAgentChat() {
         );
       } catch (err) {
         toast({
-          title: "Failed to rename conversation",
-          description: getErrorMessage(err),
+          title: t("agent.errors.renameConversation"),
+          description: getErrorMessage(err, t("common.error.generic")),
           variant: "destructive",
         });
       }
     },
-    [],
+    [t],
   );
 
   const deleteConversation = useCallback(
@@ -1755,23 +1758,26 @@ export function useAgentChat() {
         );
         clearCursor(conversationId);
         if (activeIdRef.current === conversationId) startNewChat();
-        toast({ title: "Conversation deleted", variant: "success" });
+        toast({
+          title: t("agent.toast.conversationDeleted"),
+          variant: "success",
+        });
       } catch (err) {
         const status = httpStatus(err);
         toast({
           title:
             status === 409
-              ? "A reply is still in progress"
-              : "Failed to delete conversation",
+              ? t("agent.toast.replyInProgress.title")
+              : t("agent.errors.deleteConversation"),
           description:
             status === 409
-              ? "Stop it or wait for it to finish, then try again."
-              : getErrorMessage(err),
+              ? t("agent.toast.replyInProgress.deleteDescription")
+              : getErrorMessage(err, t("common.error.generic")),
           variant: "destructive",
         });
       }
     },
-    [clearCursor, startNewChat],
+    [clearCursor, startNewChat, t],
   );
 
   const activeConversation =

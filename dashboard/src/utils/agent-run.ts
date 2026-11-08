@@ -2,9 +2,17 @@ import { postStream } from "@/utils/api";
 import { AGENT_ENDPOINTS } from "@/utils/api-endpoints";
 import { SseParser } from "@/utils/sse";
 
+interface StartAgentRunFallbacks {
+  emptyResponse?: string;
+  startFailed?: string;
+  noRunId?: string;
+}
+
 interface StartAgentRunOptions {
   message: string;
   metadata?: Record<string, unknown>;
+  /** Localized fallbacks for errors that carry no server-supplied detail. */
+  fallbacks?: StartAgentRunFallbacks;
 }
 
 interface MetaEvent {
@@ -27,6 +35,7 @@ interface ErrorEvent {
 export async function startAgentRun({
   message,
   metadata,
+  fallbacks,
 }: StartAgentRunOptions): Promise<string> {
   const controller = new AbortController();
   const response = await postStream(
@@ -41,7 +50,9 @@ export async function startAgentRun({
   );
 
   if (!response.body) {
-    throw new Error("The agent returned an empty response.");
+    throw new Error(
+      fallbacks?.emptyResponse ?? "The agent returned an empty response.",
+    );
   }
 
   const reader = response.body.getReader();
@@ -65,6 +76,7 @@ export async function startAgentRun({
             payload?.detail ??
               payload?.message ??
               payload?.code ??
+              fallbacks?.startFailed ??
               "The agent failed to start.",
           );
         }
@@ -75,7 +87,7 @@ export async function startAgentRun({
     void reader.cancel().catch(() => {});
   }
 
-  throw new Error("The agent did not return a run id.");
+  throw new Error(fallbacks?.noRunId ?? "The agent did not return a run id.");
 }
 
 function parseJson<T>(data: string): T | null {

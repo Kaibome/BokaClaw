@@ -10,7 +10,6 @@ import {
 } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { format, formatDistanceToNow } from "date-fns";
 import {
   FlaskConical,
   FolderCog,
@@ -36,6 +35,8 @@ import { DataTable } from "@/components/shared/data-table";
 import { EmptyState } from "@/components/self-hosted/empty-state";
 import { getErrorMessage } from "@/lib/error-message";
 import { useApiQuery } from "@/hooks/use-api-query";
+import type { MessageKey } from "@/i18n/messages/en";
+import { useI18n } from "@/i18n/provider";
 import { api } from "@/utils/api";
 import { startAgentRun } from "@/utils/agent-run";
 import { AGENT_ENDPOINTS, EVAL_ENDPOINTS } from "@/utils/api-endpoints";
@@ -57,6 +58,30 @@ const HISTORY_LIMIT = 50;
 
 const isTerminal = (status: EvalStatus) =>
   status === "completed" || status === "failed" || status === "cancelled";
+
+const EVAL_STATUS_KEYS: Record<EvalStatus, MessageKey> = {
+  queued: "enums.evalStatus.queued",
+  running: "enums.evalStatus.running",
+  completed: "enums.evalStatus.completed",
+  failed: "enums.evalStatus.failed",
+  cancelled: "enums.evalStatus.cancelled",
+};
+
+const RUN_STATUS_KEYS: Record<RunStatus, MessageKey> = {
+  queued: "enums.runStatus.queued",
+  running: "enums.runStatus.running",
+  completed: "enums.runStatus.completed",
+  failed: "enums.runStatus.failed",
+  cancelled: "enums.runStatus.cancelled",
+  interrupted: "enums.runStatus.interrupted",
+};
+
+const METRIC_STATE_KEYS: Record<string, MessageKey> = {
+  skipped: "eval.metric.state.skipped",
+  error: "eval.metric.state.error",
+  pass: "eval.metric.state.pass",
+  fail: "eval.metric.state.fail",
+};
 
 const isRunTerminal = (status: RunStatus) =>
   status === "completed" ||
@@ -102,6 +127,7 @@ const formatScore = (value: number | null) =>
   value === null ? "—" : value.toFixed(2);
 
 function MetricRow({ metric }: { metric: EvalMetricResult }) {
+  const { t } = useI18n();
   const state = metric.skipped
     ? "skipped"
     : metric.error
@@ -124,12 +150,14 @@ function MetricRow({ metric }: { metric: EvalMetricResult }) {
         <div className="flex items-center gap-2">
           <span className="font-mono text-xs font-medium">{metric.name}</span>
           <Badge variant="outline" className={stateClass}>
-            {state}
+            {t(METRIC_STATE_KEYS[state])}
           </Badge>
         </div>
         <span className="text-xs text-onSurface-default-secondary">
-          score {formatScore(metric.score)} / threshold{" "}
-          {formatScore(metric.threshold)}
+          {t("eval.metric.score", {
+            score: formatScore(metric.score),
+            threshold: formatScore(metric.threshold),
+          })}
         </span>
       </div>
       {metric.reason && (
@@ -142,10 +170,16 @@ function MetricRow({ metric }: { metric: EvalMetricResult }) {
       )}
       <div className="flex flex-wrap gap-3 text-[11px] text-onSurface-default-tertiary">
         {metric.evaluation_model && (
-          <span>judge: {metric.evaluation_model}</span>
+          <span>
+            {t("eval.metric.judge", { model: metric.evaluation_model })}
+          </span>
         )}
         {metric.evaluation_cost !== null && (
-          <span>cost: {formatCost(metric.evaluation_cost)}</span>
+          <span>
+            {t("eval.metric.cost", {
+              cost: formatCost(metric.evaluation_cost),
+            })}
+          </span>
         )}
       </div>
     </div>
@@ -161,6 +195,7 @@ function EvalDetailCard({
   cancelling: boolean;
   onCancel: () => void;
 }) {
+  const { t, formatRelativeTime } = useI18n();
   const running = detail.status === "queued" || detail.status === "running";
   const cancelPending =
     detail.status === "running" && detail.cancel_requested_at !== null;
@@ -174,7 +209,7 @@ function EvalDetailCard({
             {detail.eval_case_id}
           </h3>
           <p className="text-xs break-all text-onSurface-default-tertiary">
-            eval {detail.id}
+            {t("eval.detail.evalLabel", { id: detail.id })}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -182,7 +217,9 @@ function EvalDetailCard({
             variant="outline"
             className={getStatusClassName(detail.status)}
           >
-            {cancelPending ? "cancelling" : detail.status}
+            {cancelPending
+              ? t("eval.cancellingState")
+              : t(EVAL_STATUS_KEYS[detail.status])}
           </Badge>
           {running && (
             <Button
@@ -193,7 +230,7 @@ function EvalDetailCard({
               disabled={cancelling || cancelPending}
             >
               <XCircle className="mr-1.5 size-3.5" />
-              {cancelPending ? "Cancelling…" : "Cancel"}
+              {cancelPending ? t("eval.cancelling") : t("eval.cancel")}
             </Button>
           )}
         </div>
@@ -201,52 +238,60 @@ function EvalDetailCard({
       <div className="space-y-4">
         <div className="grid grid-cols-2 gap-3 text-sm md:grid-cols-3">
           <div>
-            <p className="text-xs text-onSurface-default-tertiary">Overall</p>
+            <p className="text-xs text-onSurface-default-tertiary">
+              {t("eval.detail.overall")}
+            </p>
             <p className="font-medium">
               {detail.overall_success === null
                 ? "—"
                 : detail.overall_success
-                  ? "PASS"
-                  : "FAIL"}
+                  ? t("eval.pass")
+                  : t("eval.fail")}
             </p>
           </div>
           <div>
             <p className="text-xs text-onSurface-default-tertiary">
-              Run status
+              {t("eval.detail.runStatus")}
             </p>
-            <p className="font-medium">{detail.run_status}</p>
+            <p className="font-medium">
+              {RUN_STATUS_KEYS[detail.run_status as RunStatus]
+                ? t(RUN_STATUS_KEYS[detail.run_status as RunStatus])
+                : detail.run_status}
+            </p>
           </div>
           <div>
-            <p className="text-xs text-onSurface-default-tertiary">Duration</p>
+            <p className="text-xs text-onSurface-default-tertiary">
+              {t("eval.detail.duration")}
+            </p>
             <p className="font-medium">
               {detail.duration_ms === null ? "—" : `${detail.duration_ms} ms`}
             </p>
           </div>
           <div>
             <p className="text-xs text-onSurface-default-tertiary">
-              Judge model
+              {t("eval.detail.judgeModel")}
             </p>
             <p className="font-medium">{detail.judge_model ?? "—"}</p>
           </div>
           <div>
             <p className="text-xs text-onSurface-default-tertiary">
-              Judge cost
+              {t("eval.detail.judgeCost")}
             </p>
             <p className="font-medium">{formatCost(detail.token_cost)}</p>
           </div>
           <div>
-            <p className="text-xs text-onSurface-default-tertiary">Created</p>
+            <p className="text-xs text-onSurface-default-tertiary">
+              {t("eval.detail.created")}
+            </p>
             <p className="font-medium">
-              {formatDistanceToNow(new Date(detail.created_at), {
-                addSuffix: true,
-              })}
+              {formatRelativeTime(detail.created_at)}
             </p>
           </div>
         </div>
 
         <div className="space-y-1">
           <Label className="text-xs text-onSurface-default-tertiary">
-            Run / case
+            {t("eval.detail.runCase")}
           </Label>
           <p className="break-all font-mono text-xs">
             {detail.run_id} / {detail.eval_case_id}
@@ -255,7 +300,7 @@ function EvalDetailCard({
             href={`/dashboard/trace?run_id=${detail.run_id}`}
             className="inline-block text-xs text-primary underline-offset-4 hover:underline"
           >
-            Open this run in Trace
+            {t("eval.detail.openInTrace")}
           </Link>
         </div>
 
@@ -275,7 +320,7 @@ function EvalDetailCard({
         {detail.metrics.length > 0 && (
           <div className="space-y-2">
             <Label className="text-xs text-onSurface-default-tertiary">
-              Metrics
+              {t("eval.detail.metrics")}
             </Label>
             <div className="space-y-2">
               {detail.metrics.map((metric) => (
@@ -288,7 +333,7 @@ function EvalDetailCard({
         {detail.warnings.length > 0 && (
           <div className="space-y-1">
             <Label className="text-xs text-onSurface-default-tertiary">
-              Warnings
+              {t("eval.detail.warnings")}
             </Label>
             <ul className="list-inside list-disc text-xs text-onSurface-default-secondary">
               {detail.warnings.map((warning) => (
@@ -304,6 +349,7 @@ function EvalDetailCard({
 
 function EvalPageInner() {
   const searchParams = useSearchParams();
+  const { t, formatDateTime, formatRelativeTime } = useI18n();
   const [caseId, setCaseId] = useState(
     () => searchParams.get("eval_case_id")?.trim() ?? "",
   );
@@ -330,7 +376,7 @@ function EvalPageInner() {
       const res = await api.get<EvalConfig>(EVAL_ENDPOINTS.CONFIG);
       return res.data;
     },
-    { errorToast: "Failed to load eval configuration" },
+    { errorToast: t("eval.errors.loadConfig") },
   );
 
   const { data: goldens = [] } = useApiQuery<EvalGolden[]>(
@@ -352,7 +398,7 @@ function EvalPageInner() {
       });
       return res.data ?? [];
     },
-    { errorToast: "Failed to load eval history", initialData: [] },
+    { errorToast: t("eval.errors.loadHistory"), initialData: [] },
   );
 
   const loadDetail = useCallback(async (id: string) => {
@@ -371,13 +417,13 @@ function EvalPageInner() {
       } catch (err) {
         setDetailOpen(false);
         toast({
-          title: "Failed to load eval",
-          description: getErrorMessage(err),
+          title: t("eval.errors.loadEval"),
+          description: getErrorMessage(err, t("common.error.generic")),
           variant: "destructive",
         });
       }
     },
-    [loadDetail],
+    [loadDetail, t],
   );
 
   useEffect(() => {
@@ -400,16 +446,14 @@ function EvalPageInner() {
           return;
         }
         if (Date.now() - startedAt > POLL_TIMEOUT_MS) {
-          setPollError(
-            "Polling timed out. Refresh to check the eval again; it may still be running.",
-          );
+          setPollError(t("eval.errors.pollTimeout"));
           setActiveEvalId(null);
           return;
         }
         timer = setTimeout(() => void poll(), POLL_MS);
       } catch (err) {
         if (cancelled) return;
-        setPollError(getErrorMessage(err, "Failed to load eval"));
+        setPollError(getErrorMessage(err, t("eval.errors.loadEval")));
         timer = setTimeout(() => void poll(), POLL_MS * 2);
       }
     };
@@ -419,7 +463,7 @@ function EvalPageInner() {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [activeEvalId, refetchHistory]);
+  }, [activeEvalId, refetchHistory, t]);
 
   // The eval API only accepts terminal runs, so the run started for this eval
   // must finish before it can be scored.
@@ -431,20 +475,18 @@ function EvalPageInner() {
         return { status: res.data.status, errorCode: res.data.error_code };
       }
       if (Date.now() - startedAt > POLL_TIMEOUT_MS) {
-        throw new Error(
-          "Timed out waiting for the agent run to finish. Open Trace to check it.",
-        );
+        throw new Error(t("eval.errors.agentTimeout"));
       }
       await new Promise((resolve) => setTimeout(resolve, POLL_MS));
     }
-    throw new Error("The eval page was closed before the run finished.");
+    throw new Error(t("eval.errors.closed"));
   };
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const trimmedCase = caseId.trim();
     if (!trimmedCase) {
-      toast({ title: "Eval case is required", variant: "destructive" });
+      toast({ title: t("eval.errors.caseRequired"), variant: "destructive" });
       return;
     }
     if (phase !== "idle") return;
@@ -464,6 +506,11 @@ function EvalPageInner() {
       const newRunId = await startAgentRun({
         message: golden.input,
         metadata: { eval_case_id: golden.eval_case_id },
+        fallbacks: {
+          emptyResponse: t("eval.errors.emptyResponse"),
+          startFailed: t("eval.errors.startFailed"),
+          noRunId: t("eval.errors.noRunId"),
+        },
       });
       if (!mountedRef.current) return;
       setAgentRunId(newRunId);
@@ -473,10 +520,12 @@ function EvalPageInner() {
       if (!mountedRef.current) return;
       if (run.status !== "completed") {
         const suffix = run.errorCode ? ` (${run.errorCode})` : "";
-        setAgentRunError(`Agent run ${run.status}${suffix}.`);
+        setAgentRunError(
+          t("eval.errors.runStatus", { status: run.status, suffix }),
+        );
         toast({
-          title: "Agent run did not complete",
-          description: "No eval was queued. Open Trace for details.",
+          title: t("eval.errors.agentNotComplete"),
+          description: t("eval.errors.notQueued"),
           variant: "destructive",
         });
         return;
@@ -497,8 +546,8 @@ function EvalPageInner() {
     } catch (err) {
       if (!mountedRef.current) return;
       toast({
-        title: "Failed to run eval",
-        description: getErrorMessage(err),
+        title: t("eval.errors.runFailed"),
+        description: getErrorMessage(err, t("common.error.generic")),
         variant: "destructive",
       });
     } finally {
@@ -515,8 +564,8 @@ function EvalPageInner() {
       void refetchHistory();
     } catch (err) {
       toast({
-        title: "Failed to cancel eval",
-        description: getErrorMessage(err),
+        title: t("eval.errors.cancelFailed"),
+        description: getErrorMessage(err, t("common.error.generic")),
         variant: "destructive",
       });
     } finally {
@@ -527,17 +576,15 @@ function EvalPageInner() {
   const historyColumns = [
     {
       key: "created_at" as keyof EvalRunItem,
-      label: "Time",
+      label: t("eval.table.time"),
       width: 120,
       render: (value: string) => (
-        <span title={format(new Date(value), "PPpp")}>
-          {formatDistanceToNow(new Date(value), { addSuffix: true })}
-        </span>
+        <span title={formatDateTime(value)}>{formatRelativeTime(value)}</span>
       ),
     },
     {
       key: "eval_case_id" as keyof EvalRunItem,
-      label: "Case",
+      label: t("eval.table.case"),
       width: 200,
       render: (value: string) => (
         <span className="font-mono text-xs break-all">{value}</span>
@@ -545,30 +592,30 @@ function EvalPageInner() {
     },
     {
       key: "status" as keyof EvalRunItem,
-      label: "Status",
+      label: t("eval.table.status"),
       width: 100,
       render: (value: EvalStatus) => (
         <Badge variant="outline" className={getStatusClassName(value)}>
-          {value}
+          {t(EVAL_STATUS_KEYS[value])}
         </Badge>
       ),
     },
     {
       key: "overall_success" as keyof EvalRunItem,
-      label: "Overall",
+      label: t("eval.table.overall"),
       width: 80,
       render: (value: boolean | null) =>
-        value === null ? "—" : value ? "PASS" : "FAIL",
+        value === null ? "—" : value ? t("eval.pass") : t("eval.fail"),
     },
     {
       key: "use_llm_judge" as keyof EvalRunItem,
-      label: "Judge",
+      label: t("eval.table.judge"),
       width: 70,
-      render: (value: boolean) => (value ? "on" : "off"),
+      render: (value: boolean) => (value ? t("eval.on") : t("eval.off")),
     },
     {
       key: "duration_ms" as keyof EvalRunItem,
-      label: "Duration",
+      label: t("eval.table.duration"),
       width: 90,
       align: "right" as const,
       render: (value: number | null) => (value === null ? "—" : `${value} ms`),
@@ -583,18 +630,17 @@ function EvalPageInner() {
         <div className="space-y-1">
           <h1 className="flex items-center gap-2 text-xl font-semibold font-fustat">
             <FlaskConical className="size-5" />
-            Eval
+            {t("eval.title")}
           </h1>
           <p className="text-sm text-onSurface-default-secondary">
-            Run a golden case through the agent, then score the result using its
-            captured spans.
+            {t("eval.description")}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <Button variant="outline" asChild>
             <Link href="/dashboard/eval/cases">
               <FolderCog className="mr-2 size-4" />
-              Case management
+              {t("eval.caseManagement")}
             </Link>
           </Button>
           <Button
@@ -606,7 +652,7 @@ function EvalPageInner() {
             disabled={historyLoading}
           >
             <RefreshCw className="mr-2 size-4" />
-            Refresh
+            {t("eval.refresh")}
           </Button>
         </div>
       </div>
@@ -614,7 +660,7 @@ function EvalPageInner() {
       {config && !config.enabled && (
         <Card className="border-memBorder-primary">
           <CardContent className="p-4 text-sm text-onSurface-danger-primary">
-            Evaluation is disabled on this deployment (EVAL_ENABLED=false).
+            {t("eval.disabled")}
           </CardContent>
         </Card>
       )}
@@ -623,7 +669,7 @@ function EvalPageInner() {
         <CardContent className="p-4">
           <form className="space-y-4" onSubmit={submit}>
             <div className="space-y-1">
-              <Label htmlFor="eval-case">Eval case</Label>
+              <Label htmlFor="eval-case">{t("eval.caseLabel")}</Label>
               <Input
                 id="eval-case"
                 list="eval-case-options"
@@ -640,8 +686,7 @@ function EvalPageInner() {
                 ))}
               </datalist>
               <p className="text-xs text-onSurface-default-tertiary">
-                Runs this case&apos;s golden input in a new conversation, waits
-                for the run to finish, then evaluates that run.
+                {t("eval.caseHint")}
               </p>
             </div>
 
@@ -654,20 +699,19 @@ function EvalPageInner() {
               />
               <div className="space-y-1">
                 <Label htmlFor="eval-judge" className="text-sm">
-                  Use the LLM judge{" "}
+                  {t("eval.useJudge")}{" "}
                   {judgeDisabled && (
                     <span className="text-onSurface-default-tertiary">
-                      (unavailable)
+                      {t("eval.unavailable")}
                     </span>
                   )}
                 </Label>
                 <p className="text-xs text-onSurface-default-tertiary">
-                  Off by default. When enabled, the truncated prompt, reply and
-                  tool calls are sent to{" "}
+                  {t("eval.judgeHintPrefix")}
                   {config
                     ? `${config.judge_provider} / ${config.judge_model}`
-                    : "the configured judge model"}
-                  , which costs tokens.
+                    : t("eval.judgeHintFallback")}
+                  {t("eval.judgeHintSuffix")}
                 </p>
               </div>
             </div>
@@ -691,7 +735,9 @@ function EvalPageInner() {
                     variant="outline"
                     className={getRunStatusClassName("running")}
                   >
-                    {phase === "running" ? "running agent" : "evaluating"}
+                    {phase === "running"
+                      ? t("eval.phase.runningAgent")
+                      : t("eval.phase.evaluating")}
                   </Badge>
                 )}
                 {agentRunId && (
@@ -699,7 +745,7 @@ function EvalPageInner() {
                     href={`/dashboard/trace?run_id=${agentRunId}`}
                     className="text-xs text-onSurface-default-secondary underline underline-offset-2 hover:text-onSurface-default-primary"
                   >
-                    View trace
+                    {t("eval.viewTrace")}
                   </Link>
                 )}
               </div>
@@ -711,17 +757,18 @@ function EvalPageInner() {
                   <Loader2 className="mr-1.5 size-4 animate-spin" />
                 )}
                 {phase === "running"
-                  ? "Running agent…"
+                  ? t("eval.run.running")
                   : phase === "evaluating"
-                    ? "Queuing eval…"
-                    : "Run eval"}
+                    ? t("eval.run.queuing")
+                    : t("eval.run.run")}
               </Button>
             </div>
 
             {goldens.length === 0 && (
               <p className="text-xs text-onSurface-default-tertiary">
-                No goldens in the database yet; seed them with{" "}
-                <code className="font-mono">scripts/seed_eval_goldens.py</code>.
+                {t("eval.noGoldensPrefix")}
+                <code className="font-mono">scripts/seed_eval_goldens.py</code>
+                {t("eval.noGoldensSuffix")}
               </p>
             )}
           </form>
@@ -740,13 +787,16 @@ function EvalPageInner() {
       >
         <DialogContent className="max-h-[90vh] max-w-3xl overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>Eval result</DialogTitle>
+            <DialogTitle>{t("eval.result.title")}</DialogTitle>
             <DialogDescription>
               {detail
-                ? `${detail.eval_case_id} · ${detail.status}`
+                ? t("eval.result.description", {
+                    caseId: detail.eval_case_id,
+                    status: t(EVAL_STATUS_KEYS[detail.status]),
+                  })
                 : activeEvalId
-                  ? `Eval ${activeEvalId} is queued. Waiting for the worker…`
-                  : "Loading eval…"}
+                  ? t("eval.result.queued", { id: activeEvalId })
+                  : t("eval.result.loading")}
             </DialogDescription>
           </DialogHeader>
           {detail ? (
@@ -759,8 +809,8 @@ function EvalPageInner() {
             <div className="flex items-center gap-2 py-6 text-sm text-onSurface-default-secondary">
               <RefreshCw className="size-4 animate-spin" />
               {activeEvalId
-                ? `Eval ${activeEvalId} is queued. Waiting for the worker…`
-                : "Loading eval…"}
+                ? t("eval.result.queued", { id: activeEvalId })
+                : t("eval.result.loading")}
             </div>
           )}
         </DialogContent>
@@ -768,16 +818,18 @@ function EvalPageInner() {
 
       <div className="space-y-2">
         <div className="flex items-center justify-between">
-          <h2 className="text-sm font-semibold font-fustat">Recent evals</h2>
+          <h2 className="text-sm font-semibold font-fustat">
+            {t("eval.recent")}
+          </h2>
           <span className="text-xs text-onSurface-default-tertiary">
-            last {HISTORY_LIMIT}
+            {t("eval.recent.last", { count: HISTORY_LIMIT })}
           </span>
         </div>
         <Card className="overflow-hidden border-memBorderPrimary">
           {history.length === 0 ? (
             <EmptyState
-              title="No evals yet"
-              description="Run one above; results are kept in Postgres."
+              title={t("eval.empty.title")}
+              description={t("eval.empty.description")}
               image="requests"
             />
           ) : (

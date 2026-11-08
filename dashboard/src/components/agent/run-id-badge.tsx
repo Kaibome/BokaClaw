@@ -4,8 +4,11 @@ import { useEffect, useState } from "react";
 import { Check, Copy } from "lucide-react";
 import { CopyToClipboard } from "react-copy-to-clipboard";
 
+import { useI18n } from "@/i18n/provider";
+
 export function RunIdBadge({ runId }: { runId: string }) {
   const [copied, setCopied] = useState(false);
+  const { t } = useI18n();
 
   useEffect(() => {
     if (!copied) return;
@@ -17,11 +20,11 @@ export function RunIdBadge({ runId }: { runId: string }) {
     <CopyToClipboard text={runId} onCopy={() => setCopied(true)}>
       <button
         type="button"
-        aria-label={copied ? "Run id copied" : "Copy run id"}
-        title={`Copy run id: ${runId}`}
+        aria-label={copied ? t("agent.runId.copied") : t("agent.runId.copy")}
+        title={t("agent.runId.title", { runId })}
         className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 typo-caption-sm text-onSurface-default-tertiary transition-colors hover:bg-surface-default-secondary hover:text-onSurface-default-primary"
       >
-        <span>run {runId.slice(0, 8)}</span>
+        <span>{t("agent.runId.label", { runId: runId.slice(0, 8) })}</span>
         {copied ? <Check className="size-3" /> : <Copy className="size-3" />}
       </button>
     </CopyToClipboard>

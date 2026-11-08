@@ -11,6 +11,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { useI18n } from "@/i18n/provider";
 
 interface RenameConversationDialogProps {
   open: boolean;
@@ -26,6 +27,7 @@ export function RenameConversationDialog({
   onSubmit,
 }: RenameConversationDialogProps) {
   const [title, setTitle] = useState(initialTitle);
+  const { t } = useI18n();
 
   useEffect(() => {
     if (open) setTitle(initialTitle);
@@ -42,12 +44,12 @@ export function RenameConversationDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Rename conversation</DialogTitle>
+          <DialogTitle>{t("agent.renameTitle")}</DialogTitle>
         </DialogHeader>
         <Input
           value={title}
-          placeholder="Conversation title"
-          aria-label="Conversation title"
+          placeholder={t("agent.conversationTitle")}
+          aria-label={t("agent.conversationTitle")}
           onChange={(event) => setTitle(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === "Enter") {
@@ -58,10 +60,10 @@ export function RenameConversationDialog({
         />
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>
-            Cancel
+            {t("common.cancel")}
           </Button>
           <Button onClick={submit} disabled={!title.trim()}>
-            Save
+            {t("common.save")}
           </Button>
         </DialogFooter>
       </DialogContent>

@@ -1,7 +1,6 @@
 "use client";
 
 import { useState } from "react";
-import { format, formatDistanceToNow } from "date-fns";
 import { RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -12,6 +11,8 @@ import { EmptyState } from "@/components/self-hosted/empty-state";
 import { api } from "@/utils/api";
 import { REQUEST_ENDPOINTS } from "@/utils/api-endpoints";
 import { useApiQuery } from "@/hooks/use-api-query";
+import type { MessageKey } from "@/i18n/messages/en";
+import { useI18n } from "@/i18n/provider";
 import { ApiRequestLog } from "@/types/api";
 
 type RequestLog = {
@@ -53,19 +54,11 @@ const getMethodClassName = (method: string) => {
   }
 };
 
-const getAuthLabel = (authType: string) => {
-  switch (authType.toLowerCase()) {
-    case "bearer":
-      return "JWT";
-    case "api_key":
-      return "API Key";
-    case "admin_api_key":
-      return "Admin Key";
-    case "disabled":
-      return "Disabled";
-    default:
-      return "--";
-  }
+const AUTH_LABEL_KEYS: Record<string, MessageKey> = {
+  bearer: "enums.authType.jwt",
+  api_key: "enums.authType.apiKey",
+  admin_api_key: "enums.authType.adminKey",
+  disabled: "enums.authType.disabled",
 };
 
 const normalizeLog = (entry: ApiRequestLog): RequestLog => {
@@ -83,6 +76,7 @@ const normalizeLog = (entry: ApiRequestLog): RequestLog => {
 export default function RequestsPage() {
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [page, setPage] = useState(0);
+  const { t, formatDateTime, formatRelativeTime } = useI18n();
 
   const {
     data: logs = [],
@@ -97,7 +91,7 @@ export default function RequestsPage() {
       setLastUpdated(new Date().toISOString());
       return (res.data ?? []).map(normalizeLog);
     },
-    { errorToast: "Failed to load request logs", initialData: [] },
+    { errorToast: t("requests.failedToLoad"), initialData: [] },
   );
 
   const totalRequests = logs.length;
@@ -116,17 +110,15 @@ export default function RequestsPage() {
   const columns = [
     {
       key: "createdAt" as keyof RequestLog,
-      label: "Time",
+      label: t("requests.table.time"),
       width: 140,
       render: (value: string) => (
-        <span title={format(new Date(value), "PPpp")}>
-          {formatDistanceToNow(new Date(value), { addSuffix: true })}
-        </span>
+        <span title={formatDateTime(value)}>{formatRelativeTime(value)}</span>
       ),
     },
     {
       key: "method" as keyof RequestLog,
-      label: "Method",
+      label: t("requests.table.method"),
       width: 96,
       render: (value: string) => (
         <Badge variant="outline" className={getMethodClassName(value)}>
@@ -136,7 +128,7 @@ export default function RequestsPage() {
     },
     {
       key: "path" as keyof RequestLog,
-      label: "Path",
+      label: t("requests.table.path"),
       width: 360,
       render: (value: string) => (
         <span className="font-mono text-xs break-all text-onSurface-default-primary">
@@ -146,7 +138,7 @@ export default function RequestsPage() {
     },
     {
       key: "statusCode" as keyof RequestLog,
-      label: "Status",
+      label: t("requests.table.status"),
       width: 120,
       render: (value: number) => (
         <Badge variant="outline" className={getStatusClassName(value)}>
@@ -156,15 +148,18 @@ export default function RequestsPage() {
     },
     {
       key: "latencyMs" as keyof RequestLog,
-      label: "Latency",
+      label: t("requests.table.latency"),
       width: 100,
       render: (value: number) => <span>{value} ms</span>,
     },
     {
       key: "authType" as keyof RequestLog,
-      label: "Auth",
+      label: t("requests.table.auth"),
       width: 120,
-      render: (value: string) => getAuthLabel(value),
+      render: (value: string) => {
+        const key = AUTH_LABEL_KEYS[value.toLowerCase()];
+        return key ? t(key) : t("enums.authType.unknown");
+      },
     },
   ];
 
@@ -172,14 +167,17 @@ export default function RequestsPage() {
     <div className="space-y-6">
       <div className="flex items-start justify-between gap-4">
         <div className="space-y-1">
-          <h1 className="text-xl font-semibold font-fustat">Requests</h1>
+          <h1 className="text-xl font-semibold font-fustat">
+            {t("requests.title")}
+          </h1>
           <p className="text-sm text-onSurface-default-secondary">
-            Recent request logs from your self-hosted instance.
+            {t("requests.description")}
           </p>
           {lastUpdated && (
             <p className="text-xs text-onSurface-default-tertiary">
-              Last updated{" "}
-              {formatDistanceToNow(new Date(lastUpdated), { addSuffix: true })}
+              {t("requests.lastUpdated", {
+                time: formatRelativeTime(lastUpdated),
+              })}
             </p>
           )}
         </div>
@@ -192,19 +190,19 @@ export default function RequestsPage() {
           disabled={isLoading}
         >
           <RefreshCw className="size-4 mr-2" />
-          Refresh
+          {t("requests.refresh")}
         </Button>
       </div>
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
         {[
-          { label: "Total Requests", value: totalRequests },
+          { label: t("requests.totalRequests"), value: totalRequests },
           {
-            label: "Success Rate",
+            label: t("requests.successRate"),
             value: totalRequests > 0 ? `${successRate}%` : "--",
           },
           {
-            label: "Avg Latency",
+            label: t("requests.avgLatency"),
             value: totalRequests > 0 ? `${averageLatency} ms` : "--",
           },
         ].map((card) => (
@@ -231,8 +229,8 @@ export default function RequestsPage() {
         <TableSkeleton rows={6} columns={6} />
       ) : logs.length === 0 ? (
         <EmptyState
-          title="No request logs yet"
-          description="Requests will appear here once your instance receives traffic."
+          title={t("requests.noLogs")}
+          description={t("requests.noLogsDescription")}
           image="requests"
         />
       ) : (
@@ -247,8 +245,11 @@ export default function RequestsPage() {
           {logs.length > PAGE_SIZE && (
             <div className="flex items-center justify-between text-sm text-onSurface-default-tertiary">
               <span>
-                {page * PAGE_SIZE + 1}–
-                {Math.min((page + 1) * PAGE_SIZE, logs.length)} of {logs.length}
+                {t("requests.range", {
+                  start: page * PAGE_SIZE + 1,
+                  end: Math.min((page + 1) * PAGE_SIZE, logs.length),
+                  total: logs.length,
+                })}
               </span>
               <div className="flex gap-2">
                 <Button
@@ -257,7 +258,7 @@ export default function RequestsPage() {
                   disabled={page === 0}
                   onClick={() => setPage((p) => p - 1)}
                 >
-                  Previous
+                  {t("common.previous")}
                 </Button>
                 <Button
                   variant="outline"
@@ -265,7 +266,7 @@ export default function RequestsPage() {
                   disabled={(page + 1) * PAGE_SIZE >= logs.length}
                   onClick={() => setPage((p) => p + 1)}
                 >
-                  Next
+                  {t("common.next")}
                 </Button>
               </div>
             </div>

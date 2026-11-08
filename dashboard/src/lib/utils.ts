@@ -16,11 +16,3 @@ export function formatTokens(value: number): string {
   }
   return String(value);
 }
-
-export function formatCompactNumber(value: number): string {
-  if (!Number.isFinite(value)) return "0";
-  return new Intl.NumberFormat("en", {
-    notation: "compact",
-    maximumFractionDigits: 1,
-  }).format(value);
-}

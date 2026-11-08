@@ -1,6 +1,5 @@
 "use client";
 
-import { formatDistanceToNow } from "date-fns";
 import { MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -13,6 +12,7 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
+import { useI18n } from "@/i18n/provider";
 import type { Conversation } from "@/types/api";
 
 interface ConversationListProps {
@@ -34,11 +34,13 @@ export function ConversationList({
   onRename,
   onDelete,
 }: ConversationListProps) {
+  const { t, formatRelativeTime } = useI18n();
+
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex shrink-0 items-center justify-between gap-2 border-b border-memBorder-primary px-3 py-2.5">
         <span className="typo-caption text-onSurface-default-tertiary">
-          CONVERSATIONS
+          {t("agent.conversations")}
         </span>
         <Button
           type="button"
@@ -46,7 +48,7 @@ export function ConversationList({
           size="icon"
           className="size-6"
           onClick={onNewChat}
-          aria-label="New chat"
+          aria-label={t("agent.newChat")}
         >
           <Plus className="size-3.5" />
         </Button>
@@ -62,7 +64,7 @@ export function ConversationList({
             </>
           ) : conversations.length === 0 ? (
             <p className="px-2 py-6 text-center text-sm text-onSurface-default-tertiary">
-              No conversations yet.
+              {t("agent.noConversations")}
             </p>
           ) : (
             conversations.map((conversation) => {
@@ -83,9 +85,7 @@ export function ConversationList({
                       {conversation.title}
                     </span>
                     <span className="typo-caption-sm text-onSurface-default-tertiary">
-                      {formatDistanceToNow(new Date(conversation.updated_at), {
-                        addSuffix: true,
-                      })}
+                      {formatRelativeTime(conversation.updated_at)}
                     </span>
                   </button>
 
@@ -96,7 +96,7 @@ export function ConversationList({
                         variant="ghost"
                         size="icon"
                         className="absolute right-1 top-1.5 size-6 opacity-0 transition-opacity group-hover:opacity-100 data-[state=open]:opacity-100"
-                        aria-label="Conversation actions"
+                        aria-label={t("agent.conversationActions")}
                       >
                         <MoreHorizontal className="size-3.5" />
                       </Button>
@@ -104,14 +104,14 @@ export function ConversationList({
                     <DropdownMenuContent align="end">
                       <DropdownMenuItem onClick={() => onRename(conversation)}>
                         <Pencil className="mr-2 size-3.5" />
-                        Rename
+                        {t("agent.rename")}
                       </DropdownMenuItem>
                       <DropdownMenuItem
                         className="text-onSurface-danger-primary focus:text-onSurface-danger-primary"
                         onClick={() => onDelete(conversation)}
                       >
                         <Trash2 className="mr-2 size-3.5" />
-                        Delete
+                        {t("agent.delete")}
                       </DropdownMenuItem>
                     </DropdownMenuContent>
                   </DropdownMenu>

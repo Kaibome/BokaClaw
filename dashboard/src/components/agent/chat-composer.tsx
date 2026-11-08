@@ -11,6 +11,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { formatTokens } from "@/lib/utils";
+import { useI18n } from "@/i18n/provider";
 import type { SendResult } from "@/hooks/use-agent-chat";
 import type { ContextUsage } from "@/types/api";
 
@@ -26,6 +27,7 @@ const MAX_HEIGHT = 200;
 const WARNING_THRESHOLD = 90;
 
 function ContextMeter({ usage }: { usage?: ContextUsage | null }) {
+  const { t, formatNumber } = useI18n();
   const used = usage?.used_tokens;
   const window = usage?.window_tokens;
   if (!used || used <= 0 || !window || window <= 0) return null;
@@ -42,7 +44,11 @@ function ContextMeter({ usage }: { usage?: ContextUsage | null }) {
       <TooltipTrigger asChild>
         <span
           tabIndex={0}
-          aria-label={`Context window: ${usedLabel} of ${windowLabel} tokens used (${percentLabel})`}
+          aria-label={t("agent.composer.contextWindowAria", {
+            used: usedLabel,
+            total: windowLabel,
+            percent: percentLabel,
+          })}
           className={`shrink-0 whitespace-nowrap pb-3 typo-caption-sm ${
             isWarning
               ? "text-onSurface-danger-primary"
@@ -53,13 +59,20 @@ function ContextMeter({ usage }: { usage?: ContextUsage | null }) {
         </span>
       </TooltipTrigger>
       <TooltipContent side="top" className="max-w-xs">
-        <p>Context used: {used.toLocaleString()} tokens (last model call)</p>
-        <p>Context window: {window.toLocaleString()} tokens</p>
+        <p>{t("agent.composer.contextUsed", { used: formatNumber(used) })}</p>
         <p>
-          Compression budget:{" "}
-          {budget ? `${budget.toLocaleString()} tokens` : "disabled"}
+          {t("agent.composer.contextWindow", {
+            total: formatNumber(window),
+          })}
         </p>
-        {isWarning ? <p>Approaching the context window limit.</p> : null}
+        <p>
+          {budget
+            ? t("agent.composer.compressionBudget", {
+                budget: formatNumber(budget),
+              })
+            : t("agent.composer.compressionDisabled")}
+        </p>
+        {isWarning ? <p>{t("agent.composer.approachingLimit")}</p> : null}
       </TooltipContent>
     </Tooltip>
   );
@@ -72,6 +85,7 @@ export function ChatComposer({
   cancelRequested,
   contextUsage,
 }: ChatComposerProps) {
+  const { t } = useI18n();
   const [value, setValue] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -107,8 +121,8 @@ export function ChatComposer({
           ref={textareaRef}
           rows={1}
           value={value}
-          placeholder="Message the agent..."
-          aria-label="Message the agent"
+          placeholder={t("agent.composer.placeholder")}
+          aria-label={t("agent.composer.aria")}
           onChange={(event) => setValue(event.target.value)}
           onKeyDown={(event) => {
             if (
@@ -128,7 +142,7 @@ export function ChatComposer({
           <div className="flex items-center gap-2">
             {cancelRequested && (
               <span className="typo-caption-sm text-onSurface-default-tertiary">
-                Stopping…
+                {t("agent.composer.stopping")}
               </span>
             )}
             <Button
@@ -137,7 +151,11 @@ export function ChatComposer({
               size="icon"
               onClick={onStop}
               disabled={cancelRequested}
-              aria-label={cancelRequested ? "Stopping" : "Stop generating"}
+              aria-label={
+                cancelRequested
+                  ? t("agent.composer.stoppingAria")
+                  : t("agent.composer.stop")
+              }
             >
               {cancelRequested ? (
                 <Loader2 className="size-4 animate-spin" />
@@ -152,14 +170,14 @@ export function ChatComposer({
             size="icon"
             onClick={() => void submit()}
             disabled={!value.trim()}
-            aria-label="Send message"
+            aria-label={t("agent.composer.send")}
           >
             <ArrowUp className="size-4" />
           </Button>
         )}
       </div>
       <p className="mt-1.5 typo-caption-sm text-onSurface-default-tertiary">
-        ENTER TO SEND · SHIFT+ENTER FOR A NEW LINE
+        {t("agent.composer.hint")}
       </p>
     </div>
   );

@@ -1,3 +1,5 @@
+"use client";
+
 import { AlertCircle, RotateCcw } from "lucide-react";
 
 import { RunIdBadge } from "@/components/agent/run-id-badge";
@@ -5,7 +7,11 @@ import { ToolTrace } from "@/components/agent/tool-trace";
 import { Button } from "@/components/ui/button";
 import { cn, formatTokens } from "@/lib/utils";
 import type { ChatMessageView } from "@/hooks/use-agent-chat";
+import type { MessageKey } from "@/i18n/messages/en";
+import { useI18n, type I18nContextValue } from "@/i18n/provider";
 import type { RunUsage } from "@/types/api";
+
+type Translate = I18nContextValue["t"];
 
 function readUsage(metadata: ChatMessageView["metadata"]): RunUsage | null {
   const value = metadata?.usage;
@@ -14,68 +20,80 @@ function readUsage(metadata: ChatMessageView["metadata"]): RunUsage | null {
   return typeof usage.coverage === "string" ? (usage as RunUsage) : null;
 }
 
-const USAGE_SUFFIX = "tokens cost this run";
-
-const SOURCE_LABELS: Record<string, string> = {
-  agent_loop: "Agent loop",
-  compression: "Compression",
-  memory_llm: "Memory LLM",
-  memory_embedding: "Memory embedding",
-  subagents: "Subagents",
+const SOURCE_KEYS: Record<string, MessageKey> = {
+  agent_loop: "agent.usage.source.agentLoop",
+  compression: "agent.usage.source.compression",
+  memory_llm: "agent.usage.source.memoryLlm",
+  memory_embedding: "agent.usage.source.memoryEmbedding",
+  subagents: "agent.usage.source.subagents",
 };
 
-function usageLabel(usage: RunUsage): string | null {
+function usageLabel(usage: RunUsage, t: Translate): string | null {
   if (usage.coverage === "pending" || usage.coverage === "unavailable") {
-    return `${USAGE_SUFFIX} —`;
+    return t("agent.usage.pending");
   }
   if (usage.coverage === "unknown") {
-    return `${USAGE_SUFFIX} unknown`;
+    return t("agent.usage.unknown");
   }
   if (usage.coverage === "none") {
-    return `0 ${USAGE_SUFFIX}`;
+    return t("agent.usage.zero");
   }
   if (usage.total_tokens === null || usage.total_tokens === undefined) {
-    return `${USAGE_SUFFIX} —`;
+    return t("agent.usage.pending");
   }
   const total = formatTokens(usage.total_tokens);
   return usage.coverage === "partial"
-    ? `≥ ${total} ${USAGE_SUFFIX}`
-    : `${total} ${USAGE_SUFFIX}`;
+    ? t("agent.usage.partial", { total })
+    : t("agent.usage.exact", { total });
 }
 
-function usageTitle(usage: RunUsage): string {
+function usageTitle(usage: RunUsage, t: Translate): string {
   const lines = [
-    `input ${usage.input_tokens ?? "?"} · output ${usage.output_tokens ?? "?"} · ${usage.model_calls} calls`,
+    t("agent.usage.summary", {
+      input: usage.input_tokens ?? "?",
+      output: usage.output_tokens ?? "?",
+      calls: usage.model_calls,
+    }),
   ];
   if (usage.cache_hit_rate !== null && usage.cache_hit_rate !== undefined) {
     const cached = formatTokens(usage.cached_tokens ?? 0);
     const missed = formatTokens(usage.cache_miss_tokens ?? 0);
     lines.push(
-      `cache hit ${Math.round(usage.cache_hit_rate * 100)}% · ${cached} cached / ${missed} uncached`,
+      t("agent.usage.cache", {
+        percent: Math.round(usage.cache_hit_rate * 100),
+        cached,
+        missed,
+      }),
     );
   }
   for (const [source, detail] of Object.entries(usage.sources ?? {})) {
     if (!detail.calls) continue;
     const unknown = detail.unknown_calls
-      ? ` (${detail.unknown_calls} unknown)`
+      ? t("agent.usage.unknownCalls", { count: detail.unknown_calls })
       : "";
-    const label = SOURCE_LABELS[source] ?? source;
+    const sourceKey = SOURCE_KEYS[source];
+    const label = sourceKey ? t(sourceKey) : source;
     lines.push(
-      `${label}: ${formatTokens(detail.total_tokens)} tokens${unknown}`,
+      t("agent.usage.sourceLine", {
+        label,
+        tokens: formatTokens(detail.total_tokens),
+        unknown,
+      }),
     );
   }
   if (usage.coverage === "partial") {
-    lines.push("Some calls did not report usage; the total is a lower bound.");
+    lines.push(t("agent.usage.lowerBound"));
   }
   return lines.join("\n");
 }
 
 function UsageBadge({ usage }: { usage: RunUsage }) {
-  const label = usageLabel(usage);
+  const { t } = useI18n();
+  const label = usageLabel(usage, t);
   if (!label) return null;
   return (
     <span
-      title={usageTitle(usage)}
+      title={usageTitle(usage, t)}
       className="inline-flex items-center rounded-md px-1.5 py-0.5 typo-caption-sm text-onSurface-default-tertiary"
     >
       {label}
@@ -84,10 +102,11 @@ function UsageBadge({ usage }: { usage: RunUsage }) {
 }
 
 function TypingDots() {
+  const { t } = useI18n();
   return (
     <span
       className="inline-flex items-center py-1 text-onSurface-default-tertiary"
-      aria-label="Agent is typing"
+      aria-label={t("agent.typing")}
     >
       <span className="dot" />
       <span className="dot" />
@@ -103,6 +122,7 @@ export function MessageBubble({
   message: ChatMessageView;
   onRetry?: (message: ChatMessageView) => void;
 }) {
+  const { t } = useI18n();
   const isUser = message.role === "user";
   const isInterrupted = !isUser && message.runStatus === "interrupted";
   const isFailed =
@@ -165,29 +185,29 @@ export function MessageBubble({
 
       {isReconnecting && (
         <span className="typo-caption-sm text-onSurface-default-tertiary">
-          RECONNECTING…
+          {t("agent.status.reconnecting")}
         </span>
       )}
       {isStopping && (
         <span className="typo-caption-sm text-onSurface-default-tertiary">
-          STOPPING…
+          {t("agent.status.stopping")}
         </span>
       )}
       {isInterrupted && (
         <span className="flex items-center gap-1 typo-caption-sm text-onSurface-danger-primary">
           <AlertCircle className="size-3" />
-          INTERRUPTED
+          {t("agent.status.interrupted")}
         </span>
       )}
       {isCancelled && (
         <span className="typo-caption-sm text-onSurface-default-tertiary">
-          STOPPED
+          {t("agent.status.stopped")}
         </span>
       )}
       {isFailed && (
         <span className="flex items-center gap-1 typo-caption-sm text-onSurface-danger-primary">
           <AlertCircle className="size-3" />
-          FAILED
+          {t("agent.status.failed")}
         </span>
       )}
 
@@ -200,7 +220,7 @@ export function MessageBubble({
           onClick={() => onRetry?.(message)}
         >
           <RotateCcw className="size-3" />
-          Retry
+          {t("agent.retry")}
         </Button>
       )}
     </div>

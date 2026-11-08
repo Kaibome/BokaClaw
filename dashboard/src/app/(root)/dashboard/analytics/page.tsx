@@ -2,15 +2,18 @@
 
 import { LockedPage } from "@/components/self-hosted/locked-page";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { useI18n } from "@/i18n/provider";
 
 function AnalyticsMockup() {
+  const { t } = useI18n();
+
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         {[
-          { label: "Total Operations", value: "12,847" },
-          { label: "Avg Latency", value: "142ms" },
-          { label: "Success Rate", value: "99.7%" },
+          { label: t("analytics.stat.totalOperations"), value: "12,847" },
+          { label: t("analytics.stat.avgLatency"), value: "142ms" },
+          { label: t("analytics.stat.successRate"), value: "99.7%" },
         ].map((stat) => (
           <Card key={stat.label} className="border-memBorder-primary">
             <CardContent className="p-4">
@@ -24,7 +27,9 @@ function AnalyticsMockup() {
       </div>
       <Card className="border-memBorder-primary">
         <CardHeader className="pb-2">
-          <CardTitle className="text-sm">Operations over time</CardTitle>
+          <CardTitle className="text-sm">
+            {t("analytics.chart.title")}
+          </CardTitle>
         </CardHeader>
         <CardContent className="p-4">
           <div className="h-[200px] flex items-end gap-1">
@@ -43,10 +48,12 @@ function AnalyticsMockup() {
 }
 
 export default function AnalyticsPage() {
+  const { t } = useI18n();
+
   return (
     <LockedPage
-      title="Analytics"
-      description="Track memory operations, latency, and usage patterns over time."
+      title={t("analytics.title")}
+      description={t("analytics.description")}
       previewContent={<AnalyticsMockup />}
       utmMedium="dashboard-locked-analytics"
     />

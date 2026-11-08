@@ -2,7 +2,6 @@
 
 import { Suspense, useMemo, useRef, useState, type ReactNode } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { format, formatDistanceToNow } from "date-fns";
 import {
   ChevronDown,
   ChevronLeft,
@@ -44,6 +43,8 @@ import { getErrorMessage } from "@/lib/error-message";
 import { api } from "@/utils/api";
 import { TRACE_ENDPOINTS } from "@/utils/api-endpoints";
 import { useApiQuery } from "@/hooks/use-api-query";
+import type { MessageKey } from "@/i18n/messages/en";
+import { useI18n } from "@/i18n/provider";
 import {
   AgentRunSpanDetail,
   AgentRunSpanSummary,
@@ -55,6 +56,21 @@ const TRACE_LIMIT = 500;
 const PAGE_SIZE = 20;
 
 type StatusFilter = SpanStatus | "all";
+
+const SPAN_TYPE_KEYS: Record<SpanType, MessageKey> = {
+  agent: "enums.spanType.agent",
+  llm: "enums.spanType.llm",
+  tool: "enums.spanType.tool",
+  memory: "enums.spanType.memory",
+};
+
+const SPAN_STATUS_KEYS: Record<SpanStatus, MessageKey> = {
+  running: "enums.spanStatus.running",
+  completed: "enums.spanStatus.completed",
+  failed: "enums.spanStatus.failed",
+  aborted: "enums.spanStatus.aborted",
+  interrupted: "enums.spanStatus.interrupted",
+};
 
 const getTypeClassName = (spanType: SpanType) => {
   switch (spanType) {
@@ -107,81 +123,95 @@ const SpanDetailFields = ({
 }: {
   span: AgentRunSpanDetail;
   children?: ReactNode;
-}) => (
-  <div className="space-y-4">
-    <div className="grid grid-cols-2 gap-4">
-      <div className="space-y-1">
-        <Label className="text-xs text-onSurface-default-tertiary">Span</Label>
-        <p className="text-xs font-mono break-all">{span.span_id}</p>
+}) => {
+  const { t, formatDateTime } = useI18n();
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 gap-4">
+        <div className="space-y-1">
+          <Label className="text-xs text-onSurface-default-tertiary">
+            {t("trace.fields.span")}
+          </Label>
+          <p className="text-xs font-mono break-all">{span.span_id}</p>
+        </div>
+        <div className="space-y-1">
+          <Label className="text-xs text-onSurface-default-tertiary">
+            {t("trace.fields.parent")}
+          </Label>
+          <p className="text-xs font-mono break-all">
+            {span.parent_span_id ?? "—"}
+          </p>
+        </div>
+        <div className="space-y-1">
+          <Label className="text-xs text-onSurface-default-tertiary">
+            {t("trace.fields.run")}
+          </Label>
+          <p className="text-xs font-mono break-all">{span.run_id}</p>
+        </div>
+        <div className="space-y-1">
+          <Label className="text-xs text-onSurface-default-tertiary">
+            {t("trace.fields.type")}
+          </Label>
+          <Badge variant="outline" className={getTypeClassName(span.span_type)}>
+            {t(SPAN_TYPE_KEYS[span.span_type])}
+          </Badge>
+        </div>
+        <div className="space-y-1">
+          <Label className="text-xs text-onSurface-default-tertiary">
+            {t("trace.fields.status")}
+          </Label>
+          <Badge variant="outline" className={getStatusClassName(span.status)}>
+            {t(SPAN_STATUS_KEYS[span.status])}
+          </Badge>
+        </div>
+        <div className="space-y-1">
+          <Label className="text-xs text-onSurface-default-tertiary">
+            {t("trace.fields.iteration")}
+          </Label>
+          <p className="text-sm">{span.iteration ?? "—"}</p>
+        </div>
+        <div className="space-y-1">
+          <Label className="text-xs text-onSurface-default-tertiary">
+            {t("trace.fields.started")}
+          </Label>
+          <p className="text-sm">{formatDateTime(span.started_at)}</p>
+        </div>
+        <div className="space-y-1">
+          <Label className="text-xs text-onSurface-default-tertiary">
+            {t("trace.fields.ended")}
+          </Label>
+          <p className="text-sm">
+            {span.ended_at ? formatDateTime(span.ended_at) : "—"}
+          </p>
+        </div>
+        <div className="space-y-1">
+          <Label className="text-xs text-onSurface-default-tertiary">
+            {t("trace.fields.duration")}
+          </Label>
+          <p className="text-sm">{formatDuration(span.duration_ms)}</p>
+        </div>
       </div>
-      <div className="space-y-1">
-        <Label className="text-xs text-onSurface-default-tertiary">
-          Parent
-        </Label>
-        <p className="text-xs font-mono break-all">
-          {span.parent_span_id ?? "—"}
-        </p>
-      </div>
-      <div className="space-y-1">
-        <Label className="text-xs text-onSurface-default-tertiary">Run</Label>
-        <p className="text-xs font-mono break-all">{span.run_id}</p>
-      </div>
-      <div className="space-y-1">
-        <Label className="text-xs text-onSurface-default-tertiary">Type</Label>
-        <Badge variant="outline" className={getTypeClassName(span.span_type)}>
-          {span.span_type}
-        </Badge>
-      </div>
-      <div className="space-y-1">
-        <Label className="text-xs text-onSurface-default-tertiary">
-          Status
-        </Label>
-        <Badge variant="outline" className={getStatusClassName(span.status)}>
-          {span.status}
-        </Badge>
-      </div>
-      <div className="space-y-1">
-        <Label className="text-xs text-onSurface-default-tertiary">
-          Iteration
-        </Label>
-        <p className="text-sm">{span.iteration ?? "—"}</p>
-      </div>
-      <div className="space-y-1">
-        <Label className="text-xs text-onSurface-default-tertiary">
-          Started
-        </Label>
-        <p className="text-sm">{format(new Date(span.started_at), "PPpp")}</p>
-      </div>
-      <div className="space-y-1">
-        <Label className="text-xs text-onSurface-default-tertiary">Ended</Label>
-        <p className="text-sm">
-          {span.ended_at ? format(new Date(span.ended_at), "PPpp") : "—"}
-        </p>
-      </div>
-      <div className="space-y-1">
-        <Label className="text-xs text-onSurface-default-tertiary">
-          Duration
-        </Label>
-        <p className="text-sm">{formatDuration(span.duration_ms)}</p>
-      </div>
+
+      {children}
+
+      {span.error && (
+        <div className="space-y-1">
+          <Label className="text-xs text-onSurface-danger-primary">
+            {t("trace.fields.error")}
+          </Label>
+          <pre className="max-h-40 overflow-auto rounded-md bg-surface-default-secondary p-3 text-xs font-mono whitespace-pre-wrap break-all text-onSurface-danger-primary">
+            {span.error}
+          </pre>
+        </div>
+      )}
+
+      <JsonBlock label={t("trace.fields.input")} value={span.input} />
+      <JsonBlock label={t("trace.fields.output")} value={span.output} />
+      <JsonBlock label={t("trace.fields.attributes")} value={span.attributes} />
     </div>
-
-    {children}
-
-    {span.error && (
-      <div className="space-y-1">
-        <Label className="text-xs text-onSurface-danger-primary">Error</Label>
-        <pre className="max-h-40 overflow-auto rounded-md bg-surface-default-secondary p-3 text-xs font-mono whitespace-pre-wrap break-all text-onSurface-danger-primary">
-          {span.error}
-        </pre>
-      </div>
-    )}
-
-    <JsonBlock label="Input" value={span.input} />
-    <JsonBlock label="Output" value={span.output} />
-    <JsonBlock label="Attributes" value={span.attributes} />
-  </div>
-);
+  );
+};
 
 const SpanList = ({
   spans,
@@ -189,42 +219,50 @@ const SpanList = ({
 }: {
   spans: AgentRunSpanSummary[];
   onSelect: (span: AgentRunSpanSummary) => void;
-}) => (
-  <div className="divide-y divide-memBorderPrimary overflow-hidden rounded-md border border-memBorder-primary">
-    {spans.map((span) => (
-      <button
-        key={span.id}
-        type="button"
-        onClick={() => onSelect(span)}
-        className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left transition-colors hover:bg-surface-default-secondary"
-      >
-        <div className="flex min-w-0 items-center gap-2">
-          <Badge
-            variant="outline"
-            className={`w-12 justify-center ${getTypeClassName(span.span_type)}`}
-          >
-            {span.span_type}
-          </Badge>
-          <span className="truncate font-mono text-xs" title={span.name}>
-            {span.name}
-          </span>
-        </div>
-        <div className="flex shrink-0 items-center gap-2">
-          <Badge variant="outline" className={getStatusClassName(span.status)}>
-            {span.status}
-          </Badge>
-          <span className="w-16 text-right text-xs text-onSurface-default-tertiary">
-            {formatDuration(span.duration_ms)}
-          </span>
-        </div>
-      </button>
-    ))}
-  </div>
-);
+}) => {
+  const { t } = useI18n();
+
+  return (
+    <div className="divide-y divide-memBorderPrimary overflow-hidden rounded-md border border-memBorder-primary">
+      {spans.map((span) => (
+        <button
+          key={span.id}
+          type="button"
+          onClick={() => onSelect(span)}
+          className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left transition-colors hover:bg-surface-default-secondary"
+        >
+          <div className="flex min-w-0 items-center gap-2">
+            <Badge
+              variant="outline"
+              className={`w-12 justify-center ${getTypeClassName(span.span_type)}`}
+            >
+              {t(SPAN_TYPE_KEYS[span.span_type])}
+            </Badge>
+            <span className="truncate font-mono text-xs" title={span.name}>
+              {span.name}
+            </span>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            <Badge
+              variant="outline"
+              className={getStatusClassName(span.status)}
+            >
+              {t(SPAN_STATUS_KEYS[span.status])}
+            </Badge>
+            <span className="w-16 text-right text-xs text-onSurface-default-tertiary">
+              {formatDuration(span.duration_ms)}
+            </span>
+          </div>
+        </button>
+      ))}
+    </div>
+  );
+};
 
 function TracePageInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const { t, formatNumber, formatDateTime, formatRelativeTime } = useI18n();
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [page, setPage] = useState(0);
   const [runId, setRunId] = useState(
@@ -289,7 +327,7 @@ function TracePageInner() {
       setLastUpdated(new Date().toISOString());
       return res.data ?? [];
     },
-    { errorToast: "Failed to load traces", initialData: [] },
+    { errorToast: t("trace.failedToLoad"), initialData: [] },
   );
 
   const filteredSpans = useMemo(() => {
@@ -351,8 +389,8 @@ function TracePageInner() {
     } catch (err) {
       if (requestId === detailRequestRef.current) {
         toast({
-          title: "Failed to load span",
-          description: getErrorMessage(err),
+          title: t("trace.errors.loadSpan"),
+          description: getErrorMessage(err, t("common.error.generic")),
           variant: "destructive",
         });
       }
@@ -395,8 +433,8 @@ function TracePageInner() {
     } catch (err) {
       if (requestId === childDetailRequestRef.current) {
         toast({
-          title: "Failed to load child span",
-          description: getErrorMessage(err),
+          title: t("trace.errors.loadChildSpan"),
+          description: getErrorMessage(err, t("common.error.generic")),
           variant: "destructive",
         });
         setChildStack([]);
@@ -444,7 +482,7 @@ function TracePageInner() {
       });
       setRunSpans(res.data ?? []);
     } catch (err) {
-      setChildrenError(getErrorMessage(err));
+      setChildrenError(getErrorMessage(err, t("common.error.generic")));
     } finally {
       setChildrenLoading(false);
     }
@@ -453,17 +491,15 @@ function TracePageInner() {
   const columns = [
     {
       key: "started_at" as keyof AgentRunSpanSummary,
-      label: "Time",
+      label: t("trace.table.time"),
       width: 140,
       render: (value: string) => (
-        <span title={format(new Date(value), "PPpp")}>
-          {formatDistanceToNow(new Date(value), { addSuffix: true })}
-        </span>
+        <span title={formatDateTime(value)}>{formatRelativeTime(value)}</span>
       ),
     },
     {
       key: "run_id" as keyof AgentRunSpanSummary,
-      label: "Run",
+      label: t("trace.table.run"),
       width: 110,
       render: (value: string) => (
         <span className="font-mono text-xs" title={value}>
@@ -473,7 +509,7 @@ function TracePageInner() {
     },
     {
       key: "name" as keyof AgentRunSpanSummary,
-      label: "Name",
+      label: t("trace.table.name"),
       width: 240,
       render: (value: string) => (
         <span className="font-mono text-xs break-all">{value}</span>
@@ -481,24 +517,24 @@ function TracePageInner() {
     },
     {
       key: "status" as keyof AgentRunSpanSummary,
-      label: "Status",
+      label: t("trace.table.status"),
       width: 110,
       render: (value: SpanStatus) => (
         <Badge variant="outline" className={getStatusClassName(value)}>
-          {value}
+          {t(SPAN_STATUS_KEYS[value])}
         </Badge>
       ),
     },
     {
       key: "iteration" as keyof AgentRunSpanSummary,
-      label: "Iter",
+      label: t("trace.table.iteration"),
       width: 80,
       align: "right" as const,
       render: (value: number | null) => (value === null ? "—" : value),
     },
     {
       key: "duration_ms" as keyof AgentRunSpanSummary,
-      label: "Duration",
+      label: t("trace.table.duration"),
       width: 100,
       align: "right" as const,
       render: (value: number | null) => formatDuration(value),
@@ -509,14 +545,17 @@ function TracePageInner() {
     <div className="space-y-6">
       <div className="flex items-start justify-between gap-4">
         <div className="space-y-1">
-          <h1 className="text-xl font-semibold font-fustat">Trace</h1>
+          <h1 className="text-xl font-semibold font-fustat">
+            {t("trace.title")}
+          </h1>
           <p className="text-sm text-onSurface-default-secondary">
-            One row per agent run. Open a run to inspect its child spans.
+            {t("trace.description")}
           </p>
           {lastUpdated && (
             <p className="text-xs text-onSurface-default-tertiary">
-              Last updated{" "}
-              {formatDistanceToNow(new Date(lastUpdated), { addSuffix: true })}
+              {t("trace.lastUpdated", {
+                time: formatRelativeTime(lastUpdated),
+              })}
             </p>
           )}
         </div>
@@ -529,29 +568,29 @@ function TracePageInner() {
           disabled={isLoading}
         >
           <RefreshCw className="size-4 mr-2" />
-          Refresh
+          {t("trace.refresh")}
         </Button>
       </div>
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
         {[
-          { label: "Runs", value: totalRuns, hint: undefined },
+          { label: t("trace.stats.runs"), value: totalRuns, hint: undefined },
           {
-            label: "Avg Duration",
+            label: t("trace.stats.avgDuration"),
             value: averageDuration === null ? "--" : `${averageDuration} ms`,
             hint: undefined,
           },
           {
-            label: "Tokens",
+            label: t("trace.stats.tokens"),
             value:
-              spansWithTokens.length > 0
-                ? totalTokens.toLocaleString("en-US")
-                : "--",
+              spansWithTokens.length > 0 ? formatNumber(totalTokens) : "--",
             hint:
-              cacheHitRate === null ? undefined : `cache hit ${cacheHitRate}%`,
+              cacheHitRate === null
+                ? undefined
+                : t("trace.stats.cacheHit", { percent: cacheHitRate }),
           },
           {
-            label: "Errors",
+            label: t("trace.stats.errors"),
             value:
               totalSpans > 0
                 ? `${failedSpans} (${Math.round((failedSpans / totalSpans) * 100)}%)`
@@ -578,10 +617,10 @@ function TracePageInner() {
       <Card className="border-memBorder-primary">
         <CardContent className="flex flex-col gap-3 p-4 md:flex-row md:items-end">
           <div className="w-full space-y-1 md:max-w-xs">
-            <Label htmlFor="trace-run">Run ID</Label>
+            <Label htmlFor="trace-run">{t("trace.filters.runId")}</Label>
             <Input
               id="trace-run"
-              placeholder="Filter by run id"
+              placeholder={t("trace.filters.runIdPlaceholder")}
               value={runId}
               onChange={(event) => {
                 setRunId(event.target.value);
@@ -590,7 +629,7 @@ function TracePageInner() {
             />
           </div>
           <div className="w-full space-y-1 md:w-44">
-            <Label>Status</Label>
+            <Label>{t("trace.filters.status")}</Label>
             <Select
               value={status}
               onValueChange={(value) => {
@@ -602,12 +641,24 @@ function TracePageInner() {
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="all">All statuses</SelectItem>
-                <SelectItem value="running">running</SelectItem>
-                <SelectItem value="completed">completed</SelectItem>
-                <SelectItem value="failed">failed</SelectItem>
-                <SelectItem value="aborted">aborted</SelectItem>
-                <SelectItem value="interrupted">interrupted</SelectItem>
+                <SelectItem value="all">
+                  {t("trace.filters.allStatuses")}
+                </SelectItem>
+                <SelectItem value="running">
+                  {t("enums.spanStatus.running")}
+                </SelectItem>
+                <SelectItem value="completed">
+                  {t("enums.spanStatus.completed")}
+                </SelectItem>
+                <SelectItem value="failed">
+                  {t("enums.spanStatus.failed")}
+                </SelectItem>
+                <SelectItem value="aborted">
+                  {t("enums.spanStatus.aborted")}
+                </SelectItem>
+                <SelectItem value="interrupted">
+                  {t("enums.spanStatus.interrupted")}
+                </SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -626,8 +677,8 @@ function TracePageInner() {
         <TableSkeleton rows={6} columns={6} />
       ) : filteredSpans.length === 0 ? (
         <EmptyState
-          title="No runs yet"
-          description="Agent runs will appear here once one starts."
+          title={t("trace.empty.title")}
+          description={t("trace.empty.description")}
           image="requests"
         />
       ) : (
@@ -646,9 +697,11 @@ function TracePageInner() {
           {filteredSpans.length > PAGE_SIZE && (
             <div className="flex items-center justify-between text-sm text-onSurface-default-tertiary">
               <span>
-                {page * PAGE_SIZE + 1}–
-                {Math.min((page + 1) * PAGE_SIZE, filteredSpans.length)} of{" "}
-                {filteredSpans.length}
+                {t("trace.range", {
+                  start: page * PAGE_SIZE + 1,
+                  end: Math.min((page + 1) * PAGE_SIZE, filteredSpans.length),
+                  total: filteredSpans.length,
+                })}
               </span>
               <div className="flex gap-2">
                 <Button
@@ -657,7 +710,7 @@ function TracePageInner() {
                   disabled={page === 0}
                   onClick={() => setPage((p) => p - 1)}
                 >
-                  Previous
+                  {t("common.previous")}
                 </Button>
                 <Button
                   variant="outline"
@@ -665,7 +718,7 @@ function TracePageInner() {
                   disabled={(page + 1) * PAGE_SIZE >= filteredSpans.length}
                   onClick={() => setPage((p) => p + 1)}
                 >
-                  Next
+                  {t("common.next")}
                 </Button>
               </div>
             </div>
@@ -690,14 +743,14 @@ function TracePageInner() {
       >
         <SheetContent className="flex flex-col sm:max-w-lg">
           <SheetHeader className="shrink-0">
-            <SheetTitle>Span Detail</SheetTitle>
+            <SheetTitle>{t("trace.spanDetail.title")}</SheetTitle>
             <SheetDescription className="sr-only">
-              View span timing, payloads and attributes
+              {t("trace.spanDetail.description")}
             </SheetDescription>
           </SheetHeader>
           {detailLoading ? (
             <p className="mt-6 text-sm text-onSurface-default-secondary">
-              Loading span…
+              {t("trace.loadingSpan")}
             </p>
           ) : (
             selectedSpan && (
@@ -719,7 +772,7 @@ function TracePageInner() {
                             }
                           >
                             <FlaskConical className="size-4" />
-                            Evaluate this case
+                            {t("trace.evaluateCase")}
                           </Button>
                         )}
                       <Button
@@ -731,16 +784,16 @@ function TracePageInner() {
                         disabled={childrenLoading}
                       >
                         {childrenLoading ? (
-                          "Loading child spans…"
+                          t("trace.childSpans.loading")
                         ) : runSpans !== null ? (
                           <>
                             <ChevronDown className="size-4" />
-                            Hide child spans
+                            {t("trace.childSpans.hide")}
                           </>
                         ) : (
                           <>
                             <ChevronRight className="size-4" />
-                            Show child spans
+                            {t("trace.childSpans.show")}
                           </>
                         )}
                       </Button>
@@ -754,11 +807,13 @@ function TracePageInner() {
                       {childSpans !== null && (
                         <div className="space-y-1">
                           <Label className="text-xs text-onSurface-default-tertiary">
-                            Child spans ({childSpans.length})
+                            {t("trace.childSpans.label", {
+                              count: childSpans.length,
+                            })}
                           </Label>
                           {childSpans.length === 0 ? (
                             <p className="text-xs text-onSurface-default-tertiary">
-                              No child spans were captured for this run.
+                              {t("trace.childSpans.empty")}
                             </p>
                           ) : (
                             <SpanList
@@ -791,7 +846,7 @@ function TracePageInner() {
         <DialogContent className="grid max-h-[85vh] max-w-2xl grid-rows-[auto_minmax(0,1fr)] overflow-hidden">
           <DialogHeader>
             <DialogTitle>
-              {currentChild?.name ?? "Child span detail"}
+              {currentChild?.name ?? t("trace.childDetail.title")}
             </DialogTitle>
             <DialogDescription className="font-mono text-xs break-all">
               {childPath}
@@ -806,22 +861,24 @@ function TracePageInner() {
               onClick={goBackChildSpan}
             >
               <ChevronLeft className="size-4" />
-              Back
+              {t("trace.childDetail.back")}
             </Button>
             {childDetailLoading ? (
               <p className="text-sm text-onSurface-default-secondary">
-                Loading span…
+                {t("trace.loadingSpan")}
               </p>
             ) : childDetail ? (
               <SpanDetailFields span={childDetail}>
                 {runSpans !== null && (
                   <div className="space-y-1">
                     <Label className="text-xs text-onSurface-default-tertiary">
-                      Child spans ({currentChildSpans.length})
+                      {t("trace.childSpans.label", {
+                        count: currentChildSpans.length,
+                      })}
                     </Label>
                     {currentChildSpans.length === 0 ? (
                       <p className="text-xs text-onSurface-default-tertiary">
-                        This span has no child spans.
+                        {t("trace.childDetail.empty")}
                       </p>
                     ) : (
                       <SpanList

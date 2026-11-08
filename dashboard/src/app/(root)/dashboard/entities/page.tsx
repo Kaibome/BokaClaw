@@ -2,7 +2,6 @@
 
 import { useState } from "react";
 import { Trash2 } from "lucide-react";
-import { format } from "date-fns";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -15,10 +14,19 @@ import { api } from "@/utils/api";
 import { ENTITY_ENDPOINTS } from "@/utils/api-endpoints";
 import { getErrorMessage } from "@/lib/error-message";
 import { useApiQuery } from "@/hooks/use-api-query";
+import type { MessageKey } from "@/i18n/messages/en";
+import { useI18n } from "@/i18n/provider";
 import { Entity } from "@/types/api";
+
+const ENTITY_TYPE_KEYS: Record<Entity["type"], MessageKey> = {
+  user: "enums.entityType.user",
+  agent: "enums.entityType.agent",
+  run: "enums.entityType.run",
+};
 
 export default function EntitiesPage() {
   const [entityToDelete, setEntityToDelete] = useState<Entity | null>(null);
+  const { t, formatDate } = useI18n();
 
   const {
     data: entities = [],
@@ -29,7 +37,7 @@ export default function EntitiesPage() {
       const res = await api.get<Entity[]>(ENTITY_ENDPOINTS.BASE);
       return res.data ?? [];
     },
-    { errorToast: "Failed to load entities", initialData: [] },
+    { errorToast: t("entities.failedToLoad"), initialData: [] },
   );
 
   const handleDelete = async () => {
@@ -38,13 +46,13 @@ export default function EntitiesPage() {
       await api.delete(
         ENTITY_ENDPOINTS.BY_ID(entityToDelete.type, entityToDelete.id),
       );
-      toast({ title: "Entity deleted", variant: "success" });
+      toast({ title: t("entities.deleted"), variant: "success" });
       setEntityToDelete(null);
       void refetch();
     } catch (error) {
       toast({
-        title: "Failed to delete entity",
-        description: getErrorMessage(error),
+        title: t("entities.deleteFailed"),
+        description: getErrorMessage(error, t("common.error.generic")),
         variant: "destructive",
       });
     }
@@ -53,17 +61,15 @@ export default function EntitiesPage() {
   const columns = [
     {
       key: "type" as keyof Entity,
-      label: "Type",
+      label: t("entities.table.type"),
       width: 100,
       render: (value: Entity["type"]) => (
-        <Badge variant="outline" className="capitalize">
-          {value}
-        </Badge>
+        <Badge variant="outline">{t(ENTITY_TYPE_KEYS[value])}</Badge>
       ),
     },
     {
       key: "id" as keyof Entity,
-      label: "ID",
+      label: t("entities.table.id"),
       width: 280,
       render: (value: string) => (
         <span className="font-mono text-sm truncate">{value}</span>
@@ -71,16 +77,15 @@ export default function EntitiesPage() {
     },
     {
       key: "total_memories" as keyof Entity,
-      label: "Memories",
+      label: t("entities.table.memories"),
       width: 100,
       align: "right" as const,
     },
     {
       key: "updated_at" as keyof Entity,
-      label: "Last Active",
+      label: t("entities.table.lastActive"),
       width: 140,
-      render: (value: string | null) =>
-        value ? format(new Date(value), "MMM d, yyyy") : "--",
+      render: (value: string | null) => (value ? formatDate(value) : "--"),
     },
     {
       key: "id" as keyof Entity,
@@ -101,14 +106,16 @@ export default function EntitiesPage() {
 
   return (
     <div className="space-y-4">
-      <h1 className="text-xl font-semibold font-fustat">Entities</h1>
+      <h1 className="text-xl font-semibold font-fustat">
+        {t("entities.title")}
+      </h1>
 
       {isLoading ? (
         <TableSkeleton rows={5} columns={5} />
       ) : entities.length === 0 ? (
         <EmptyState
-          title="No entities yet"
-          description="Entities appear once memories are stored with a user_id, agent_id, or run_id."
+          title={t("entities.empty.title")}
+          description={t("entities.empty.description")}
         />
       ) : (
         <Card className="border-memBorder-primary overflow-hidden">
@@ -124,10 +131,10 @@ export default function EntitiesPage() {
         isOpen={!!entityToDelete}
         onClose={() => setEntityToDelete(null)}
         onConfirm={handleDelete}
-        title="Delete entity"
-        description="All memories associated with this entity will be permanently removed. This cannot be undone."
+        title={t("entities.delete.title")}
+        description={t("entities.delete.description")}
         itemName={entityToDelete?.id ?? ""}
-        confirmButtonText="Delete"
+        confirmButtonText={t("common.delete")}
       />
     </div>
   );

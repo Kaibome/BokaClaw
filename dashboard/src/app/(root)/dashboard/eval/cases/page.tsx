@@ -2,7 +2,6 @@
 
 import { useState, type FormEvent } from "react";
 import Link from "next/link";
-import { formatDistanceToNow } from "date-fns";
 import { ArrowLeft, Pencil, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -23,6 +22,7 @@ import { DataTable } from "@/components/shared/data-table";
 import { EmptyState } from "@/components/self-hosted/empty-state";
 import { getErrorMessage } from "@/lib/error-message";
 import { useApiQuery } from "@/hooks/use-api-query";
+import { useI18n, type I18nContextValue } from "@/i18n/provider";
 import { api } from "@/utils/api";
 import { EVAL_ENDPOINTS } from "@/utils/api-endpoints";
 import {
@@ -50,12 +50,12 @@ const EMPTY_FORM: FormState = {
   notes: "",
 };
 
-function parseTools(raw: string): EvalToolCall[] {
+function parseTools(raw: string, t: I18nContextValue["t"]): EvalToolCall[] {
   const value = raw.trim();
   if (!value) return [];
   const parsed: unknown = JSON.parse(value);
   if (!Array.isArray(parsed)) {
-    throw new Error("Expected tools must be a JSON array.");
+    throw new Error(t("evalCases.toolsNotArray"));
   }
   return parsed.map((item, index) => {
     if (
@@ -64,13 +64,14 @@ function parseTools(raw: string): EvalToolCall[] {
       typeof (item as { name?: unknown }).name !== "string" ||
       !(item as { name: string }).name.trim()
     ) {
-      throw new Error(`expected_tools[${index}] needs a non-empty "name".`);
+      throw new Error(t("evalCases.toolNameRequired", { index }));
     }
     return item as EvalToolCall;
   });
 }
 
 export default function EvalCasesPage() {
+  const { t, formatRelativeTime } = useI18n();
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<EvalGoldenDetail | null>(null);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
@@ -87,7 +88,7 @@ export default function EvalCasesPage() {
       const res = await api.get<EvalGolden[]>(EVAL_ENDPOINTS.GOLDENS);
       return res.data ?? [];
     },
-    { errorToast: "Failed to load eval cases", initialData: [] },
+    { errorToast: t("evalCases.failedToLoad"), initialData: [] },
   );
 
   const update = (key: keyof FormState, value: string) =>
@@ -116,8 +117,8 @@ export default function EvalCasesPage() {
       setFormOpen(true);
     } catch (err) {
       toast({
-        title: "Failed to load case",
-        description: getErrorMessage(err),
+        title: t("evalCases.failedToLoadCase"),
+        description: getErrorMessage(err, t("common.error.generic")),
         variant: "destructive",
       });
     }
@@ -128,18 +129,18 @@ export default function EvalCasesPage() {
     const evalCaseId = form.eval_case_id.trim();
     if (!evalCaseId || !form.input.trim()) {
       toast({
-        title: "Case ID and input are required",
+        title: t("evalCases.required"),
         variant: "destructive",
       });
       return;
     }
     let tools: EvalToolCall[];
     try {
-      tools = parseTools(form.expected_tools);
+      tools = parseTools(form.expected_tools, t);
     } catch (err) {
       toast({
-        title: "Invalid expected tools JSON",
-        description: getErrorMessage(err),
+        title: t("evalCases.invalidTools"),
+        description: getErrorMessage(err, t("common.error.generic")),
         variant: "destructive",
       });
       return;
@@ -165,7 +166,7 @@ export default function EvalCasesPage() {
         });
       }
       toast({
-        title: editing ? "Case updated" : "Case created",
+        title: editing ? t("evalCases.updated") : t("evalCases.created"),
         description: evalCaseId,
         variant: "success",
       });
@@ -174,8 +175,10 @@ export default function EvalCasesPage() {
       await refetch();
     } catch (err) {
       toast({
-        title: editing ? "Failed to update case" : "Failed to create case",
-        description: getErrorMessage(err),
+        title: editing
+          ? t("evalCases.updateFailed")
+          : t("evalCases.createFailed"),
+        description: getErrorMessage(err, t("common.error.generic")),
         variant: "destructive",
       });
     } finally {
@@ -189,7 +192,7 @@ export default function EvalCasesPage() {
     try {
       await api.delete(EVAL_ENDPOINTS.GOLDEN_BY_ID(deleting.eval_case_id));
       toast({
-        title: "Case deleted",
+        title: t("evalCases.deleted"),
         description: deleting.eval_case_id,
         variant: "success",
       });
@@ -197,8 +200,8 @@ export default function EvalCasesPage() {
       await refetch();
     } catch (err) {
       toast({
-        title: "Failed to delete case",
-        description: getErrorMessage(err),
+        title: t("evalCases.deleteFailed"),
+        description: getErrorMessage(err, t("common.error.generic")),
         variant: "destructive",
       });
     } finally {
@@ -209,7 +212,7 @@ export default function EvalCasesPage() {
   const columns = [
     {
       key: "eval_case_id" as keyof EvalGolden,
-      label: "Case",
+      label: t("evalCases.table.case"),
       width: 220,
       render: (value: string) => (
         <span className="font-mono text-xs break-all">{value}</span>
@@ -217,7 +220,7 @@ export default function EvalCasesPage() {
     },
     {
       key: "input_preview" as keyof EvalGolden,
-      label: "Input",
+      label: t("evalCases.table.input"),
       width: 320,
       render: (value: string) => (
         <span className="line-clamp-2 text-xs text-onSurface-default-secondary">
@@ -227,7 +230,7 @@ export default function EvalCasesPage() {
     },
     {
       key: "expected_tools" as keyof EvalGolden,
-      label: "Tools",
+      label: t("evalCases.table.tools"),
       width: 160,
       render: (value: string[]) =>
         value.length > 0 ? (
@@ -238,11 +241,11 @@ export default function EvalCasesPage() {
     },
     {
       key: "updated_at" as keyof EvalGolden,
-      label: "Updated",
+      label: t("evalCases.table.updated"),
       width: 120,
       render: (value: string) => (
         <span className="text-xs text-onSurface-default-tertiary">
-          {formatDistanceToNow(new Date(value), { addSuffix: true })}
+          {formatRelativeTime(value)}
         </span>
       ),
     },
@@ -257,7 +260,7 @@ export default function EvalCasesPage() {
             type="button"
             variant="ghost"
             size="icon"
-            aria-label={`Edit ${row.eval_case_id}`}
+            aria-label={t("evalCases.editAria", { id: row.eval_case_id })}
             onClick={() => void openEdit(row.eval_case_id)}
           >
             <Pencil className="size-4" />
@@ -266,7 +269,9 @@ export default function EvalCasesPage() {
             type="button"
             variant="ghost"
             size="icon"
-            aria-label={`Delete ${row.eval_case_id}`}
+            aria-label={t("evalCases.deleteAria", {
+              id: row.eval_case_id,
+            })}
             onClick={() => setDeleting(row)}
           >
             <Trash2 className="size-4 text-onSurface-danger-primary" />
@@ -285,25 +290,26 @@ export default function EvalCasesPage() {
             className="inline-flex items-center gap-1 text-xs text-onSurface-default-tertiary hover:underline"
           >
             <ArrowLeft className="size-3.5" />
-            Back to Eval
+            {t("evalCases.backToEval")}
           </Link>
-          <h1 className="text-xl font-semibold font-fustat">Eval cases</h1>
+          <h1 className="text-xl font-semibold font-fustat">
+            {t("evalCases.title")}
+          </h1>
           <p className="text-sm text-onSurface-default-secondary">
-            Reference questions, expected answers and expected tools used to
-            score agent runs.
+            {t("evalCases.description")}
           </p>
         </div>
         <Button onClick={openCreate}>
           <Plus className="mr-2 size-4" />
-          New case
+          {t("evalCases.newCase")}
         </Button>
       </div>
 
       <Card className="overflow-hidden border-memBorder-primary">
         {cases.length === 0 && !isLoading ? (
           <EmptyState
-            title="No eval cases yet"
-            description="Create one here, or seed them with scripts/seed_eval_goldens.py."
+            title={t("evalCases.empty.title")}
+            description={t("evalCases.empty.description")}
             image="requests"
           />
         ) : (
@@ -319,16 +325,17 @@ export default function EvalCasesPage() {
         <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto">
           <DialogHeader>
             <DialogTitle>
-              {editing ? "Edit eval case" : "New eval case"}
+              {editing
+                ? t("evalCases.form.editTitle")
+                : t("evalCases.form.newTitle")}
             </DialogTitle>
             <DialogDescription>
-              Expected tools and context are optional. Cases are frozen into a
-              snapshot when an eval is queued, so edits do not rewrite history.
+              {t("evalCases.form.description")}
             </DialogDescription>
           </DialogHeader>
           <form className="space-y-4" onSubmit={submit}>
             <div className="space-y-1">
-              <Label htmlFor="case-id">Case ID</Label>
+              <Label htmlFor="case-id">{t("evalCases.form.caseId")}</Label>
               <Input
                 id="case-id"
                 value={form.eval_case_id}
@@ -339,19 +346,19 @@ export default function EvalCasesPage() {
               />
             </div>
             <div className="space-y-1">
-              <Label htmlFor="case-input">Input</Label>
+              <Label htmlFor="case-input">{t("evalCases.form.input")}</Label>
               <Textarea
                 id="case-input"
                 value={form.input}
                 onChange={(event) => update("input", event.target.value)}
-                placeholder="The user question this case evaluates."
+                placeholder={t("evalCases.form.inputPlaceholder")}
                 rows={3}
                 required
               />
             </div>
             <div className="space-y-1">
               <Label htmlFor="case-expected-output">
-                Expected output (optional)
+                {t("evalCases.form.expectedOutput")}
               </Label>
               <Textarea
                 id="case-expected-output"
@@ -363,7 +370,7 @@ export default function EvalCasesPage() {
               />
             </div>
             <div className="space-y-1">
-              <Label htmlFor="case-tools">Expected tools (JSON array)</Label>
+              <Label htmlFor="case-tools">{t("evalCases.form.tools")}</Label>
               <Textarea
                 id="case-tools"
                 value={form.expected_tools}
@@ -375,12 +382,13 @@ export default function EvalCasesPage() {
                 placeholder='[{"name": "WebSearch"}, {"name": "WebFetch"}]'
               />
               <p className="text-xs text-onSurface-default-tertiary">
-                Tool correctness only runs when both this list and the run
-                contain tool calls.
+                {t("evalCases.form.toolsHint")}
               </p>
             </div>
             <div className="space-y-1">
-              <Label htmlFor="case-context">Context (one per line)</Label>
+              <Label htmlFor="case-context">
+                {t("evalCases.form.context")}
+              </Label>
               <Textarea
                 id="case-context"
                 value={form.context}
@@ -389,13 +397,13 @@ export default function EvalCasesPage() {
               />
             </div>
             <div className="space-y-1">
-              <Label htmlFor="case-notes">Notes (optional)</Label>
+              <Label htmlFor="case-notes">{t("evalCases.form.notes")}</Label>
               <Textarea
                 id="case-notes"
                 value={form.notes}
                 onChange={(event) => update("notes", event.target.value)}
                 rows={2}
-                placeholder="Maintenance notes; not part of the golden hash."
+                placeholder={t("evalCases.form.notesPlaceholder")}
               />
             </div>
             <DialogFooter>
@@ -405,10 +413,14 @@ export default function EvalCasesPage() {
                 onClick={() => setFormOpen(false)}
                 disabled={saving}
               >
-                Cancel
+                {t("common.cancel")}
               </Button>
               <Button type="submit" disabled={saving}>
-                {saving ? "Saving…" : editing ? "Save changes" : "Create case"}
+                {saving
+                  ? t("evalCases.form.saving")
+                  : editing
+                    ? t("evalCases.form.save")
+                    : t("evalCases.form.create")}
               </Button>
             </DialogFooter>
           </form>
@@ -419,10 +431,12 @@ export default function EvalCasesPage() {
         isOpen={Boolean(deleting)}
         onClose={() => setDeleting(null)}
         onConfirm={() => void confirmDelete()}
-        title="Delete eval case"
-        description="Deleting a case does not change past eval results; they keep their frozen snapshot."
+        title={t("evalCases.delete.title")}
+        description={t("evalCases.delete.description")}
         itemName={deleting?.eval_case_id ?? ""}
-        confirmButtonText={removing ? "Deleting…" : "Delete"}
+        confirmButtonText={
+          removing ? t("evalCases.delete.deleting") : t("common.delete")
+        }
       />
     </div>
   );

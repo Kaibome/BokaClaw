@@ -7,6 +7,7 @@ import { AgentEmptyState } from "@/components/agent/agent-empty-state";
 import { MessageBubble } from "@/components/agent/message-bubble";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useI18n } from "@/i18n/provider";
 import type { ChatMessageView } from "@/hooks/use-agent-chat";
 
 interface MessageThreadProps {
@@ -34,6 +35,7 @@ export function MessageThread({
   error,
   onRetry,
 }: MessageThreadProps) {
+  const { t } = useI18n();
   const viewportRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
 
@@ -69,12 +71,14 @@ export function MessageThread({
           <div className="flex flex-1 items-center justify-center">
             <AgentEmptyState
               title={
-                conversationId ? "No messages yet" : "Start a conversation"
+                conversationId
+                  ? t("agent.empty.noMessages")
+                  : t("agent.empty.startConversation")
               }
               description={
                 conversationId
-                  ? "Send a message to continue this conversation."
-                  : "Ask the agent anything. Your conversation is saved and will appear on the left."
+                  ? t("agent.empty.continueDescription")
+                  : t("agent.empty.startDescription")
               }
             />
           </div>

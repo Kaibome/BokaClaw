@@ -27,6 +27,8 @@ import {
 } from "@/components/ui/tooltip";
 import Link from "next/link";
 import { Building2 } from "lucide-react";
+import { LanguageSwitcher } from "@/components/i18n/language-switcher";
+import { useI18n } from "@/i18n/provider";
 
 export default function NavWrapper() {
   const dispatch = useDispatch();
@@ -34,6 +36,7 @@ export default function NavWrapper() {
     (state: RootState) => state.layout.isSidebarCollapsed,
   );
   const { user, logout } = useAuth();
+  const { t } = useI18n();
 
   const instanceName = process.env.NEXT_PUBLIC_INSTANCE_NAME || "BokaClaw";
 
@@ -115,7 +118,7 @@ export default function NavWrapper() {
                   >
                     <Link href="/dashboard/settings">
                       <Settings className="size-4 mr-2" />
-                      Settings
+                      {t("nav.settings")}
                     </Link>
                   </DropdownMenuItem>
                   <DropdownMenuSeparator className="bg-memBorder-primary" />
@@ -124,7 +127,7 @@ export default function NavWrapper() {
                     className="typo-body-sm text-onSurface-default-primary hover:bg-surface-default-tertiary-hover focus:bg-surface-default-tertiary-hover cursor-pointer"
                   >
                     <LogOut className="size-4 mr-2" />
-                    Log out
+                    {t("nav.logOut")}
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
@@ -146,7 +149,9 @@ export default function NavWrapper() {
             onClick={handleToggle}
             className="cursor-pointer text-onSurface-default-tertiary hover:text-onSurface-default-secondary"
             aria-label={
-              isSidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"
+              isSidebarCollapsed
+                ? t("nav.expandSidebar")
+                : t("nav.collapseSidebar")
             }
           >
             <PanelRight className="size-4" />
@@ -154,6 +159,7 @@ export default function NavWrapper() {
         </div>
 
         <div className="flex items-center gap-3">
+          <LanguageSwitcher className="text-onSurface-default-tertiary hover:text-onSurface-default-secondary" />
           <Tooltip>
             <TooltipTrigger asChild>
               <a
@@ -165,7 +171,7 @@ export default function NavWrapper() {
                 <HelpCircle className="size-4 shrink-0" />
               </a>
             </TooltipTrigger>
-            <TooltipContent>Documentation</TooltipContent>
+            <TooltipContent>{t("nav.documentation")}</TooltipContent>
           </Tooltip>
         </div>
       </div>

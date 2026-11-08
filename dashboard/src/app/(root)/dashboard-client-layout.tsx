@@ -9,6 +9,9 @@ import { Inter, InterDisplay, Roboto, Fustat, DMMono } from "./fonts";
 import { Provider } from "react-redux";
 import store from "@/store/store";
 import { AuthProvider } from "@/lib/auth";
+import { HTML_LANG, type Locale } from "@/i18n/config";
+import type { MessageKey } from "@/i18n/messages/en";
+import { I18nProvider } from "@/i18n/provider";
 import dynamic from "next/dynamic";
 
 const Toaster = dynamic(
@@ -20,12 +23,16 @@ const Toaster = dynamic(
 );
 
 export function DashboardClientLayout({
+  initialLocale,
+  documentTitleKey,
   children,
 }: Readonly<{
+  initialLocale: Locale;
+  documentTitleKey?: MessageKey;
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" suppressHydrationWarning>
+    <html lang={HTML_LANG[initialLocale]} suppressHydrationWarning>
       <body
         className={cn(
           Inter.className,
@@ -36,19 +43,24 @@ export function DashboardClientLayout({
         )}
         suppressHydrationWarning
       >
-        <Provider store={store}>
-          <AuthProvider>
-            <ThemeProvider
-              attribute="class"
-              defaultTheme="light"
-              enableSystem
-              disableTransitionOnChange
-            >
-              <ClientLayout>{children}</ClientLayout>
-              <Toaster />
-            </ThemeProvider>
-          </AuthProvider>
-        </Provider>
+        <I18nProvider
+          initialLocale={initialLocale}
+          documentTitleKey={documentTitleKey}
+        >
+          <Provider store={store}>
+            <AuthProvider>
+              <ThemeProvider
+                attribute="class"
+                defaultTheme="light"
+                enableSystem
+                disableTransitionOnChange
+              >
+                <ClientLayout>{children}</ClientLayout>
+                <Toaster />
+              </ThemeProvider>
+            </AuthProvider>
+          </Provider>
+        </I18nProvider>
       </body>
     </html>
   );

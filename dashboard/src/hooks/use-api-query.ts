@@ -27,6 +27,10 @@ export function useApiQuery<T>(
 
   const fetcherRef = useRef(fetcher);
   fetcherRef.current = fetcher;
+  // Keep the localized toast text out of the callback identity so switching
+  // language does not re-run every query.
+  const errorToastRef = useRef(errorToast);
+  errorToastRef.current = errorToast;
 
   const run = useCallback(async () => {
     setIsLoading(true);
@@ -34,11 +38,12 @@ export function useApiQuery<T>(
     try {
       setData(await fetcherRef.current());
     } catch (err) {
-      const message = getErrorMessage(err, errorToast || "Request failed");
+      const toastTitle = errorToastRef.current;
+      const message = getErrorMessage(err, toastTitle || "Request failed");
       setError(message);
-      if (errorToast) {
+      if (toastTitle) {
         toast({
-          title: errorToast,
+          title: toastTitle,
           description: message,
           variant: "destructive",
         });
@@ -46,7 +51,7 @@ export function useApiQuery<T>(
     } finally {
       setIsLoading(false);
     }
-  }, [errorToast]);
+  }, []);
 
   useEffect(() => {
     if (enabled) void run();

@@ -25,6 +25,7 @@ import {
 } from "@/utils/self-hosted-config";
 import { useAuth } from "@/hooks/use-auth";
 import { useApiQuery } from "@/hooks/use-api-query";
+import { useI18n } from "@/i18n/provider";
 
 type BundledProviders = {
   llm: string[];
@@ -33,6 +34,7 @@ type BundledProviders = {
 
 export default function ConfigurationPage() {
   const { isAdmin } = useAuth();
+  const { t } = useI18n();
   const [isSaving, setIsSaving] = useState(false);
   const [llmProvider, setLlmProvider] = useState("");
   const [llmModel, setLlmModel] = useState("");
@@ -45,7 +47,7 @@ export default function ConfigurationPage() {
       const res = await api.get(MEMORY_ENDPOINTS.CONFIGURE);
       return getEffectiveConfig(res.data);
     },
-    { errorToast: "Failed to load server configuration" },
+    { errorToast: t("configuration.failedToLoad") },
   );
 
   const { data: providers } = useApiQuery<BundledProviders>(
@@ -55,7 +57,7 @@ export default function ConfigurationPage() {
       );
       return res.data;
     },
-    { errorToast: "Failed to load bundled providers" },
+    { errorToast: t("configuration.failedToLoadProviders") },
   );
 
   useEffect(() => {
@@ -97,11 +99,11 @@ export default function ConfigurationPage() {
       }
 
       await api.post(MEMORY_ENDPOINTS.CONFIGURE, newConfig);
-      toast({ title: "Configuration saved", variant: "success" });
+      toast({ title: t("configuration.saved"), variant: "success" });
     } catch (error) {
       toast({
-        title: "Failed to save configuration",
-        description: getErrorMessage(error),
+        title: t("configuration.saveFailed"),
+        description: getErrorMessage(error, t("common.error.generic")),
         variant: "destructive",
       });
     } finally {
@@ -112,22 +114,26 @@ export default function ConfigurationPage() {
   return (
     <div className="space-y-6">
       <div className="space-y-1">
-        <h1 className="text-xl font-semibold font-fustat">Configuration</h1>
+        <h1 className="text-xl font-semibold font-fustat">
+          {t("configuration.title")}
+        </h1>
         {isPrefilling && (
           <p className="text-sm text-onSurface-default-tertiary">
-            Loading effective server configuration...
+            {t("configuration.loading")}
           </p>
         )}
       </div>
 
       <Card className="border-memBorder-primary">
         <CardHeader>
-          <CardTitle className="text-sm">LLM Provider</CardTitle>
+          <CardTitle className="text-sm">
+            {t("configuration.llmSection")}
+          </CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1">
-              <Label className="text-xs">Provider</Label>
+              <Label className="text-xs">{t("configuration.provider")}</Label>
               <Select
                 value={llmProvider}
                 onValueChange={(value) => {
@@ -138,7 +144,9 @@ export default function ConfigurationPage() {
                 disabled={!isAdmin || !providers}
               >
                 <SelectTrigger>
-                  <SelectValue placeholder="Select provider" />
+                  <SelectValue
+                    placeholder={t("configuration.selectProvider")}
+                  />
                 </SelectTrigger>
                 <SelectContent>
                   {providers?.llm.map((name) => (
@@ -150,7 +158,7 @@ export default function ConfigurationPage() {
               </Select>
             </div>
             <div className="space-y-1">
-              <Label className="text-xs">Model</Label>
+              <Label className="text-xs">{t("configuration.model")}</Label>
               <Input
                 placeholder="gpt-4.1-nano-2025-04-14"
                 value={llmModel}
@@ -160,7 +168,7 @@ export default function ConfigurationPage() {
             </div>
           </div>
           <div className="space-y-1">
-            <Label className="text-xs">API Key</Label>
+            <Label className="text-xs">{t("configuration.apiKey")}</Label>
             <Input
               type="password"
               placeholder="sk-..."
@@ -174,12 +182,14 @@ export default function ConfigurationPage() {
 
       <Card className="border-memBorder-primary">
         <CardHeader>
-          <CardTitle className="text-sm">Embedding Model</CardTitle>
+          <CardTitle className="text-sm">
+            {t("configuration.embeddingSection")}
+          </CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1">
-              <Label className="text-xs">Provider</Label>
+              <Label className="text-xs">{t("configuration.provider")}</Label>
               <Select
                 value={embedderProvider}
                 onValueChange={(value) => {
@@ -189,7 +199,9 @@ export default function ConfigurationPage() {
                 disabled={!isAdmin || !providers}
               >
                 <SelectTrigger>
-                  <SelectValue placeholder="Select provider" />
+                  <SelectValue
+                    placeholder={t("configuration.selectProvider")}
+                  />
                 </SelectTrigger>
                 <SelectContent>
                   {providers?.embedder.map((name) => (
@@ -201,7 +213,7 @@ export default function ConfigurationPage() {
               </Select>
             </div>
             <div className="space-y-1">
-              <Label className="text-xs">Model</Label>
+              <Label className="text-xs">{t("configuration.model")}</Label>
               <Input
                 placeholder="text-embedding-3-small"
                 value={embedderModel}
@@ -214,29 +226,28 @@ export default function ConfigurationPage() {
       </Card>
 
       <p className="text-xs text-onSurface-default-tertiary">
-        Need another provider? Install its Python package, rebuild the image,
-        and extend the bundled list. See the{" "}
+        {t("configuration.needAnotherPrefix")}
         <a
           href="https://docs.mem0.ai/open-source/setup#supported-providers"
           target="_blank"
           rel="noopener noreferrer"
           className="underline underline-offset-4 hover:text-onSurface-default-primary"
         >
-          setup guide
+          {t("configuration.setupGuide")}
         </a>
-        .
+        {t("configuration.needAnotherSuffix")}
       </p>
 
       {isAdmin && (
         <Button onClick={handleSave} disabled={isSaving}>
-          {isSaving ? "Saving..." : "Save Configuration"}
+          {isSaving ? t("common.saving") : t("configuration.save")}
         </Button>
       )}
 
       <UpgradeBanner
         id="config-sso"
-        message="Looking for SSO / SAML? Available in Enterprise."
-        ctaLabel="Contact sales"
+        message={t("configuration.upgrade.message")}
+        ctaLabel={t("configuration.upgrade.cta")}
         ctaUrl="https://app.mem0.ai/enterprise?utm_source=oss&utm_medium=dashboard-configuration-sso"
         variant="enterprise"
       />

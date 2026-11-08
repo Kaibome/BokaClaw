@@ -17,9 +17,11 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { useAgentChat, type ChatMessageView } from "@/hooks/use-agent-chat";
+import { useI18n } from "@/i18n/provider";
 import type { Conversation } from "@/types/api";
 
 export default function AgentPage() {
+  const { t } = useI18n();
   const {
     conversations,
     activeId,
@@ -78,7 +80,9 @@ export default function AgentPage() {
   return (
     <div className="flex h-[calc(100vh-118px)] min-h-0 flex-col gap-4">
       <div className="flex shrink-0 items-center justify-between gap-3">
-        <h1 className="text-xl font-semibold font-fustat">Agent</h1>
+        <h1 className="text-xl font-semibold font-fustat">
+          {t("agent.title")}
+        </h1>
         <div className="flex items-center gap-2">
           <Button
             type="button"
@@ -86,13 +90,13 @@ export default function AgentPage() {
             size="icon"
             className="md:hidden"
             onClick={() => setMobileOpen(true)}
-            aria-label="Open conversations"
+            aria-label={t("agent.openConversations")}
           >
             <Menu className="size-4" />
           </Button>
           <Button size="sm" onClick={handleNewChat}>
             <Plus className="mr-1 size-4" />
-            New chat
+            {t("agent.newChat")}
           </Button>
         </div>
       </div>
@@ -105,7 +109,7 @@ export default function AgentPage() {
         <Card className="flex min-w-0 flex-1 flex-col overflow-hidden">
           <div className="flex shrink-0 items-center justify-between gap-2 border-b border-memBorder-primary px-4 py-2.5">
             <p className="min-w-0 truncate typo-body-sm text-onSurface-default-primary">
-              {activeConversation?.title ?? "New chat"}
+              {activeConversation?.title ?? t("agent.newChat")}
             </p>
             {activeConversation && (
               <Button
@@ -114,7 +118,7 @@ export default function AgentPage() {
                 size="icon"
                 className="size-8 shrink-0"
                 onClick={() => setRenameTarget(activeConversation)}
-                aria-label="Rename conversation"
+                aria-label={t("agent.renameConversation")}
               >
                 <Pencil className="size-4" />
               </Button>
@@ -148,7 +152,9 @@ export default function AgentPage() {
           aria-describedby={undefined}
         >
           <SheetHeader className="shrink-0 px-3 py-3">
-            <SheetTitle className="typo-body-sm">Conversations</SheetTitle>
+            <SheetTitle className="typo-body-sm">
+              {t("agent.conversations")}
+            </SheetTitle>
           </SheetHeader>
           <div className="min-h-0 flex-1">{list}</div>
         </SheetContent>
@@ -172,9 +178,9 @@ export default function AgentPage() {
           if (deleteTarget) void deleteConversation(deleteTarget.id);
           setDeleteTarget(null);
         }}
-        title="Delete conversation"
-        description="This permanently deletes the conversation and all of its messages."
-        itemName="delete"
+        title={t("agent.deleteConversationTitle")}
+        description={t("agent.deleteConversationDescription")}
+        itemName={t("common.delete")}
       />
     </div>
   );

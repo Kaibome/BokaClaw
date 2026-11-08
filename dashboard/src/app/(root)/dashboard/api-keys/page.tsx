@@ -22,12 +22,13 @@ import { toast } from "@/components/ui/use-toast";
 import { UpgradeBanner } from "@/components/self-hosted/upgrade-banner";
 import { Plus, Copy, Check, Trash2 } from "lucide-react";
 import { CopyToClipboard } from "react-copy-to-clipboard";
-import { format } from "date-fns";
 import { getErrorMessage } from "@/lib/error-message";
 import { useApiQuery } from "@/hooks/use-api-query";
+import { useI18n } from "@/i18n/provider";
 import { ApiKey, ApiKeyCreateResponse } from "@/types/api";
 
 export default function ApiKeysPage() {
+  const { t, formatDate } = useI18n();
   const [createOpen, setCreateOpen] = useState(false);
   const [newLabel, setNewLabel] = useState("");
   const [newKey, setNewKey] = useState("");
@@ -43,7 +44,7 @@ export default function ApiKeysPage() {
       const res = await api.get<ApiKey[]>(API_KEY_ENDPOINTS.BASE);
       return res.data ?? [];
     },
-    { errorToast: "Failed to load API keys", initialData: [] },
+    { errorToast: t("apiKeys.failedToLoad"), initialData: [] },
   );
 
   const handleCreate = async () => {
@@ -55,8 +56,8 @@ export default function ApiKeysPage() {
       void refetch();
     } catch (error) {
       toast({
-        title: "Failed to create key",
-        description: getErrorMessage(error),
+        title: t("apiKeys.failedToCreate"),
+        description: getErrorMessage(error, t("common.error.generic")),
         variant: "destructive",
       });
     }
@@ -66,13 +67,13 @@ export default function ApiKeysPage() {
     if (!keyToRevoke) return;
     try {
       await api.delete(API_KEY_ENDPOINTS.BY_ID(keyToRevoke.id));
-      toast({ title: "API key revoked", variant: "success" });
+      toast({ title: t("apiKeys.revoked"), variant: "success" });
       setKeyToRevoke(null);
       void refetch();
     } catch (error) {
       toast({
-        title: "Failed to revoke key",
-        description: getErrorMessage(error),
+        title: t("apiKeys.failedToRevoke"),
+        description: getErrorMessage(error, t("common.error.generic")),
         variant: "destructive",
       });
     }
@@ -88,10 +89,14 @@ export default function ApiKeysPage() {
   };
 
   const columns = [
-    { key: "label" as keyof ApiKey, label: "Label", width: 150 },
+    {
+      key: "label" as keyof ApiKey,
+      label: t("apiKeys.table.label"),
+      width: 150,
+    },
     {
       key: "key_prefix" as keyof ApiKey,
-      label: "Key",
+      label: t("apiKeys.table.key"),
       width: 120,
       render: (value: string) => (
         <code className="text-xs font-mono">{value}...</code>
@@ -99,16 +104,16 @@ export default function ApiKeysPage() {
     },
     {
       key: "created_at" as keyof ApiKey,
-      label: "Created",
+      label: t("apiKeys.table.created"),
       width: 120,
-      render: (value: string) => format(new Date(value), "MMM d, yyyy"),
+      render: (value: string) => formatDate(value),
     },
     {
       key: "last_used_at" as keyof ApiKey,
-      label: "Last Used",
+      label: t("apiKeys.table.lastUsed"),
       width: 120,
       render: (value: string | null) =>
-        value ? format(new Date(value), "MMM d, yyyy") : "Never",
+        value ? formatDate(value) : t("common.never"),
     },
     {
       key: "id" as keyof ApiKey,
@@ -130,26 +135,28 @@ export default function ApiKeysPage() {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold font-fustat">API Keys</h1>
+        <h1 className="text-xl font-semibold font-fustat">
+          {t("apiKeys.title")}
+        </h1>
         <Dialog open={createOpen} onOpenChange={handleDialogClose}>
           <DialogTrigger asChild>
             <Button size="sm">
-              <Plus className="size-4 mr-1" /> Create Key
+              <Plus className="size-4 mr-1" /> {t("apiKeys.create")}
             </Button>
           </DialogTrigger>
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>Create API Key</DialogTitle>
+              <DialogTitle>{t("apiKeys.createTitle")}</DialogTitle>
             </DialogHeader>
             {!newKey ? (
               <div className="space-y-4 mt-2">
                 <div className="space-y-2">
-                  <Label htmlFor="api-key-label">Label</Label>
+                  <Label htmlFor="api-key-label">{t("apiKeys.label")}</Label>
                   <Input
                     id="api-key-label"
                     value={newLabel}
                     onChange={(e) => setNewLabel(e.target.value)}
-                    placeholder="e.g. Production"
+                    placeholder={t("apiKeys.labelPlaceholder")}
                   />
                 </div>
                 <Button
@@ -157,13 +164,13 @@ export default function ApiKeysPage() {
                   disabled={!newLabel}
                   className="w-full"
                 >
-                  Create
+                  {t("apiKeys.createButton")}
                 </Button>
               </div>
             ) : (
               <div className="space-y-4 mt-2">
                 <div className="space-y-2">
-                  <Label htmlFor="api-key-new">Your API Key</Label>
+                  <Label htmlFor="api-key-new">{t("apiKeys.yourKey")}</Label>
                   <div className="flex gap-2">
                     <Input
                       id="api-key-new"
@@ -178,7 +185,13 @@ export default function ApiKeysPage() {
                         setTimeout(() => setCopied(false), 2000);
                       }}
                     >
-                      <Button variant="outline" size="icon">
+                      <Button
+                        variant="outline"
+                        size="icon"
+                        aria-label={
+                          copied ? t("common.copied") : t("common.copy")
+                        }
+                      >
                         {copied ? (
                           <Check className="size-4" />
                         ) : (
@@ -188,14 +201,14 @@ export default function ApiKeysPage() {
                     </CopyToClipboard>
                   </div>
                   <p className="text-xs text-onSurface-danger-primary">
-                    Save this key -- you won&apos;t see it again.
+                    {t("apiKeys.saveWarning")}
                   </p>
                 </div>
                 <Button
                   onClick={() => handleDialogClose(false)}
                   className="w-full"
                 >
-                  Done
+                  {t("apiKeys.done")}
                 </Button>
               </div>
             )}
@@ -206,8 +219,8 @@ export default function ApiKeysPage() {
       {keys.length >= 3 && (
         <UpgradeBanner
           id="api-keys-3"
-          message="Managing multiple apps? Cloud offers project-based isolation."
-          ctaLabel="Explore Cloud"
+          message={t("apiKeys.upgrade.message")}
+          ctaLabel={t("apiKeys.upgrade.cta")}
           ctaUrl="https://app.mem0.ai?utm_source=oss&utm_medium=dashboard-api-keys"
           variant="cloud"
         />
@@ -217,8 +230,8 @@ export default function ApiKeysPage() {
         <TableSkeleton rows={3} columns={4} />
       ) : keys.length === 0 ? (
         <EmptyState
-          title="No API keys yet"
-          description="Create your first API key to start using the BokaClaw API."
+          title={t("apiKeys.empty.title")}
+          description={t("apiKeys.empty.description")}
         />
       ) : (
         <Card className="border-memBorder-primary overflow-hidden">
@@ -234,10 +247,10 @@ export default function ApiKeysPage() {
         isOpen={!!keyToRevoke}
         onClose={() => setKeyToRevoke(null)}
         onConfirm={handleRevoke}
-        title="Revoke API key"
-        description="Applications using this key will immediately stop working. This cannot be undone."
+        title={t("apiKeys.revoke.title")}
+        description={t("apiKeys.revoke.description")}
         itemName={keyToRevoke?.label ?? ""}
-        confirmButtonText="Revoke"
+        confirmButtonText={t("apiKeys.revoke.button")}
       />
     </div>
   );

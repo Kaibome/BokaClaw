@@ -15,7 +15,9 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
-import { cn, formatCompactNumber, formatTokens } from "@/lib/utils";
+import { cn, formatTokens } from "@/lib/utils";
+import type { MessageKey } from "@/i18n/messages/en";
+import { useI18n } from "@/i18n/provider";
 import type {
   SubagentResult,
   SubagentStatus,
@@ -31,12 +33,18 @@ const SUBAGENT_STATUSES = new Set<SubagentStatus>([
   "cancelled",
 ]);
 
-const STATUS_LABELS: Record<SubagentStatus, string> = {
-  completed: "Completed",
-  partial: "Partial",
-  failed: "Failed",
-  timeout: "Timed out",
-  cancelled: "Cancelled",
+const STATUS_KEYS: Record<SubagentStatus, MessageKey> = {
+  completed: "subagent.status.completed",
+  partial: "subagent.status.partial",
+  failed: "subagent.status.failed",
+  timeout: "subagent.status.timeout",
+  cancelled: "subagent.status.cancelled",
+};
+
+const CONFIDENCE_KEYS: Record<string, MessageKey> = {
+  low: "subagent.confidence.low",
+  medium: "subagent.confidence.medium",
+  high: "subagent.confidence.high",
 };
 
 function StatusIcon({ status }: { status: ToolTraceStatus }) {
@@ -89,7 +97,10 @@ export function parseSubagentResult(
   }
 }
 
-function taskText(entry: ToolTraceEntry): {
+function taskText(
+  entry: ToolTraceEntry,
+  t: ReturnType<typeof useI18n>["t"],
+): {
   title: string;
   subtitle: string | null;
 } {
@@ -97,7 +108,7 @@ function taskText(entry: ToolTraceEntry): {
   const label = typeof args.label === "string" ? args.label.trim() : "";
   const goal = typeof args.goal === "string" ? args.goal.trim() : "";
   return {
-    title: label || goal || "Subagent task",
+    title: label || goal || t("subagent.task"),
     subtitle: label && goal ? goal : null,
   };
 }
@@ -123,7 +134,9 @@ function Section({ label, children }: { label: string; children: ReactNode }) {
 }
 
 function ConfidenceBadge({ confidence }: { confidence?: string }) {
+  const { t } = useI18n();
   if (!confidence) return null;
+  const confidenceKey = CONFIDENCE_KEYS[confidence];
   return (
     <span
       className={cn(
@@ -133,12 +146,13 @@ function ConfidenceBadge({ confidence }: { confidence?: string }) {
           : "text-onSurface-default-secondary",
       )}
     >
-      {confidence}
+      {confidenceKey ? t(confidenceKey) : confidence}
     </span>
   );
 }
 
 function FactsTable({ result }: { result: SubagentResult }) {
+  const { t } = useI18n();
   const facts = result.facts ?? [];
   if (facts.length === 0) return null;
   return (
@@ -146,9 +160,15 @@ function FactsTable({ result }: { result: SubagentResult }) {
       <table className="w-full min-w-[360px] border-collapse text-left">
         <thead>
           <tr className="typo-caption-sm text-onSurface-default-tertiary">
-            <th className="pb-1 pr-2 font-normal">CLAIM</th>
-            <th className="pb-1 pr-2 font-normal">EVIDENCE</th>
-            <th className="pb-1 font-normal">CONFIDENCE</th>
+            <th className="pb-1 pr-2 font-normal">
+              {t("subagent.table.claim")}
+            </th>
+            <th className="pb-1 pr-2 font-normal">
+              {t("subagent.table.evidence")}
+            </th>
+            <th className="pb-1 font-normal">
+              {t("subagent.table.confidence")}
+            </th>
           </tr>
         </thead>
         <tbody>
@@ -195,19 +215,28 @@ export function SubagentTraceRow({
   result: SubagentResult;
 }) {
   const [open, setOpen] = useState(false);
-  const { title, subtitle } = taskText(entry);
+  const { t, formatCompactNumber } = useI18n();
+  const { title, subtitle } = taskText(entry, t);
   const report = result.report?.trim() ?? "";
   const tokens = totalTokens(result.usage);
-  const statusLabel = STATUS_LABELS[result.status];
+  const statusLabel = t(STATUS_KEYS[result.status]);
   const resultChars = entry.content?.length ?? 0;
 
   const meta = [
-    result.turns ? `${result.turns} turns` : null,
+    result.turns ? t("subagent.turns", { count: result.turns }) : null,
     result.isolated_chars
-      ? `${formatCompactNumber(result.isolated_chars)} chars isolated`
+      ? t("subagent.charsIsolated", {
+          count: formatCompactNumber(result.isolated_chars),
+        })
       : null,
-    resultChars ? `${formatCompactNumber(resultChars)} result chars` : null,
-    tokens !== null ? `${formatTokens(tokens)} tokens` : null,
+    resultChars
+      ? t("subagent.resultChars", {
+          count: formatCompactNumber(resultChars),
+        })
+      : null,
+    tokens !== null
+      ? t("subagent.tokens", { count: formatTokens(tokens) })
+      : null,
   ].filter((item): item is string => item !== null);
 
   return (
@@ -225,7 +254,7 @@ export function SubagentTraceRow({
               {title}
             </span>
             <span className="shrink-0 rounded border border-memBorderPrimary px-1 py-0.5 typo-caption-sm text-onSurface-default-tertiary">
-              SUBAGENT
+              {t("subagent.badge")}
             </span>
             <span className="shrink-0 typo-caption-sm text-onSurface-default-tertiary">
               {statusLabel}
@@ -268,13 +297,13 @@ export function SubagentTraceRow({
         ) : null}
 
         {report ? (
-          <Section label="REPORT">
+          <Section label={t("subagent.section.report")}>
             <p className="whitespace-pre-wrap break-words typo-body-xs leading-5 text-onSurface-default-primary">
               {report}
             </p>
           </Section>
         ) : result.data ? (
-          <Section label="DATA">
+          <Section label={t("subagent.section.data")}>
             <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-surface-default-primary p-2 font-dm-mono text-[11px] text-onSurface-default-secondary">
               {JSON.stringify(result.data, null, 2)}
             </pre>
@@ -282,34 +311,32 @@ export function SubagentTraceRow({
         ) : null}
 
         {(result.facts?.length ?? 0) > 0 ? (
-          <Section label="FACTS">
+          <Section label={t("subagent.section.facts")}>
             <FactsTable result={result} />
           </Section>
         ) : null}
 
         {(result.inferences?.length ?? 0) > 0 ? (
-          <Section label="INFERENCES">
+          <Section label={t("subagent.section.inferences")}>
             <TextList items={result.inferences ?? []} />
           </Section>
         ) : null}
 
         {(result.unknowns?.length ?? 0) > 0 ? (
-          <Section label="UNKNOWNS">
+          <Section label={t("subagent.section.unknowns")}>
             <TextList items={result.unknowns ?? []} />
           </Section>
         ) : null}
 
         {(result.sources?.length ?? 0) > 0 ? (
-          <Section label="SOURCES">
+          <Section label={t("subagent.section.sources")}>
             <TextList items={result.sources ?? []} />
           </Section>
         ) : null}
 
         {entry.truncated || result.truncated ? (
           <p className="mt-2 typo-caption-sm text-onSurface-default-tertiary">
-            {result.truncated
-              ? "The subagent report was truncated to the configured result limit."
-              : "Output truncated for display."}
+            {result.truncated ? t("subagent.truncated") : t("tool.truncated")}
           </p>
         ) : null}
       </CollapsibleContent>

@@ -18,6 +18,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useAuth } from "@/hooks/use-auth";
+import { useI18n } from "@/i18n/provider";
 import { getErrorMessage } from "@/lib/error-message";
 import { isValidEmail } from "@/lib/validators";
 
@@ -29,6 +30,7 @@ export default function LoginForm() {
   const searchParams = useSearchParams();
   const { user, isLoading, login } = useAuth();
   const { resolvedTheme } = useTheme();
+  const { t } = useI18n();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -52,7 +54,7 @@ export default function LoginForm() {
     e.preventDefault();
     setError("");
     if (!emailValid) {
-      setError("Enter a valid email address.");
+      setError(t("auth.invalidEmail"));
       return;
     }
     setSubmitting(true);
@@ -60,7 +62,7 @@ export default function LoginForm() {
       await login(email, password);
       router.push(searchParams.get("next") || "/dashboard/requests");
     } catch (err) {
-      setError(getErrorMessage(err, "Login failed"));
+      setError(getErrorMessage(err, t("auth.loginFailed")));
     } finally {
       setSubmitting(false);
     }
@@ -85,7 +87,7 @@ export default function LoginForm() {
             )}
           </div>
           <h1 className="text-2xl font-semibold text-onSurface-default-primary text-center mb-6 font-fustat">
-            Sign in to BokaClaw
+            {t("auth.signInTitle")}
           </h1>
           <div className="flex flex-col gap-4 border p-8 border-memBorder-primary rounded-xl">
             {error && (
@@ -95,7 +97,7 @@ export default function LoginForm() {
             )}
             <form onSubmit={handleSubmit} className="flex flex-col gap-4">
               <div className="space-y-1.5">
-                <Label htmlFor="login-email">Email</Label>
+                <Label htmlFor="login-email">{t("auth.email")}</Label>
                 <Input
                   id="login-email"
                   type="email"
@@ -107,7 +109,7 @@ export default function LoginForm() {
                 />
               </div>
               <div className="space-y-1.5">
-                <Label htmlFor="login-password">Password</Label>
+                <Label htmlFor="login-password">{t("auth.password")}</Label>
                 <Input
                   id="login-password"
                   type="password"
@@ -123,7 +125,7 @@ export default function LoginForm() {
                 size="lg"
                 className="w-full"
               >
-                {submitting ? "Signing in..." : "Sign in"}
+                {submitting ? t("auth.signingIn") : t("auth.signIn")}
               </Button>
             </form>
             <Dialog>
@@ -132,16 +134,14 @@ export default function LoginForm() {
                   type="button"
                   className="text-xs text-onSurface-default-tertiary hover:text-onSurface-default-primary underline underline-offset-4 self-center"
                 >
-                  Forgot password?
+                  {t("auth.forgotPassword")}
                 </button>
               </DialogTrigger>
               <DialogContent>
                 <DialogHeader>
-                  <DialogTitle>Reset your admin password</DialogTitle>
+                  <DialogTitle>{t("auth.resetTitle")}</DialogTitle>
                   <DialogDescription>
-                    Run this command on the server host. It overwrites the
-                    existing password; anyone already signed in stays signed in
-                    until their session expires.
+                    {t("auth.resetDescription")}
                   </DialogDescription>
                 </DialogHeader>
                 <div className="flex gap-2">
@@ -157,7 +157,13 @@ export default function LoginForm() {
                       setTimeout(() => setCopied(false), 2000);
                     }}
                   >
-                    <Button variant="outline" size="icon">
+                    <Button
+                      variant="outline"
+                      size="icon"
+                      aria-label={
+                        copied ? t("common.copied") : t("common.copy")
+                      }
+                    >
                       {copied ? (
                         <Check className="size-4" />
                       ) : (
@@ -176,14 +182,13 @@ export default function LoginForm() {
         <div className="pointer-events-none absolute inset-0 bg-[url('/images/dither.svg')] bg-bottom bg-no-repeat bg-contain" />
         <div className="relative z-10 flex w-full max-w-[564px] flex-col items-center gap-20 text-center text-white">
           <div className="w-full space-y-5">
-            <p className="typo-h3 text-white">
-              &quot;Mem0 allowed us to unlock true personalized tutoring for
-              every student, and it took us just a weekend to integrate.&quot;
-            </p>
+            <p className="typo-h3 text-white">&quot;{t("auth.quote")}&quot;</p>
             <div className="flex flex-col items-center gap-[7px]">
               <div className="flex flex-col items-center gap-1">
-                <p className="typo-body-sm text-white">Michael Tong</p>
-                <p className="typo-body-xs text-white">CTO, RevisionDojo</p>
+                <p className="typo-body-sm text-white">
+                  {t("auth.quoteAuthor")}
+                </p>
+                <p className="typo-body-xs text-white">{t("auth.quoteRole")}</p>
               </div>
               <Image
                 src="/images/micheal.png"
@@ -195,7 +200,7 @@ export default function LoginForm() {
             </div>
           </div>
           <div className="flex w-full flex-col items-center gap-3">
-            <p className="typo-body text-white">Trusted by 100k+ Developers</p>
+            <p className="typo-body text-white">{t("auth.trustedBy")}</p>
             <div className="flex items-center justify-center gap-8 text-white">
               <div className="h-6 shrink-0">
                 <Image

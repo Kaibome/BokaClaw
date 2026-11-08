@@ -1,4 +1,7 @@
+"use client";
+
 import React, { useState } from "react";
+import { useI18n } from "@/i18n/provider";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -25,8 +28,9 @@ const DeleteConfirmationModal = ({
   title,
   description,
   itemName,
-  confirmButtonText = "Delete",
+  confirmButtonText,
 }: DeleteConfirmationModalProps) => {
+  const { t } = useI18n();
   const [confirmationText, setConfirmationText] = useState("");
 
   const handleClose = () => {
@@ -49,12 +53,11 @@ const DeleteConfirmationModal = ({
 
         <div className="space-y-4">
           <p className="text-sm text-[#565553]">
-            Please type <span className="font-bold">{itemName}</span> to
-            confirm.
+            {t("confirmDialog.typeToConfirm", { item: itemName })}
           </p>
           <Input
             type="text"
-            placeholder="Enter name to confirm"
+            placeholder={t("confirmDialog.placeholder")}
             value={confirmationText}
             onChange={(e) => setConfirmationText(e.target.value)}
             className="w-full"
@@ -63,14 +66,14 @@ const DeleteConfirmationModal = ({
 
         <div className="flex justify-end gap-2 mt-6">
           <Button onClick={handleClose} variant="outline">
-            Cancel
+            {t("common.cancel")}
           </Button>
           <Button
             onClick={handleConfirm}
             variant="destructive"
             disabled={!isDeleteEnabled}
           >
-            {confirmButtonText}
+            {confirmButtonText ?? t("common.delete")}
           </Button>
         </div>
       </DialogContent>

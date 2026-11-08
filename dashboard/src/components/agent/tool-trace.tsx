@@ -19,13 +19,15 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { cn } from "@/lib/utils";
+import type { MessageKey } from "@/i18n/messages/en";
+import { useI18n } from "@/i18n/provider";
 import type { ToolTraceEntry, ToolTraceStatus } from "@/types/api";
 
-const STATUS_LABELS: Record<ToolTraceStatus, string> = {
-  running: "Running",
-  completed: "Completed",
-  failed: "Failed",
-  aborted: "Aborted",
+const STATUS_KEYS: Record<ToolTraceStatus, MessageKey> = {
+  running: "tool.status.running",
+  completed: "tool.status.completed",
+  failed: "tool.status.failed",
+  aborted: "tool.status.aborted",
 };
 
 function StatusIcon({ status }: { status: ToolTraceStatus }) {
@@ -53,6 +55,7 @@ function argumentsText(entry: ToolTraceEntry): string | null {
 
 function ToolTraceRow({ entry }: { entry: ToolTraceEntry }) {
   const [open, setOpen] = useState(false);
+  const { t } = useI18n();
   const args = argumentsText(entry);
   const output = entry.content ?? "";
 
@@ -68,7 +71,7 @@ function ToolTraceRow({ entry }: { entry: ToolTraceEntry }) {
           {entry.name}
         </span>
         <span className="shrink-0 typo-caption-sm text-onSurface-default-tertiary">
-          {STATUS_LABELS[entry.status]}
+          {t(STATUS_KEYS[entry.status])}
         </span>
         <span className="ml-auto flex shrink-0 items-center gap-2">
           {typeof entry.duration_ms === "number" && (
@@ -94,28 +97,28 @@ function ToolTraceRow({ entry }: { entry: ToolTraceEntry }) {
 
         <div className="flex flex-col gap-1">
           <span className="typo-caption-sm text-onSurface-default-tertiary">
-            ARGUMENTS
+            {t("tool.arguments")}
           </span>
           <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-surface-default-primary p-2 font-dm-mono text-[11px] text-onSurface-default-secondary">
-            {args ?? "No arguments"}
+            {args ?? t("tool.noArguments")}
           </pre>
         </div>
 
         <div className="mt-2 flex flex-col gap-1">
           <span className="typo-caption-sm text-onSurface-default-tertiary">
-            OUTPUT
+            {t("tool.output")}
           </span>
           <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-surface-default-primary p-2 font-dm-mono text-[11px] text-onSurface-default-secondary">
             {output ||
               (entry.status === "running"
-                ? "Waiting for result..."
-                : "No output")}
+                ? t("tool.waiting")
+                : t("tool.noOutput"))}
           </pre>
         </div>
 
         {entry.truncated && (
           <p className="mt-2 typo-caption-sm text-onSurface-default-tertiary">
-            Output truncated for display.
+            {t("tool.truncated")}
           </p>
         )}
       </CollapsibleContent>
@@ -126,6 +129,7 @@ function ToolTraceRow({ entry }: { entry: ToolTraceEntry }) {
 export function ToolTrace({ entries }: { entries: ToolTraceEntry[] }) {
   const [expanded, setExpanded] = useState(false);
   const listId = useId();
+  const { t } = useI18n();
 
   if (entries.length === 0) {
     return null;
@@ -154,8 +158,8 @@ export function ToolTrace({ entries }: { entries: ToolTraceEntry[] }) {
             )}
           />
           {expanded
-            ? "Show latest only"
-            : `Show all ${entries.length} tool calls`}
+            ? t("tool.showLatest")
+            : t("tool.showAll", { count: entries.length })}
         </button>
       )}
 

@@ -2,9 +2,15 @@
 
 import { LockedPage } from "@/components/self-hosted/locked-page";
 import { Card, CardContent } from "@/components/ui/card";
+import { useI18n } from "@/i18n/provider";
 
 function CategoriesMockup() {
-  const categories = ["Health", "Preferences", "Work"];
+  const { t } = useI18n();
+  const categories = [
+    t("categories.mock.health"),
+    t("categories.mock.preferences"),
+    t("categories.mock.work"),
+  ];
   return (
     <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
       {categories.map((cat) => (
@@ -25,10 +31,12 @@ function CategoriesMockup() {
 }
 
 export default function CategoriesPage() {
+  const { t } = useI18n();
+
   return (
     <LockedPage
-      title="Custom Categories"
-      description="Organize memories by domain -- health, preferences, work, and more."
+      title={t("categories.title")}
+      description={t("categories.description")}
       previewContent={<CategoriesMockup />}
       utmMedium="dashboard-locked-categories"
     />

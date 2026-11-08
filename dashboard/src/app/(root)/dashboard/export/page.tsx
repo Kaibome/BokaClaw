@@ -4,14 +4,17 @@ import { LockedPage } from "@/components/self-hosted/locked-page";
 import { Card, CardContent } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
+import { useI18n } from "@/i18n/provider";
 
 function ExportMockup() {
+  const { t } = useI18n();
+
   return (
     <div className="space-y-4">
       <Card className="border-memBorder-primary">
         <CardContent className="p-6 space-y-4">
           <div className="space-y-2">
-            <Label>Format</Label>
+            <Label>{t("export.mock.format")}</Label>
             <div className="flex gap-2">
               {["JSON", "CSV", "Pydantic Schema"].map((fmt) => (
                 <Button
@@ -27,7 +30,7 @@ function ExportMockup() {
             </div>
           </div>
           <div className="space-y-2">
-            <Label>Sample output</Label>
+            <Label>{t("export.mock.sampleOutput")}</Label>
             <Card className="border-memBorder-primary bg-surface-default-secondary">
               <CardContent className="p-3">
                 <pre className="text-xs text-onSurface-default-secondary font-mono whitespace-pre-wrap">
@@ -46,7 +49,7 @@ function ExportMockup() {
               </CardContent>
             </Card>
           </div>
-          <Button disabled>Export Memories</Button>
+          <Button disabled>{t("export.mock.exportButton")}</Button>
         </CardContent>
       </Card>
     </div>
@@ -54,10 +57,12 @@ function ExportMockup() {
 }
 
 export default function ExportPage() {
+  const { t } = useI18n();
+
   return (
     <LockedPage
-      title="Export"
-      description="Export your memories in JSON, CSV, or Pydantic schema format."
+      title={t("export.title")}
+      description={t("export.description")}
       previewContent={<ExportMockup />}
       utmMedium="dashboard-locked-export"
     />

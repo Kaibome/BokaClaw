@@ -6,17 +6,20 @@ import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
+import { useI18n } from "@/i18n/provider";
 
 function WebhooksMockup() {
+  const { t } = useI18n();
+
   return (
     <Card className="border-memBorder-primary">
       <CardContent className="p-6 space-y-4">
         <div className="space-y-2">
-          <Label>Endpoint URL</Label>
+          <Label>{t("webhooks.form.endpointUrl")}</Label>
           <Input placeholder="https://your-app.com/webhooks/mem0" disabled />
         </div>
         <div className="space-y-2">
-          <Label>Events</Label>
+          <Label>{t("webhooks.form.events")}</Label>
           <div className="flex flex-col gap-2">
             {[
               "memory.created",
@@ -32,20 +35,22 @@ function WebhooksMockup() {
           </div>
         </div>
         <div className="space-y-2">
-          <Label>Signing Secret</Label>
+          <Label>{t("webhooks.form.signingSecret")}</Label>
           <Input placeholder="whsec_..." disabled type="password" />
         </div>
-        <Button disabled>Create Webhook</Button>
+        <Button disabled>{t("webhooks.form.create")}</Button>
       </CardContent>
     </Card>
   );
 }
 
 export default function WebhooksPage() {
+  const { t } = useI18n();
+
   return (
     <LockedPage
-      title="Webhooks"
-      description="Get notified when memories are created, updated, or deleted."
+      title={t("webhooks.title")}
+      description={t("webhooks.description")}
       previewContent={<WebhooksMockup />}
       utmMedium="dashboard-locked-webhooks"
     />

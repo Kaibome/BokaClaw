@@ -27,24 +27,27 @@ pnpm only. Do not use npm or yarn, and do not regenerate `pnpm-lock.yaml` with a
 - Add request/response shapes to `src/types/api.ts` next to the existing types.
 - Reuse `src/components/ui` (shadcn/Radix) and the existing semantic Tailwind tokens; use `typo-*` utilities and `font-fustat`. Do not add a new UI, icon, or chart library.
 - Shared state uses Redux Toolkit under `src/store`; keep page-local state local.
+- User-facing copy goes through `src/i18n` (`useI18n().t("namespace.key")` in client components, `getServerMessage` in server components). Add every new string to both `messages/en.ts` and `messages/zh.ts`; TypeScript enforces key parity. See `docs/dashboard/i18n.md`.
 - Formatting is Prettier. ESLint runs during `next build` via `next/core-web-vitals`; do not add a second linter config.
 - Keep the security headers and `output: "standalone"` in `next.config.mjs` intact.
 
 ## Layout
 
-| Path | Purpose |
-|------|---------|
-| `src/app/(auth)/` | Login and auth-adjacent routes |
-| `src/app/(root)/dashboard/` | Dashboard pages, including `agent/` |
-| `src/app/setup/` | First-run setup wizard |
-| `src/app/api/` | Next route handlers (token refresh, health) |
-| `src/components/ui/` | shadcn/Radix primitives |
-| `src/components/agent/` | Agent chat UI: thread, composer, conversation list |
-| `src/hooks/` | `use-agent-chat`, auth, API query, debounce |
-| `src/utils/` | API client, endpoint constants, SSE parser, helpers |
-| `src/store/` | Redux Toolkit store and reducers |
-| `src/types/` | Shared API types |
-| `src/styles/globals.css` | Tailwind layers and design tokens |
+| Path                        | Purpose                                                                  |
+| --------------------------- | ------------------------------------------------------------------------ |
+| `src/app/(auth)/`           | Login and auth-adjacent routes                                           |
+| `src/app/(root)/dashboard/` | Dashboard pages, including `agent/`                                      |
+| `src/app/setup/`            | First-run setup wizard                                                   |
+| `src/app/api/`              | Next route handlers (token refresh, health)                              |
+| `src/components/ui/`        | shadcn/Radix primitives                                                  |
+| `src/components/agent/`     | Agent chat UI: thread, composer, conversation list                       |
+| `src/hooks/`                | `use-agent-chat`, auth, API query, debounce                              |
+| `src/utils/`                | API client, endpoint constants, SSE parser, helpers                      |
+| `src/i18n/`                 | Locale config, EN/ZH dictionaries, provider, formatters, server resolver |
+| `src/components/i18n/`      | Language switcher                                                        |
+| `src/store/`                | Redux Toolkit store and reducers                                         |
+| `src/types/`                | Shared API types                                                         |
+| `src/styles/globals.css`    | Tailwind layers and design tokens                                        |
 
 ## Notes
 

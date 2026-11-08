@@ -16,6 +16,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useAuth } from "@/hooks/use-auth";
+import { useI18n } from "@/i18n/provider";
+import type { MessageKey } from "@/i18n/messages/en";
 import { getErrorMessage } from "@/lib/error-message";
 import { cn } from "@/lib/utils";
 import { api } from "@/utils/api";
@@ -37,36 +39,35 @@ type BundledProviders = {
   embedder: string[];
 };
 
-const STEPS = [
-  "Admin Account",
-  "Providers",
-  "API Key",
-  "Use Case",
-  "Quick Test",
+const STEPS: MessageKey[] = [
+  "setup.step.adminAccount",
+  "setup.step.providers",
+  "setup.step.apiKey",
+  "setup.step.useCase",
+  "setup.step.quickTest",
 ];
-const STEP_TITLES = [
-  "Create your admin account",
-  "Review provider configuration",
-  "Your API key",
-  "Tell us your use case",
-  "Test your setup",
+const STEP_TITLES: MessageKey[] = [
+  "setup.title.adminAccount",
+  "setup.title.providers",
+  "setup.title.apiKey",
+  "setup.title.useCase",
+  "setup.title.quickTest",
 ];
 const SUPPORTED_PROVIDERS_URL =
   "https://docs.mem0.ai/open-source/setup#supported-providers";
 
-const USE_CASE_PRESETS = [
-  "Personal assistant",
-  "Coding agent",
-  "Customer support",
-  "Research",
-  "Therapy / journaling",
+const USE_CASE_PRESETS: MessageKey[] = [
+  "setup.preset.personalAssistant",
+  "setup.preset.codingAgent",
+  "setup.preset.customerSupport",
+  "setup.preset.research",
+  "setup.preset.therapy",
 ];
-
-const DEFAULT_TEST_MESSAGE = "I like to hike on weekends.";
 
 export default function SetupPage() {
   const router = useRouter();
   const { register } = useAuth();
+  const { t } = useI18n();
   const [step, setStep] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
   const [isPrefillingConfig, setIsPrefillingConfig] = useState(false);
@@ -96,7 +97,9 @@ export default function SetupPage() {
 
   const [useCase, setUseCase] = useState("");
   const [customInstructions, setCustomInstructions] = useState("");
-  const [testMessage, setTestMessage] = useState(DEFAULT_TEST_MESSAGE);
+  const [testMessage, setTestMessage] = useState(() =>
+    t("setup.test.defaultMessage"),
+  );
   const [isGeneratingInstructions, setIsGeneratingInstructions] =
     useState(false);
 
@@ -140,7 +143,7 @@ export default function SetupPage() {
         setProviders(providersRes.data);
       } catch (err) {
         if (active) {
-          setError(getErrorMessage(err, "Could not read server configuration"));
+          setError(getErrorMessage(err, t("setup.errors.readConfig")));
         }
       } finally {
         if (active) {
@@ -154,23 +157,23 @@ export default function SetupPage() {
     return () => {
       active = false;
     };
-  }, [step]);
+  }, [step, t]);
 
   const handleStep1 = async (e: React.FormEvent) => {
     e.preventDefault();
 
     if (!isValidEmail(email)) {
-      setError("Enter a valid email address.");
+      setError(t("setup.validation.invalidEmail"));
       return;
     }
 
     if (password !== confirmPassword) {
-      setError("Passwords don't match");
+      setError(t("setup.validation.passwordMismatch"));
       return;
     }
 
     if (password.length < 8) {
-      setError("Password must be at least 8 characters");
+      setError(t("setup.validation.passwordTooShort"));
       return;
     }
 
@@ -181,7 +184,7 @@ export default function SetupPage() {
       await register(name, email, password);
       setStep(1);
     } catch (err) {
-      setError(getErrorMessage(err, "Registration failed"));
+      setError(getErrorMessage(err, t("setup.errors.registration")));
     } finally {
       setIsLoading(false);
     }
@@ -230,7 +233,7 @@ export default function SetupPage() {
       setInitialEmbedderModel(embedderModel);
       setStep(2);
     } catch (err) {
-      setError(getErrorMessage(err, "Failed to save configuration"));
+      setError(getErrorMessage(err, t("setup.errors.saveConfig")));
     } finally {
       setIsLoading(false);
     }
@@ -243,11 +246,11 @@ export default function SetupPage() {
 
     try {
       const res = await api.post(API_KEY_ENDPOINTS.BASE, {
-        label: keyLabel.trim() || "My First Key",
+        label: keyLabel.trim() || t("setup.key.placeholder"),
       });
       setApiKey(res.data.key);
     } catch (err) {
-      setError(getErrorMessage(err, "Failed to create API key"));
+      setError(getErrorMessage(err, t("setup.errors.createKey")));
     } finally {
       setIsLoading(false);
     }
@@ -290,7 +293,10 @@ export default function SetupPage() {
           detail = JSON.parse(body).detail ?? body;
         } catch {}
         throw new Error(
-          `Test failed (${res.status}): ${detail || res.statusText}`,
+          t("setup.test.failedWithStatus", {
+            status: res.status,
+            detail: detail || res.statusText,
+          }),
         );
       }
 
@@ -299,7 +305,7 @@ export default function SetupPage() {
         .post(AUTH_ENDPOINTS.ONBOARDING_COMPLETE, { use_case: useCase })
         .catch(() => {});
     } catch (err) {
-      setError(getErrorMessage(err, "Test failed"));
+      setError(getErrorMessage(err, t("setup.errors.testFailed")));
     } finally {
       setIsLoading(false);
     }
@@ -333,18 +339,18 @@ export default function SetupPage() {
           ))}
         </div>
         <p className="text-center text-sm text-onSurface-default-tertiary">
-          {STEPS[step]}
+          {t(STEPS[step])}
         </p>
 
         <Card className="border-memBorder-primary">
           <CardContent className="p-6 space-y-4">
             <div className="space-y-1">
               <h2 className="text-base font-semibold font-fustat">
-                {STEP_TITLES[step]}
+                {t(STEP_TITLES[step])}
               </h2>
               {isPrefillingConfig && step === 1 && (
                 <p className="text-xs text-onSurface-default-tertiary">
-                  Checking server configuration...
+                  {t("setup.checkingConfig")}
                 </p>
               )}
             </div>
@@ -355,16 +361,16 @@ export default function SetupPage() {
             {step === 0 && (
               <form onSubmit={handleStep1} className="space-y-4">
                 <div className="space-y-1">
-                  <Label htmlFor="setup-name">Name</Label>
+                  <Label htmlFor="setup-name">{t("setup.name")}</Label>
                   <Input
                     id="setup-name"
                     value={name}
                     onChange={(e) => setName(e.target.value)}
-                    placeholder="Your name"
+                    placeholder={t("setup.namePlaceholder")}
                   />
                 </div>
                 <div className="space-y-1">
-                  <Label htmlFor="setup-email">Email</Label>
+                  <Label htmlFor="setup-email">{t("setup.email")}</Label>
                   <Input
                     id="setup-email"
                     type="email"
@@ -374,18 +380,18 @@ export default function SetupPage() {
                   />
                 </div>
                 <div className="space-y-1">
-                  <Label htmlFor="setup-password">Password</Label>
+                  <Label htmlFor="setup-password">{t("setup.password")}</Label>
                   <Input
                     id="setup-password"
                     type="password"
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
-                    placeholder="Min 8 characters"
+                    placeholder={t("setup.passwordPlaceholder")}
                   />
                 </div>
                 <div className="space-y-1">
                   <Label htmlFor="setup-confirm-password">
-                    Confirm Password
+                    {t("setup.confirmPassword")}
                   </Label>
                   <Input
                     id="setup-confirm-password"
@@ -399,7 +405,7 @@ export default function SetupPage() {
                   disabled={isLoading || !name || !email || !password}
                   className="w-full"
                 >
-                  {isLoading ? "Creating..." : "Create Admin Account"}
+                  {isLoading ? t("setup.creating") : t("setup.createAdmin")}
                 </Button>
               </form>
             )}
@@ -409,16 +415,16 @@ export default function SetupPage() {
                 {!serverHasLlmKey && (
                   <div className="rounded-md border border-memBorder-primary bg-surface-default-secondary p-3">
                     <p className="text-xs text-onSurface-default-tertiary">
-                      No LLM provider API key is configured on the server. Paste
-                      one below to continue — it will be saved to the server and
-                      used for all memory operations.
+                      {t("setup.noLlmKey")}
                     </p>
                   </div>
                 )}
 
                 <div className="grid grid-cols-2 gap-3">
                   <div className="space-y-1">
-                    <Label htmlFor="setup-llm-provider">LLM Provider</Label>
+                    <Label htmlFor="setup-llm-provider">
+                      {t("setup.providers.llmProvider")}
+                    </Label>
                     <Select
                       value={llmProvider}
                       onValueChange={(value) => {
@@ -429,7 +435,9 @@ export default function SetupPage() {
                       disabled={!providers}
                     >
                       <SelectTrigger id="setup-llm-provider">
-                        <SelectValue placeholder="Select provider" />
+                        <SelectValue
+                          placeholder={t("setup.providers.selectProvider")}
+                        />
                       </SelectTrigger>
                       <SelectContent>
                         {providers?.llm.map((name) => (
@@ -441,7 +449,9 @@ export default function SetupPage() {
                     </Select>
                   </div>
                   <div className="space-y-1">
-                    <Label htmlFor="setup-llm-model">Model</Label>
+                    <Label htmlFor="setup-llm-model">
+                      {t("setup.providers.model")}
+                    </Label>
                     <Input
                       id="setup-llm-model"
                       value={llmModel}
@@ -453,28 +463,28 @@ export default function SetupPage() {
                 </div>
 
                 <div className="space-y-1">
-                  <Label htmlFor="setup-llm-api-key">LLM API Key</Label>
+                  <Label htmlFor="setup-llm-api-key">
+                    {t("setup.providers.llmApiKey")}
+                  </Label>
                   <Input
                     id="setup-llm-api-key"
                     type="password"
                     value={llmApiKey}
                     onChange={(e) => setLlmApiKey(e.target.value)}
                     placeholder={
-                      serverHasLlmKey
-                        ? "Leave blank to keep existing key"
-                        : "sk-..."
+                      serverHasLlmKey ? t("setup.providers.keepKey") : "sk-..."
                     }
                     className="font-mono text-sm"
                   />
                   <p className="text-xs text-onSurface-default-tertiary">
-                    Also used for the embedder when it shares the same provider.
+                    {t("setup.providers.llmKeyHint")}
                   </p>
                 </div>
 
                 <div className="grid grid-cols-2 gap-3">
                   <div className="space-y-1">
                     <Label htmlFor="setup-embedder-provider">
-                      Embedder Provider
+                      {t("setup.providers.embedderProvider")}
                     </Label>
                     <Select
                       value={embedderProvider}
@@ -485,7 +495,9 @@ export default function SetupPage() {
                       disabled={!providers}
                     >
                       <SelectTrigger id="setup-embedder-provider">
-                        <SelectValue placeholder="Select provider" />
+                        <SelectValue
+                          placeholder={t("setup.providers.selectProvider")}
+                        />
                       </SelectTrigger>
                       <SelectContent>
                         {providers?.embedder.map((name) => (
@@ -497,7 +509,9 @@ export default function SetupPage() {
                     </Select>
                   </div>
                   <div className="space-y-1">
-                    <Label htmlFor="setup-embedder-model">Model</Label>
+                    <Label htmlFor="setup-embedder-model">
+                      {t("setup.providers.model")}
+                    </Label>
                     <Input
                       id="setup-embedder-model"
                       value={embedderModel}
@@ -509,17 +523,16 @@ export default function SetupPage() {
                 </div>
 
                 <p className="text-xs text-onSurface-default-tertiary">
-                  Need another provider? Install its Python package and rebuild
-                  the image. See{" "}
+                  {t("setup.providers.needAnotherPrefix")}
                   <a
                     href={SUPPORTED_PROVIDERS_URL}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="underline underline-offset-4 hover:text-onSurface-default-primary"
                   >
-                    supported providers
+                    {t("setup.providers.supportedProviders")}
                   </a>
-                  .
+                  {t("setup.providers.needAnotherSuffix")}
                 </p>
 
                 <Button
@@ -532,7 +545,7 @@ export default function SetupPage() {
                   }
                   className="w-full"
                 >
-                  {isLoading ? "Saving..." : "Save & Continue"}
+                  {isLoading ? t("common.saving") : t("setup.saveAndContinue")}
                 </Button>
               </form>
             )}
@@ -540,16 +553,20 @@ export default function SetupPage() {
             {step === 2 && !apiKey && (
               <form onSubmit={handleStep3} className="space-y-4">
                 <div className="space-y-1">
-                  <Label htmlFor="setup-key-label">Label for this key</Label>
+                  <Label htmlFor="setup-key-label">
+                    {t("setup.key.label")}
+                  </Label>
                   <Input
                     id="setup-key-label"
                     value={keyLabel}
                     onChange={(e) => setKeyLabel(e.target.value)}
-                    placeholder="My First Key"
+                    placeholder={t("setup.key.placeholder")}
                   />
                 </div>
                 <Button type="submit" disabled={isLoading} className="w-full">
-                  {isLoading ? "Generating..." : "Generate API Key"}
+                  {isLoading
+                    ? t("setup.key.generating")
+                    : t("setup.key.generate")}
                 </Button>
               </form>
             )}
@@ -557,7 +574,9 @@ export default function SetupPage() {
             {step === 2 && apiKey && (
               <form onSubmit={handleContinueToUseCase} className="space-y-4">
                 <div className="space-y-1">
-                  <Label htmlFor="setup-api-key">Your API Key</Label>
+                  <Label htmlFor="setup-api-key">
+                    {t("setup.key.yourKey")}
+                  </Label>
                   <div className="flex gap-2">
                     <Input
                       id="setup-api-key"
@@ -572,7 +591,13 @@ export default function SetupPage() {
                         setTimeout(() => setCopied(false), 2000);
                       }}
                     >
-                      <Button variant="outline" size="icon">
+                      <Button
+                        variant="outline"
+                        size="icon"
+                        aria-label={
+                          copied ? t("common.copied") : t("common.copy")
+                        }
+                      >
                         {copied ? (
                           <Check className="size-4" />
                         ) : (
@@ -582,11 +607,11 @@ export default function SetupPage() {
                     </CopyToClipboard>
                   </div>
                   <p className="text-xs text-onSurface-danger-primary">
-                    Save this key. You will not see it again.
+                    {t("setup.key.saveWarning")}
                   </p>
                 </div>
                 <Button type="submit" className="w-full">
-                  Continue
+                  {t("setup.continue")}
                 </Button>
               </form>
             )}
@@ -594,35 +619,39 @@ export default function SetupPage() {
             {step === 3 && (
               <div className="space-y-4">
                 <div className="space-y-1">
-                  <Label htmlFor="setup-use-case">Describe your use case</Label>
+                  <Label htmlFor="setup-use-case">
+                    {t("setup.useCase.describe")}
+                  </Label>
                   <textarea
                     id="setup-use-case"
                     value={useCase}
                     onChange={(e) => setUseCase(e.target.value)}
-                    placeholder="e.g. A personal assistant that remembers my preferences"
+                    placeholder={t("setup.useCase.placeholder")}
                     className="flex w-full rounded-md border border-memBorder-primary bg-surface-default-primary px-3 py-2 text-sm placeholder:text-onSurface-default-tertiary focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-memPurple-500 min-h-[80px] resize-y"
                   />
                 </div>
                 <div className="flex flex-wrap gap-2">
-                  {USE_CASE_PRESETS.map((preset) => (
-                    <Button
-                      key={preset}
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={() => setUseCase(preset)}
-                      className={cn(
-                        useCase === preset &&
-                          "border-memPurple-500 text-memPurple-500",
-                      )}
-                    >
-                      {preset}
-                    </Button>
-                  ))}
+                  {USE_CASE_PRESETS.map((presetKey) => {
+                    const preset = t(presetKey);
+                    return (
+                      <Button
+                        key={presetKey}
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setUseCase(preset)}
+                        className={cn(
+                          useCase === preset &&
+                            "border-memPurple-500 text-memPurple-500",
+                        )}
+                      >
+                        {preset}
+                      </Button>
+                    );
+                  })}
                 </div>
                 <p className="text-xs text-onSurface-default-tertiary">
-                  We&apos;ll generate custom instructions that tell the memory
-                  extractor which facts to prioritize for your use case.
+                  {t("setup.useCase.hint")}
                 </p>
                 <div className="flex gap-2">
                   <Button
@@ -631,7 +660,7 @@ export default function SetupPage() {
                     onClick={handleContinueToQuickTest}
                     className="flex-1"
                   >
-                    Skip
+                    {t("setup.useCase.skip")}
                   </Button>
                   <Button
                     type="button"
@@ -655,7 +684,7 @@ export default function SetupPage() {
                         setError(
                           getErrorMessage(
                             err,
-                            "Failed to generate instructions",
+                            t("setup.errors.generateInstructions"),
                           ),
                         );
                       } finally {
@@ -664,15 +693,15 @@ export default function SetupPage() {
                     }}
                   >
                     {isGeneratingInstructions
-                      ? "Generating instructions..."
-                      : "Generate instructions"}
+                      ? t("setup.useCase.generating")
+                      : t("setup.useCase.generate")}
                   </Button>
                 </div>
                 {customInstructions && (
                   <div className="space-y-3">
                     <div className="space-y-1">
                       <Label htmlFor="setup-instructions">
-                        Generated instructions
+                        {t("setup.useCase.generated")}
                       </Label>
                       <textarea
                         id="setup-instructions"
@@ -694,7 +723,10 @@ export default function SetupPage() {
                           handleContinueToQuickTest();
                         } catch (err) {
                           setError(
-                            getErrorMessage(err, "Failed to save instructions"),
+                            getErrorMessage(
+                              err,
+                              t("setup.errors.saveInstructions"),
+                            ),
                           );
                         } finally {
                           setIsLoading(false);
@@ -702,7 +734,9 @@ export default function SetupPage() {
                       }}
                       disabled={isLoading}
                     >
-                      {isLoading ? "Saving..." : "Save & Continue"}
+                      {isLoading
+                        ? t("common.saving")
+                        : t("setup.saveAndContinue")}
                     </Button>
                   </div>
                 )}
@@ -715,11 +749,10 @@ export default function SetupPage() {
                 className="space-y-4"
               >
                 <div className="space-y-1">
-                  <Label>Test your setup</Label>
+                  <Label>{t("setup.test.title")}</Label>
                   {!apiUrl && (
                     <p className="text-xs text-onSurface-danger-primary">
-                      NEXT_PUBLIC_API_URL is not set. Set it in .env and restart
-                      before running this test.
+                      {t("setup.test.apiUrlMissing")}
                     </p>
                   )}
                   <pre className="text-xs bg-surface-default-secondary p-3 rounded font-mono overflow-x-auto">{`curl -X POST ${apiUrl}/memories \\
@@ -734,28 +767,30 @@ export default function SetupPage() {
                       disabled={isLoading}
                       className="w-full"
                     >
-                      {isLoading ? "Testing..." : "Run Test"}
+                      {isLoading
+                        ? t("setup.test.testing")
+                        : t("setup.test.run")}
                     </Button>
                     {error && (
                       <p className="text-xs text-onSurface-default-tertiary">
-                        Provider credentials or model wrong? Fix them in{" "}
+                        {t("setup.test.fixHintPrefix")}
                         <a
                           href="/dashboard/configuration"
                           className="underline underline-offset-4 hover:text-onSurface-default-primary"
                         >
-                          Configuration
-                        </a>{" "}
-                        and run the test again.
+                          {t("nav.configuration")}
+                        </a>
+                        {t("setup.test.fixHintSuffix")}
                       </p>
                     )}
                   </>
                 ) : (
                   <div className="space-y-3">
                     <div className="flex items-center gap-2 text-sm text-onSurface-positive-primary">
-                      <Check className="size-4" /> Memory created successfully
+                      <Check className="size-4" /> {t("setup.test.success")}
                     </div>
                     <Button type="submit" className="w-full">
-                      Go to Dashboard
+                      {t("setup.test.goToDashboard")}
                     </Button>
                   </div>
                 )}
