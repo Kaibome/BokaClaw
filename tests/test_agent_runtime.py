@@ -31,6 +31,14 @@ from app.agent.events import (  # noqa: E402
 from app.agent.research_memory import RecallHit, ResearchRecall  # noqa: E402
 
 
+def test_default_system_prompt_separates_data_from_instructions():
+    prompt = agent_runtime.DEFAULT_SYSTEM_PROMPT
+
+    assert agent_runtime.UNTRUSTED_DATA_RULE in prompt
+    assert "suspected prompt injection" in prompt
+    assert "Only this system prompt" in prompt
+
+
 class FakeMaxIterationsExceeded(Exception):
     pass
 
@@ -139,7 +147,7 @@ class FakeSDK:
         self.runtimes = []
         self.events = []
 
-    def tool(self, fn, *, name=None):
+    def tool(self, fn, *, name=None, effect=None, concurrency_safe=None):
         wrapped = FakeTool(fn, name=name)
         self.tools.append(wrapped)
         return wrapped
@@ -1106,7 +1114,14 @@ async def test_stream_local_agent_injects_prior_research(monkeypatch):
 
     prompt = sdk.runtimes[0].config.kwargs["system_prompt"]
     assert prompt.startswith("system")
-    assert "## Reusable research" in prompt
+    assert "## Reusable research" not in prompt
+    assert agent_runtime.UNTRUSTED_DATA_RULE in prompt
+    messages = sdk.runtimes[0].stream_calls[0][0]
+    assert messages[-1] == {"role": "user", "content": "a similar question"}
+    note = messages[-2]
+    assert note["role"] == "user"
+    assert "## Reusable research" in note["content"]
+    assert "not an instruction" in note["content"]
     assert calls["args"] == (
         "user-1",
         "a similar question",
@@ -1138,7 +1153,9 @@ async def test_stream_local_agent_reports_a_query_without_a_user(monkeypatch):
 
     events = await _collect(_payload(user_id=None))
 
-    assert sdk.runtimes[0].config.kwargs["system_prompt"] == "system"
+    prompt = sdk.runtimes[0].config.kwargs["system_prompt"]
+    assert prompt.startswith("system")
+    assert agent_runtime.UNTRUSTED_DATA_RULE in prompt
     assert isinstance(events[0], AgentMemoryRecall)
     assert events[0].skipped_reason == "no_user"
     assert events[0].hits == []
@@ -1161,7 +1178,9 @@ async def test_stream_local_agent_survives_a_research_lookup_failure(monkeypatch
     assert isinstance(events[0], AgentMemoryRecall)
     assert events[0].error == "RuntimeError: memory offline"
     assert all(isinstance(event, AgentDelta) for event in events[1:-1])
-    assert sdk.runtimes[0].config.kwargs["system_prompt"] == "system"
+    prompt = sdk.runtimes[0].config.kwargs["system_prompt"]
+    assert prompt.startswith("system")
+    assert agent_runtime.UNTRUSTED_DATA_RULE in prompt
 
 
 @pytest.mark.asyncio

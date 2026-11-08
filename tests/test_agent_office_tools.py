@@ -26,7 +26,7 @@ class FakeTool:
 
 
 class FakeSDK:
-    def tool(self, fn, *, name=None):
+    def tool(self, fn, *, name=None, effect=None, concurrency_safe=None):
         return FakeTool(fn, name or fn.__name__)
 
 

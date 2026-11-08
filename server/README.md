@@ -144,6 +144,14 @@ URL (ignoring the fragment) returns the earlier result with `"cached": true`
 instead of making another request. Failed fetches are not cached. The cache is
 per run, so a new turn or a retry fetches pages again.
 
+Fetched page text is returned inside
+`<<<BEGIN UNTRUSTED WEB CONTENT source=<url>>>>` … `<<<END UNTRUSTED WEB
+CONTENT>>>` markers, after any string that could forge those markers is
+neutralized. The system prompt tells the model to treat tool output as data:
+instructions embedded in a page must be reported to the user, not obeyed. This
+is a mitigation, not a guarantee — see [Prompt-injection
+posture](#prompt-injection-posture).
+
 Across runs, the server persists each run's tool trace in the assistant
 message's `metadata.tool_trace` (and in `agent_run_events`). On the next turn it
 rebuilds those records as OpenAI wire-format `assistant.tool_calls` plus `tool`
@@ -272,16 +280,38 @@ The exact lookup matters because a long stored conclusion can score below the
 similarity floor against its own question; the vector floor then separates
 paraphrases from unrelated questions. Matches older than
 `AGENT_RESEARCH_MEMORY_TTL_DAYS` or below `AGENT_RESEARCH_MEMORY_MIN_SCORE` are
-dropped; the rest are added to the system prompt with their age and an
-instruction to reuse the conclusion instead of repeating the same web research.
-The block is view-only and is not persisted as a message. Memory failures never
-fail the turn.
+dropped; the rest are added as a user-role message immediately before the
+current turn, with their age and an instruction to reuse the conclusion instead
+of repeating the same web research. The block is view-only and is not persisted
+as a message. It is deliberately **not** part of the system prompt: saved
+conclusions derive from untrusted web pages, so they must not gain
+system-level authority. Memory failures never fail the turn.
 
 This half applies to the in-process runtime only; a remote executor does not
 receive the block. Saving, however, runs for any completed turn whose trace
 contains web tool events, including a remote executor that emits `tool.*`
 events. Set `AGENT_RESEARCH_MEMORY=false` to disable both storing and
 retrieval.
+
+### Prompt-injection posture
+
+Tool output is untrusted input. A model cannot reliably tell an instruction from
+data inside a tool result, so the server applies three mitigations:
+
+- The base system prompt defines an instruction hierarchy: only the system
+  prompt and the user's messages carry instructions. Tool output is data, and
+  text that tries to redirect the run is reported to the user instead of obeyed.
+- `WebFetch` returns page text inside explicit untrusted-content markers with
+  its source URL, and neutralizes anything that could forge the closing marker.
+- Reused research conclusions are injected as a user-role message immediately
+  before the question — never into the system prompt — and the block labels
+  itself as reference data.
+
+These are mitigations, not a guarantee. There is no input sanitizer and no
+approval step before `Write`, `Edit`, or `Bash`: the executor container limits
+what a hijacked model can reach, but not which of its granted tools it may use.
+Treat the agent workspace as writable by the model and keep credentials out of
+it.
 
 If no model can be resolved, `POST /agent` returns 503 `agent_not_configured`;
 set `AGENT_MODEL` (plus `AGENT_BASE_URL` for non-OpenAI providers). From inside
