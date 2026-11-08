@@ -19,12 +19,15 @@ import type {
   RunUsage,
   ToolTraceEntry,
   ToolTraceStatus,
+  UserQuestion,
+  UserQuestionStatus,
 } from "@/types/api";
 
 export interface ChatMessageView extends ChatMessage {
   streaming?: boolean;
   failed?: boolean;
   toolTrace?: ToolTraceEntry[];
+  questions?: UserQuestion[];
   runStatus?: RunStatus;
   reconnecting?: boolean;
   cancelRequested?: boolean;
@@ -85,6 +88,23 @@ interface ToolResultPayload extends BasePayload {
   duration_ms?: number | null;
   finished_at?: string | null;
   truncated?: boolean;
+}
+
+interface UserQuestionPayload extends BasePayload {
+  message_id: string;
+  question_id: string;
+  question: string;
+  options?: string[];
+  allow_free_text?: boolean;
+  expires_at?: string | null;
+  timeout_seconds?: number;
+}
+
+interface UserAnswerPayload extends BasePayload {
+  message_id?: string;
+  question_id: string;
+  answer: string;
+  answered_at?: string | null;
 }
 
 interface ErrorPayload extends BasePayload {
@@ -225,6 +245,60 @@ function finalizeRunningToolTrace(
     entry.status === "running"
       ? { ...entry, status: "aborted" as const, is_error: true }
       : entry,
+  );
+}
+
+function upsertQuestion(
+  questions: UserQuestion[] | undefined,
+  incoming: UserQuestion,
+): UserQuestion[] {
+  const list = questions ?? [];
+  const index = list.findIndex(
+    (question) => question.question_id === incoming.question_id,
+  );
+  if (index === -1) return [...list, incoming];
+
+  const next = [...list];
+  next[index] = { ...list[index], ...incoming };
+  return next;
+}
+
+function markQuestionAnswered(
+  questions: UserQuestion[] | undefined,
+  questionId: string,
+  answer: string,
+): UserQuestion[] | undefined {
+  if (!questions?.length) return questions;
+  return questions.map((question) =>
+    question.question_id === questionId
+      ? {
+          ...question,
+          answer,
+          status: "answered" as const,
+        }
+      : question,
+  );
+}
+
+function setQuestionStatus(
+  questions: UserQuestion[] | undefined,
+  questionId: string,
+  status: UserQuestionStatus,
+): UserQuestion[] | undefined {
+  if (!questions?.length) return questions;
+  return questions.map((question) =>
+    question.question_id === questionId ? { ...question, status } : question,
+  );
+}
+
+function closePendingQuestions(
+  questions: UserQuestion[] | undefined,
+): UserQuestion[] | undefined {
+  if (!questions?.length) return questions;
+  return questions.map((question) =>
+    question.status === "pending" || question.status === "submitting"
+      ? { ...question, status: "expired" as const }
+      : question,
   );
 }
 
@@ -805,7 +879,56 @@ export function useAgentChat() {
           reconnecting: false,
           cancelRequested: cancelRequestedRef.current,
           toolTrace: upsertToolTrace(message.toolTrace, entry),
+          // A settled ask_user result means the question timed out, was
+          // cancelled, or failed; the card must stop accepting answers.
+          questions:
+            payload.name === "ask_user"
+              ? closePendingQuestions(message.questions)
+              : message.questions,
         }));
+        return;
+      }
+
+      if (event.event === "user.question") {
+        const payload = parse<UserQuestionPayload>(event);
+        if (!payload || !acceptSeq(event, payload)) return;
+
+        ensureAssistantBubble(payload.message_id, payload.conversation_id);
+        patchAssistant(payload.message_id, (message) => ({
+          ...message,
+          streaming: true,
+          reconnecting: false,
+          cancelRequested: cancelRequestedRef.current,
+          runStatus: "running",
+          questions: upsertQuestion(message.questions, {
+            question_id: payload.question_id,
+            question: payload.question,
+            options: payload.options ?? [],
+            allow_free_text: payload.allow_free_text ?? true,
+            expires_at: payload.expires_at ?? null,
+            status: "pending",
+          }),
+        }));
+        return;
+      }
+
+      if (event.event === "user.answer") {
+        const payload = parse<UserAnswerPayload>(event);
+        if (!payload || !acceptSeq(event, payload)) return;
+
+        const apply = (message: ChatMessageView): ChatMessageView => ({
+          ...message,
+          questions: markQuestionAnswered(
+            message.questions,
+            payload.question_id,
+            payload.answer,
+          ),
+        });
+        if (payload.message_id) {
+          patchAssistant(payload.message_id, apply);
+        } else {
+          setMessages((previous) => previous.map(apply));
+        }
         return;
       }
 
@@ -821,6 +944,7 @@ export function useAgentChat() {
         patchAssistant(finalMessage.id, (message) => ({
           ...toView(finalMessage),
           toolTrace: serverTrace ?? message.toolTrace,
+          questions: closePendingQuestions(message.questions),
           streaming: false,
           reconnecting: false,
           runStatus: "completed",
@@ -872,6 +996,7 @@ export function useAgentChat() {
                         ? "failed"
                         : message.status,
                   toolTrace: finalizeRunningToolTrace(message.toolTrace),
+                  questions: closePendingQuestions(message.questions),
                 }
               : message,
           ),
@@ -926,6 +1051,7 @@ export function useAgentChat() {
                         ? "failed"
                         : message.status,
                   toolTrace: finalizeRunningToolTrace(message.toolTrace),
+                  questions: closePendingQuestions(message.questions),
                 }
               : message.reconnecting
                 ? { ...message, reconnecting: false }
@@ -1621,6 +1747,67 @@ export function useAgentChat() {
     }
   }, [closeSubscription, t]);
 
+  const answerQuestion = useCallback(
+    async (questionId: string, answer: string) => {
+      const runId = runIdRef.current;
+      if (!runId) {
+        toast({
+          title: t("agent.question.failed"),
+          description: t("agent.question.noActiveRun"),
+          variant: "destructive",
+        });
+        return;
+      }
+
+      setMessages((previous) =>
+        previous.map((message) => ({
+          ...message,
+          questions: setQuestionStatus(
+            message.questions,
+            questionId,
+            "submitting",
+          ),
+        })),
+      );
+
+      try {
+        await api.post(AGENT_ENDPOINTS.RUN_ANSWER(runId), {
+          question_id: questionId,
+          answer,
+        });
+        // The user.answer SSE frame is authoritative; update locally too so the
+        // card settles even when the stream is briefly behind.
+        setMessages((previous) =>
+          previous.map((message) => ({
+            ...message,
+            questions: markQuestionAnswered(
+              message.questions,
+              questionId,
+              answer,
+            ),
+          })),
+        );
+      } catch (err) {
+        setMessages((previous) =>
+          previous.map((message) => ({
+            ...message,
+            questions: setQuestionStatus(
+              message.questions,
+              questionId,
+              "pending",
+            ),
+          })),
+        );
+        toast({
+          title: t("agent.question.failed"),
+          description: getErrorMessage(err, t("agent.question.retry")),
+          variant: "destructive",
+        });
+      }
+    },
+    [t],
+  );
+
   const selectConversation = useCallback(
     (conversationId: string) => {
       if (activeIdRef.current === conversationId) return;
@@ -1813,6 +2000,7 @@ export function useAgentChat() {
     contextUsage,
     send,
     stop,
+    answerQuestion,
     selectConversation,
     startNewChat,
     renameConversation,

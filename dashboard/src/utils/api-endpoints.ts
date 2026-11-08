@@ -58,4 +58,5 @@ export const AGENT_ENDPOINTS = {
   RUN_EVENTS: (runId: string, afterSeq = 0) =>
     `/agent/runs/${runId}/events?after_seq=${afterSeq}`,
   RUN_CANCEL: (runId: string) => `/agent/runs/${runId}/cancel`,
+  RUN_ANSWER: (runId: string) => `/agent/runs/${runId}/answers`,
 } as const;

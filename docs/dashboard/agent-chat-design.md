@@ -168,7 +168,7 @@ X-Accel-Buffering: no
 
 事件分两类：
 
-- **持久化事件**：`message.delta`、`tool.call`、`tool.result`、`memory.recall`、`memory.save`、`message.completed`、`error`。写入 `agent_run_events`，可重放；每帧带 `id: <seq>`，`seq` 在该 run 内单调递增，从 1 开始。
+- **持久化事件**：`message.delta`、`tool.call`、`tool.result`、`user.question`、`user.answer`、`memory.recall`、`memory.save`、`message.completed`、`error`。写入 `agent_run_events`，可重放；每帧带 `id: <seq>`，`seq` 在该 run 内单调递增，从 1 开始。
 - **合成事件**：`meta`（订阅建立时由服务端生成）、`done`（订阅收尾）。它们不落库，没有 `id`。
 
 `memory.recall` 在第一次模型请求之前发出，`memory.save` 在 `done` 之后发出（见 4.4）；两者都同时写入同名 `memory` span，供 Trace 页查看。
@@ -214,6 +214,16 @@ data: {"run_id":"uuid","conversation_id":"uuid","status":"completed","last_seq":
 id: 6
 event: memory.save
 data: {"run_id":"uuid","conversation_id":"uuid","seq":6,"message_id":"uuid","action":"added | updated | skipped | failed","question":"用户问题（截断到 200 字）","memory_id":"uuid","sources":3,"chars":1820,"reason":null,"error":null,"duration_ms":410}
+```
+
+当 run 调用 `ask_user` 时，`tool.result` 与 `message.completed` 之间还会出现两个事件（`seq` 顺延）：
+
+```text
+event: user.question
+data: {"run_id":"uuid","conversation_id":"uuid","seq":5,"message_id":"uuid","question_id":"q_...","question":"Which environment?","options":["staging","production"],"allow_free_text":true,"expires_at":"...","timeout_seconds":240}
+
+event: user.answer
+data: {"run_id":"uuid","conversation_id":"uuid","seq":6,"message_id":"uuid","question_id":"q_...","answer":"staging","answered_at":"..."}
 ```
 
 `memory.recall` 的字段含义：
@@ -317,6 +327,7 @@ data: {
 | GET | `/agent/runs/{id}` | 读取单个 run 的状态、`last_seq`、错误与部分内容 |
 | GET | `/agent/runs/{id}/events?after_seq=N` | 订阅 run：先重放 `seq > N` 的持久化事件，再转发实时事件，直到 `done` |
 | POST | `/agent/runs/{id}/cancel` | 请求取消；只设置协作式取消标志，幂等 |
+| POST | `/agent/runs/{id}/answers` | 提交 `{question_id, answer}`，唤醒 `ask_user`；run 非 running → 409，问题不存在 → 404 |
 
 规则：
 

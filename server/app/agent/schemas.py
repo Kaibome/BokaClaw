@@ -146,6 +146,19 @@ class AgentInvokeRequest(BaseModel):
         return stripped
 
 
+class AgentAnswerRequest(BaseModel):
+    question_id: str = Field(..., min_length=1, max_length=80)
+    answer: str = Field(..., min_length=1, max_length=8_000)
+
+    @field_validator("answer")
+    @classmethod
+    def _non_blank_answer(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("answer must not be blank")
+        return stripped
+
+
 class AgentInvokeResponse(BaseModel):
     conversation: ConversationOut
     user_message: ConversationMessageOut

@@ -35,6 +35,7 @@ export default function AgentPage() {
     error,
     send,
     stop,
+    answerQuestion,
     selectConversation,
     startNewChat,
     renameConversation,
@@ -131,6 +132,7 @@ export default function AgentPage() {
             isLoading={isLoadingConversations || isLoadingMessages}
             error={error}
             onRetry={handleRetry}
+            onAnswerQuestion={answerQuestion}
           />
 
           <div className="shrink-0 border-t border-memBorder-primary p-3">

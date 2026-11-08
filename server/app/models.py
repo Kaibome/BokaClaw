@@ -197,7 +197,8 @@ class AgentRunEvent(Base):
         UniqueConstraint("run_id", "seq", name="uq_agent_run_events_run_seq"),
         CheckConstraint(
             "event_type IN ('message.delta', 'tool.call', 'tool.result', "
-            "'memory.recall', 'memory.save', 'message.completed', 'error')",
+            "'memory.recall', 'memory.save', 'user.question', 'user.answer', "
+            "'message.completed', 'error')",
             name="ck_agent_run_events_type",
         ),
         Index("ix_agent_run_events_run_seq", "run_id", "seq"),

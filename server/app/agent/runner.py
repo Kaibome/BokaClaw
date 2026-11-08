@@ -37,6 +37,7 @@ from app.agent.events import (
     AgentToolResult,
     AgentUsageUpdate,
 )
+from app.agent.interactions import RunInteraction
 from app.agent.loop import stream_agent
 from app.agent.payloads import attach_trace, should_persist_reply, tool_call_payload, tool_result_payload
 from app.agent.repo import RunRepository, utcnow
@@ -261,6 +262,7 @@ class AgentRunManager:
         self._executor = executor
         self._tasks: dict[uuid.UUID, asyncio.Task] = {}
         self._cancel_events: dict[uuid.UUID, threading.Event] = {}
+        self._interactions: dict[uuid.UUID, RunInteraction] = {}
         self._request_ids: dict[uuid.UUID, str] = {}
         self._waiters: dict[uuid.UUID, asyncio.Event] = {}
         self._subscribers: dict[uuid.UUID, set[RunSubscription]] = defaultdict(set)
@@ -304,6 +306,10 @@ class AgentRunManager:
                 task.cancel()
             if pending:
                 await asyncio.wait(pending, timeout=1.0)
+        # Wake any tool still blocked in ask_user. Tasks that finalized already
+        # sealed their interaction; this covers a hung shutdown.
+        for interaction in list(self._interactions.values()):
+            interaction.close("server shutdown")
         for run_id, submission in list(self._subscribers.items()):
             for sub in submission:
                 sub.closed = True
@@ -325,6 +331,7 @@ class AgentRunManager:
         self._request_ids[run_id] = request_id
         self._waiters[run_id] = asyncio.Event()
         self._cancel_events[run_id] = threading.Event()
+        self._interactions[run_id] = RunInteraction(asyncio.get_running_loop())
         task = asyncio.create_task(self._run_worker(run_id), name=f"agent-run-{run_id}")
         self._tasks[run_id] = task
         task.add_done_callback(lambda finished: self._discard_task(run_id, finished))
@@ -370,9 +377,20 @@ class AgentRunManager:
         event = self._cancel_events.get(run_id)
         if event is not None:
             event.set()
+        interaction = self._interactions.get(run_id)
+        if interaction is not None:
+            await interaction.seal("cancelled")
         if run_id not in self._tasks:
             await self._finalize_orphan_cancel(run_id)
         return await asyncio.to_thread(self.repo.get_run, run_id, owner_id)
+
+    async def answer_question(self, run_id: uuid.UUID, question_id: str, answer: str) -> tuple[bool, str]:
+        """Forward a user's answer to the run's question broker."""
+
+        interaction = self._interactions.get(run_id)
+        if interaction is None:
+            return False, "question_not_pending"
+        return await interaction.answer(question_id, answer)
 
     # ------------------------------------------------------------ subscriber
 
@@ -418,6 +436,7 @@ class AgentRunManager:
     async def _run_worker(self, run_id: uuid.UUID) -> None:
         writer: RunEventWriter | None = None
         heartbeat: asyncio.Task | None = None
+        interaction = self._interactions.get(run_id)
         trace = ToolTrace()
         metadata: dict[str, Any] = {}
         interrupted = False
@@ -453,6 +472,8 @@ class AgentRunManager:
                 await asyncio.to_thread(spans.start, run)
                 writer = RunEventWriter(self, run)
                 await writer.start()
+                if interaction is not None:
+                    interaction.attach_writer(writer)
                 heartbeat = asyncio.create_task(self._heartbeat(run_id))
 
                 try:
@@ -527,6 +548,10 @@ class AgentRunManager:
                         interrupted=False,
                     )
                 finally:
+                    # Wake any tool blocked in ask_user before the writer goes
+                    # away, so it cannot emit an event after close.
+                    if interaction is not None:
+                        interaction.close("run finished")
                     if heartbeat is not None:
                         heartbeat.cancel()
                         with contextlib.suppress(asyncio.CancelledError):
@@ -545,6 +570,9 @@ class AgentRunManager:
                         await self._recover_run(run, reason="Agent run was interrupted by a server shutdown.")
             # Otherwise the inner handler already finalized the run.
         finally:
+            if interaction is not None:
+                interaction.detach_writer()
+            self._interactions.pop(run_id, None)
             self._cancel_events.pop(run_id, None)
             self._request_ids.pop(run_id, None)
             self._signal_done(run_id)
@@ -570,6 +598,12 @@ class AgentRunManager:
             accepts_usage = False
         if accepts_usage and usage_meter is not None:
             kwargs["usage_meter"] = usage_meter
+        try:
+            accepts_interaction = "interaction" in inspect.signature(executor).parameters
+        except (TypeError, ValueError):
+            accepts_interaction = False
+        if accepts_interaction:
+            kwargs["interaction"] = self._interactions.get(run.id)
         payload = dict(run.request_payload or {})
         async for event in executor(payload, self._request_ids.get(run.id, ""), **kwargs):
             yield event
@@ -692,6 +726,12 @@ class AgentRunManager:
         *,
         interrupted: bool,
     ) -> None:
+        # Stop accepting answers before the first terminal write. seal() waits
+        # for an answer write already in flight, so user.* cannot land after
+        # message.completed/error.
+        interaction = self._interactions.get(run.id)
+        if interaction is not None:
+            await interaction.seal("run finished")
         await writer.flush()
         aborted = trace.abort_open(f"run {status}")
         if aborted and writer.assistant_id is not None:

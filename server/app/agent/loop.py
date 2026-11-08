@@ -275,6 +275,7 @@ async def stream_agent(
     cancel_event: threading.Event | None = None,
     max_seconds: float | None = None,
     usage_meter: RunUsageMeter | None = None,
+    interaction: Any | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Yield deltas from the configured agent executor.
 
@@ -298,6 +299,7 @@ async def stream_agent(
             cancel_event=cancel_event,
             max_seconds=max_seconds,
             usage_meter=usage_meter,
+            interaction=interaction,
         ):
             yield event
         return

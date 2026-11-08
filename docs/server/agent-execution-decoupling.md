@@ -136,7 +136,7 @@ queued ──▶ cancelled                 # 启动前取消，不经过 running
 
 ### 3.4 事件类型
 
-持久化事件只有七种，写入 `agent_run_events`：
+持久化事件共九种，写入 `agent_run_events`：
 
 | 事件 | 何时产生 | 是否带 `id: <seq>` |
 | --- | --- | --- |
@@ -144,6 +144,8 @@ queued ──▶ cancelled                 # 启动前取消，不经过 running
 | `message.delta` | 模型流式文本增量，按批次合并后写入 | 是 |
 | `tool.call` | 模型请求一次工具调用 | 是 |
 | `tool.result` | 工具调用结算（`completed`、`failed` 或 `aborted`） | 是 |
+| `user.question` | `ask_user` 工具向用户提问，run 进入等待 | 是 |
+| `user.answer` | 用户通过回答接口提交答案 | 是 |
 | `message.completed` | 助手消息成功落库 | 是 |
 | `memory.save` | 成功 run 的 `done` 之后写入研究记忆（`added`/`updated`/`skipped`/`failed`） | 是 |
 | `error` | 失败、取消或中断的终态错误 | 是 |
@@ -298,6 +300,41 @@ queued ──▶ cancelled                 # 启动前取消，不经过 running
 - 工具执行抛错时为 `failed`，`is_error` 为 `true`。
 - run 失败/取消/中断时，仍为 `running` 的工具会被补齐为 `aborted`，`content` 为 `{"error": "<reason>"}`（若原本没有内容）。
 - `duration_ms` 是服务端计时；远程执行器可自带该字段。
+
+#### `user.question`
+
+```json
+{
+  "run_id": "6f1c...",
+  "conversation_id": "0b2a...",
+  "seq": 6,
+  "message_id": "c9d3...",
+  "question_id": "q_4f2a...",
+  "question": "Which environment should I deploy to?",
+  "options": ["staging", "production"],
+  "allow_free_text": true,
+  "expires_at": "2026-11-08T10:04:00+00:00",
+  "timeout_seconds": 240
+}
+```
+
+`ask_user` 写下该事件后才开始等待；`message_id` 指向当前助手消息，Dashboard 用它把问题挂到正确的气泡。同一 run 同时只有一个待回答问题。
+
+#### `user.answer`
+
+```json
+{
+  "run_id": "6f1c...",
+  "conversation_id": "0b2a...",
+  "seq": 7,
+  "message_id": "c9d3...",
+  "question_id": "q_4f2a...",
+  "answer": "staging",
+  "answered_at": "2026-11-08T10:00:12+00:00"
+}
+```
+
+回答通过 `POST /agent/runs/{run_id}/answers` 提交。事件先落库再唤醒工具；超时或取消不会写 `user.answer`，工具返回 `{"error": "timeout" | "cancelled"}`。
 
 #### `message.completed`
 
@@ -571,7 +608,7 @@ CREATE TABLE agent_run_events (
     CONSTRAINT ck_agent_run_events_type CHECK (
         event_type IN (
             'message.delta', 'tool.call', 'tool.result', 'memory.recall', 'memory.save',
-            'message.completed', 'error'
+            'user.question', 'user.answer', 'message.completed', 'error'
         )
     )
 );
@@ -588,6 +625,7 @@ CREATE INDEX ix_agent_run_events_run_seq ON agent_run_events (run_id, seq);
 - `upgrade()`：建 `agent_runs`、部分唯一索引、两个普通索引；建 `agent_run_events`、唯一约束、CHECK、索引。
 - `downgrade()`：按依赖顺序删索引和表。
 - 迁移只加表，不改 `conversations` / `conversation_messages`，可安全先于应用发布执行。
+- 迁移 013（`013_add_user_input_events.py`）把 `user.question` / `user.answer` 加入同一个 CHECK；downgrade 会先删除这两类事件再恢复旧约束。
 
 ### 5.4 保留与清理
 

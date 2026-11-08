@@ -4,6 +4,7 @@ import { AlertCircle, RotateCcw } from "lucide-react";
 
 import { RunIdBadge } from "@/components/agent/run-id-badge";
 import { ToolTrace } from "@/components/agent/tool-trace";
+import { UserQuestionCard } from "@/components/agent/user-question";
 import { Button } from "@/components/ui/button";
 import { cn, formatTokens } from "@/lib/utils";
 import type { ChatMessageView } from "@/hooks/use-agent-chat";
@@ -118,9 +119,14 @@ function TypingDots() {
 export function MessageBubble({
   message,
   onRetry,
+  onAnswerQuestion,
 }: {
   message: ChatMessageView;
   onRetry?: (message: ChatMessageView) => void;
+  onAnswerQuestion?: (
+    questionId: string,
+    answer: string,
+  ) => Promise<void> | void;
 }) {
   const { t } = useI18n();
   const isUser = message.role === "user";
@@ -146,6 +152,13 @@ export function MessageBubble({
     !isReconnecting &&
     (isInterrupted || isFailed || isCancelled) &&
     typeof onRetry === "function";
+  const hasPendingQuestion =
+    !isUser &&
+    (message.questions?.some(
+      (question) =>
+        question.status === "pending" || question.status === "submitting",
+    ) ??
+      false);
 
   return (
     <div
@@ -164,13 +177,20 @@ export function MessageBubble({
       >
         {message.content ? (
           <span>{message.content}</span>
-        ) : message.streaming && !isReconnecting ? (
+        ) : message.streaming && !isReconnecting && !hasPendingQuestion ? (
           <TypingDots />
         ) : null}
         {message.streaming && !isReconnecting && message.content && (
           <span className="ml-0.5 inline-block h-4 w-[2px] translate-y-0.5 animate-pulse bg-onSurface-default-primary align-middle" />
         )}
       </div>
+
+      {!isUser && message.questions?.length && onAnswerQuestion ? (
+        <UserQuestionCard
+          questions={message.questions}
+          onAnswer={onAnswerQuestion}
+        />
+      ) : null}
 
       {!isUser && message.toolTrace?.length ? (
         <ToolTrace entries={message.toolTrace} />

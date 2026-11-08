@@ -30,6 +30,7 @@ from app.agent.runner import (
     serialize_run,
 )
 from app.agent.schemas import (
+    AgentAnswerRequest,
     AgentInvokeRequest,
     AgentInvokeResponse,
     ConversationMessageOut,
@@ -175,6 +176,9 @@ def _create_background_turn(body: AgentInvokeRequest, user: User, history_limit:
             "run_id": body.run_id,
             "client_run_id": body.client_run_id,
             "metadata": body.metadata,
+            # Background runs have an event writer, so they can ask the user.
+            # The legacy request-bound path never sets this flag.
+            "user_input": True,
         }
         run = AgentRun(
             conversation_id=conversation_id,
@@ -707,6 +711,98 @@ async def cancel_agent_run(
         status=run.status,
         cancel_requested_at=run.cancel_requested_at,
     )
+
+
+@router.post("/runs/{run_id}/answers", summary="Answer a question asked by an agent run")
+async def answer_agent_run(
+    run_id: str,
+    body: AgentAnswerRequest,
+    request: Request,
+    user: User = Depends(require_auth),
+):
+    """Deliver one user answer to a run blocked in ``ask_user``."""
+
+    request_id = request_id_var.get()
+    try:
+        parsed_id = uuid.UUID(run_id)
+    except (TypeError, ValueError):
+        return JSONResponse(
+            status_code=404,
+            content={
+                "detail": "Agent run not found.",
+                "code": "agent_run_not_found",
+                "run_id": run_id,
+                "request_id": request_id,
+            },
+        )
+
+    manager = _run_manager(request)
+    run = await asyncio.to_thread(manager.repo.get_run, parsed_id, user.id)
+    if run is None:
+        return JSONResponse(
+            status_code=404,
+            content=_error_payload(
+                "agent_run_not_found",
+                "Agent run not found.",
+                request_id,
+                run_id=run_id,
+            ),
+        )
+    if run.status != "running":
+        return JSONResponse(
+            status_code=409,
+            content=_error_payload(
+                "agent_run_not_running",
+                "This agent run is no longer running.",
+                request_id,
+                run.conversation_id,
+                run_id=str(run.id),
+            ),
+        )
+
+    try:
+        accepted, code = await manager.answer_question(parsed_id, body.question_id, body.answer)
+    except Exception:  # pragma: no cover - defensive
+        logger.exception("Failed to deliver answer for run %s", run_id)
+        accepted, code = False, "run_not_accepting_input"
+    if not accepted:
+        if code == "question_already_answered":
+            return JSONResponse(
+                status_code=409,
+                content=_error_payload(
+                    "agent_question_answered",
+                    "This question has already been answered.",
+                    request_id,
+                    run.conversation_id,
+                    run_id=str(run.id),
+                    question_id=body.question_id,
+                ),
+            )
+        if code in {"run_not_accepting_input", "question_not_pending"}:
+            return JSONResponse(
+                status_code=404,
+                content=_error_payload(
+                    "agent_question_not_found",
+                    "This question is no longer waiting for an answer.",
+                    request_id,
+                    run.conversation_id,
+                    run_id=str(run.id),
+                    question_id=body.question_id,
+                ),
+            )
+        return JSONResponse(
+            status_code=409,
+            content=_error_payload(
+                "agent_question_unavailable",
+                "The question is no longer available.",
+                request_id,
+                run.conversation_id,
+                run_id=str(run.id),
+                question_id=body.question_id,
+            ),
+        )
+
+    return {"run_id": str(run.id), "question_id": body.question_id, "accepted": True}
 
 
 # ---------------------------------------------------------------------------

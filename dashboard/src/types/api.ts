@@ -214,6 +214,27 @@ export interface SubagentResult {
   error?: string | null;
 }
 
+export type UserQuestionStatus =
+  | "pending"
+  | "submitting"
+  | "answered"
+  | "expired";
+
+/**
+ * One `ask_user` question. The server persists `user.question` / `user.answer`
+ * events; the dashboard reconstructs this state from the SSE replay.
+ */
+export interface UserQuestion {
+  question_id: string;
+  question: string;
+  options: string[];
+  allow_free_text: boolean;
+  expires_at?: string | null;
+  answer?: string | null;
+  answered_at?: string | null;
+  status?: UserQuestionStatus;
+}
+
 export interface Conversation {
   id: string;
   title: string;

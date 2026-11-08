@@ -41,9 +41,11 @@ from app.agent.events import (
     AgentToolResult,
     AgentUsageUpdate,
 )
+from app.agent.interactions import RunInteraction
 from app.agent.research_memory import ResearchRecall, recall_research
 from app.agent.subagents import SUBAGENT_GUIDANCE, build_scope_validator, build_subagent_specs
 from app.agent.usage import RunUsageMeter, meter_context, normalize_usage
+from app.agent.user_input import USER_INPUT_GUIDANCE, build_user_input_tool
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +176,8 @@ class LocalAgentConfig:
     context_compression: str = "summary"
     tool_result_max_chars: Optional[int] = None
     tool_concurrency: int = 1
+    user_input_enabled: bool = True
+    user_input_timeout_seconds: int = 240
     fact_ledger: bool = True
     fact_ledger_max_chars: int = 2_500
     step_budget_notice: bool = True
@@ -298,6 +302,8 @@ def load_local_config() -> Optional[LocalAgentConfig]:
         context_compression=_env_compression_mode("AGENT_CONTEXT_COMPRESSION"),
         tool_result_max_chars=_env_budget("AGENT_TOOL_RESULT_MAX_CHARS", 16_000),
         tool_concurrency=max(1, min(8, _env_int("AGENT_TOOL_CONCURRENCY", 1))),
+        user_input_enabled=_env_flag("AGENT_USER_INPUT_ENABLED", True),
+        user_input_timeout_seconds=max(5, min(600, _env_int("AGENT_USER_INPUT_TIMEOUT_SECONDS", 240))),
         fact_ledger=_env_flag("AGENT_FACT_LEDGER", True),
         fact_ledger_max_chars=max(256, _env_int("AGENT_FACT_LEDGER_MAX_CHARS", 2_500)),
         step_budget_notice=_env_flag("AGENT_STEP_BUDGET_NOTICE", True),
@@ -848,6 +854,9 @@ def build_runtime(
     payload: Dict[str, Any],
     *,
     on_event: Optional[Callable[[Any], None]] = None,
+    interaction: Optional[RunInteraction] = None,
+    cancel_event: Optional[threading.Event] = None,
+    max_seconds: Optional[float] = None,
 ):
     model_config = sdk.ModelConfig(
         model=config.model,
@@ -894,6 +903,9 @@ def build_runtime(
             config.subagent_allow_absolute_paths,
             dev_config.workspace if dev_config is not None else None,
         )
+    user_input_enabled = interaction is not None and bool(payload.get("user_input")) and config.user_input_enabled
+    if user_input_enabled:
+        system_prompt = f"{system_prompt}\n\n{USER_INPUT_GUIDANCE}"
     agent_config = sdk.AgentConfig(
         name="bokaclaw-agent",
         system_prompt=system_prompt,
@@ -934,6 +946,17 @@ def build_runtime(
         config.progress_stop_after,
     )
     tools = [*_memory_tools(sdk, payload.get("user_id")), *build_dev_tools(sdk, dev_config)]
+    if user_input_enabled:
+        run_limit = float(max_seconds if max_seconds is not None else config.max_seconds)
+        default_timeout = max(5.0, min(float(config.user_input_timeout_seconds), run_limit - 15.0))
+        tools.append(
+            build_user_input_tool(
+                sdk,
+                interaction,
+                cancel_event=cancel_event,
+                default_timeout_seconds=default_timeout,
+            )
+        )
     return sdk.AgentRuntime(
         agent_config,
         tools=tools,
@@ -1001,6 +1024,7 @@ async def stream_local_agent(
     cancel_event: threading.Event | None = None,
     max_seconds: float | None = None,
     usage_meter: RunUsageMeter | None = None,
+    interaction: RunInteraction | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Run one ReAct turn, streaming the SDK's text deltas as they arrive.
 
@@ -1091,7 +1115,15 @@ async def stream_local_agent(
             last_prompt_tokens["value"] = tokens
         _bridge_event(event, put, model=getattr(config, "model", None))
 
-    runtime = build_runtime(sdk, config, payload, on_event=on_event)
+    runtime = build_runtime(
+        sdk,
+        config,
+        payload,
+        on_event=on_event,
+        interaction=interaction,
+        cancel_event=cancel_event,
+        max_seconds=max_seconds,
+    )
 
     def worker() -> None:
         # A raw ``threading.Thread`` does not inherit context variables, so the

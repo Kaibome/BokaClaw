@@ -605,6 +605,54 @@ def test_build_runtime_omits_the_compression_model_when_unset():
     assert runtime.config.kwargs["compression_model"] is None
 
 
+def test_build_runtime_registers_ask_user_for_background_runs():
+    sdk = FakeSDK()
+    runtime = agent_runtime.build_runtime(
+        sdk,
+        _config(),
+        _payload(user_input=True),
+        interaction=object(),
+        max_seconds=300,
+    )
+
+    assert "ask_user" in [tool.name for tool in runtime.tools]
+    assert "ask_user" in runtime.config.kwargs["system_prompt"]
+
+
+def test_build_runtime_omits_ask_user_without_an_interaction():
+    sdk = FakeSDK()
+    runtime = agent_runtime.build_runtime(sdk, _config(), _payload(user_input=True))
+
+    assert "ask_user" not in [tool.name for tool in runtime.tools]
+    assert "ask_user" not in runtime.config.kwargs["system_prompt"]
+
+
+def test_build_runtime_omits_ask_user_for_legacy_payloads():
+    sdk = FakeSDK()
+    runtime = agent_runtime.build_runtime(
+        sdk,
+        _config(),
+        _payload(),
+        interaction=object(),
+        max_seconds=300,
+    )
+
+    assert "ask_user" not in [tool.name for tool in runtime.tools]
+
+
+def test_build_runtime_respects_user_input_disabled():
+    sdk = FakeSDK()
+    runtime = agent_runtime.build_runtime(
+        sdk,
+        _config(user_input_enabled=False),
+        _payload(user_input=True),
+        interaction=object(),
+        max_seconds=300,
+    )
+
+    assert "ask_user" not in [tool.name for tool in runtime.tools]
+
+
 def test_fact_ledger_and_step_notice_can_be_disabled(monkeypatch):
     monkeypatch.setattr(agent_runtime, "_current_llm_config", lambda: {})
     monkeypatch.setenv("AGENT_MODEL", "m")

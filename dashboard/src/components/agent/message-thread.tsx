@@ -16,6 +16,10 @@ interface MessageThreadProps {
   isLoading: boolean;
   error: string | null;
   onRetry?: (message: ChatMessageView) => void;
+  onAnswerQuestion?: (
+    questionId: string,
+    answer: string,
+  ) => Promise<void> | void;
 }
 
 function LoadingRows() {
@@ -34,6 +38,7 @@ export function MessageThread({
   isLoading,
   error,
   onRetry,
+  onAnswerQuestion,
 }: MessageThreadProps) {
   const { t } = useI18n();
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -88,6 +93,7 @@ export function MessageThread({
               key={message.id}
               message={message}
               onRetry={onRetry}
+              onAnswerQuestion={onAnswerQuestion}
             />
           ))
         )}
