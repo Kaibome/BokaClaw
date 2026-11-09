@@ -4,7 +4,7 @@
 
 BokaClaw 是一个自托管的 AI Agent 工作台：工作区 Markdown 是记忆的权威存储，Postgres 只承载可重建的检索索引与业务数据。Next.js 控制台负责交互与运营，FastAPI 服务端负责鉴权、会话、执行与观测，`bokaclaw-agent` 负责可嵌入的 ReAct 循环。
 
-项目当前处于快速演进阶段，接口与配置项仍可能调整；对外发布的 SDK 为 `bokaclaw-agent`。
+项目当前处于快速演进阶段，接口与配置项仍可能调整；可独立安装的 SDK 为 `bokaclaw-agent`。
 
 ---
 
@@ -12,7 +12,7 @@ BokaClaw 是一个自托管的 AI Agent 工作台：工作区 Markdown 是记忆
 
 | 模块 | 能力 |
 |---|---|
-| **持久记忆** | 工作区 Markdown（`USER.md` / `MEMORY.md` / 每日情节）为权威存储；Postgres 全文+向量索引可重建；支持 `user_id` 作用域、来源标记、历史审计与自动情节捕获 |
+| **持久记忆** | 工作区 Markdown（`USER.md` / `MEMORY.md` / 每日情节）为唯一权威存储；Postgres 全文+向量索引可重建；每用户隔离，支持信任级别、历史审计与轮末自动情节捕获 |
 | **Agent 运行时** | `bokaclaw-agent`：OpenAI 兼容模型的 ReAct 循环，支持 `run()`、`stream()`、`arun()`、协作式取消、同步/异步工具 |
 | **多轮会话** | 服务端持久化会话与消息；SSE 增量输出；断线重连、事件回放与 `after_seq` 游标 |
 | **工具生态** | 文件读写、Glob/Grep、网页搜索与抓取、PowerShell/Bash、PPTX 生成；工具结果按预算回填模型 |
@@ -54,6 +54,42 @@ flowchart LR
 
 ---
 
+## 记忆系统
+
+工作区 Markdown 是记忆的唯一权威来源；Postgres 中的 `memory_index_*` 与 `memory_history` 只是可随时重建的检索索引和审计记录。
+
+```text
+<AGENT_MEMORY_ROOT>/users/<user_id>/
+  USER.md                # 身份与稳定偏好，常驻注入
+  MEMORY.md              # 显式保存的长期事实
+  memory/YYYY-MM-DD.md   # 轮末情节与研究结论
+```
+
+- **轮末捕获**：仅在 run `completed` 后追加一条经过噪声过滤与密钥脱敏的原始情节，不调用模型。已使用记忆写工具、子代理、cron/heartbeat 等非交互轮次会跳过。
+- **显式写入**：`save_memory` 写入 `MEMORY.md`，`kind=identity` 写入 `USER.md`；`update_memory` / `delete_memory` 可通过 `AGENT_MEMORY_REQUIRE_APPROVAL=true` 走人工确认。
+- **召回**：每轮加载小画像并执行混合检索（语义 + 全文 + 重要度 + 时间衰减），结果作为 user 角色的 `<recalled-memories>` 块注入，绝不写入 system prompt；`trust="untrusted"` 内容永不自动注入。
+- **一致性**：先原子写文件，再更新索引；两者之间失败会把用户标记为 dirty，启动对账或手动 reconcile 会修复。
+- **每用户隔离**：目录为 `0o700`、文件为 `0o600`；`AGENT_MEMORY_ROOT` 不得位于 `AGENT_WORKSPACE_ROOT` 内，也不会挂载进 executor 容器。
+
+维护命令（Compose 栈）：
+
+```bash
+docker compose exec server python -m app.memory.cli reconcile --all
+docker compose exec server python -m app.memory.cli reindex --user <user_id>
+docker compose exec server python -m app.memory.cli prune --retention-days 180
+```
+
+迁移旧 Mem0 数据：
+
+```bash
+docker compose exec server python scripts/migrate_mem0_to_workspace_memory.py --dry-run
+docker compose exec server python scripts/migrate_mem0_to_workspace_memory.py --verify
+```
+
+迁移脚本保留旧 ID，可重复执行；写前会备份旧行与历史库。详见 [`docs/memory/migration.mdx`](docs/memory/migration.mdx)。
+
+---
+
 ## 仓库结构
 
 | 目录 | 说明 |
@@ -61,9 +97,11 @@ flowchart LR
 | `server/` | FastAPI 服务端：鉴权、记忆 API、Agent 执行、会话、span、评测、Docker 编排 |
 | `dashboard/` | Next.js 15 控制台：Agent 对话、Trace、Eval、Memories、Requests、Entities、配置与密钥 |
 | `agent-loop/` | 独立 Python SDK `bokaclaw-agent`：ReAct 循环、工具、子代理、上下文压缩、会话存储 |
-| `tests/` | 服务端 Agent、鉴权、Trace、评测等产品测试 |
+| `tests/` | 跨包产品测试：Agent、鉴权、记忆 API、Trace、评测 |
+| `server/app/memory/` | 工作区 Markdown 存储、派生索引、召回、capture、迁移与 reconcile |
 | `server/app/eval/` | DeepEval 评测适配、指标、golden 数据与后台 worker |
-| `docs/` | 架构与设计文档（记忆格式、Agent 运行时、Dashboard 契约、评测等） |
+| `docs/` | 架构与设计文档；`docs/memory/` 覆盖记忆格式、运维与迁移 |
+| `.github/` | CI Gate 与三条产品流水线；详见 [`.github/AGENTS.md`](.github/AGENTS.md) |
 | `deepeval/` | DeepEval 4.3.3 源码参考副本，供评测实现对照 |
 
 ---
@@ -72,10 +110,10 @@ flowchart LR
 
 ### 环境要求
 
-- Docker 24+ 与 Docker Compose v2
-- Python 3.10+（运行 SDK、测试与评测）
-- Node.js 18+、pnpm 10+（本地开发 Dashboard）
-- 可选：`hatch`（管理 Python 环境）
+- **运行整套服务**：Docker 24+ 与 Docker Compose v2
+- **开发/测试 Python 包**：Python 3.10+（server 以 Docker 为唯一运行方式；SDK 与评测可直接用 Python）
+- **开发 Dashboard**：Node.js 20+、pnpm 10+
+- 可选：`hatch`（管理 `agent-loop` 的 Python 环境）
 
 ### 一键启动（推荐）
 
@@ -148,7 +186,7 @@ make up
 RECREATE=1 .claude/skills/bokaclaw-docker-stack/scripts/start-stack.sh
 ```
 
-该栈会把 `server/.env` 中的 `AGENT_EXECUTOR_URL` 指向 `http://bokaclaw-executor:8099`。
+该栈会把 `server/.env` 中的 `AGENT_EXECUTOR_URL` 指向 `http://bokaclaw-executor:8099`，并把记忆工作区挂载为独立 volume `mem0-local-memory`（只挂载到 server，不挂载到 executor）。注意此脚本使用端口 **8000**（Compose 栈为 8888）。
 
 ### 单容器部署
 
@@ -162,6 +200,7 @@ docker run -d --name bokaclaw \
   -e JWT_SECRET="$(openssl rand -base64 48)" \
   -e OPENAI_API_KEY='<your-key>' \
   -v bokaclaw-data:/var/lib/postgresql/data \
+  -v bokaclaw-memory:/app/memory \
   bokaclaw-all-in-one:test
 ```
 
@@ -192,13 +231,20 @@ make prune-logs              # 清理 30 天前的请求日志
 | `JWT_SECRET` | 启用鉴权时必填，建议 `openssl rand -base64 48` |
 | `OPENAI_API_KEY` | 默认 LLM 与 Embedding 的密钥 |
 | `MEMORY_BACKEND` | 固定为 `markdown`（工作区 Markdown 权威存储） |
-| `AGENT_MEMORY_ROOT` | 记忆工作区根目录，默认 `/app/memory` |
+| `AGENT_MEMORY_ROOT` | 记忆工作区根目录，默认 `/app/memory`，必须独立于 `AGENT_WORKSPACE_ROOT` |
 | `AGENT_MEMORY_RECALL` | 是否启用每轮记忆召回，默认 `true` |
+| `AGENT_MEMORY_RECALL_TOKENS` | 查询召回 Token 预算，默认 `1500` |
+| `AGENT_MEMORY_RECALL_MAX` | 查询召回最大条数，默认 `15` |
+| `AGENT_MEMORY_RECALL_THRESHOLD` | 最低语义相似度，默认 `0.4` |
 | `AGENT_MEMORY_CAPTURE` | 是否在轮末追加情节，默认 `true` |
+| `AGENT_MEMORY_EPISODIC_RETENTION_DAYS` | 情节保留天数，`prune` 使用，默认 `180` |
+| `AGENT_MEMORY_RECONCILE_ON_START` | 启动时对账 dirty 工作区，默认 `true` |
+| `AGENT_MEMORY_RECONCILE_INTERVAL_SECONDS` | 后台对账间隔，默认 `300` |
+| `AGENT_MEMORY_REQUIRE_APPROVAL` | 更新/删除记忆是否走人工确认，默认 `false` |
 | `MEMORY_DEFAULT_LLM_PROVIDER` | `openai` / `anthropic` / `gemini` / `deepseek` |
 | `MEMORY_DEFAULT_LLM_MODEL` | 默认 `gpt-5-mini` |
 | `MEMORY_DEFAULT_EMBEDDER_PROVIDER` | `openai` / `gemini` / `fastembed` |
-| `MEMORY_DEFAULT_EMBEDDER_MODEL` | 默认 `text-embedding-3-small` |
+| `MEMORY_DEFAULT_EMBEDDER_MODEL` | 默认 `text-embedding-3-small`；向量统一归一化并补齐到 `halfvec(3072)` |
 | `AUTH_DISABLED` | 仅限本地开发，生产环境保持 `false` |
 | `BOKACLAW_TELEMETRY` | 匿名遥测开关，`false` 可退出 |
 
@@ -242,7 +288,7 @@ make prune-logs              # 清理 30 天前的请求日志
 | **API Keys** | 创建、标注、吊销用户级 API Key |
 | **Settings** | 账号资料与密码 |
 
-侧边栏中的 Categories、Webhooks、Analytics、Export 标记为 `PRO`，属于云功能占位，当前自托管栈不提供对应后端能力。
+侧边栏中的 Categories、Webhooks、Analytics、Export 仅显示占位页，当前自托管栈不提供对应后端能力。
 
 ---
 
@@ -254,9 +300,9 @@ make prune-logs              # 清理 30 天前的请求日志
 |---|---|
 | 鉴权 | `POST /auth/register`、`POST /auth/login`、`POST /auth/refresh`、`GET/PATCH /auth/me`、`POST /auth/change-password`、`GET /auth/setup-status` |
 | API Key | `GET/POST /api-keys`、`DELETE /api-keys/{key_id}` |
-| 记忆 | `POST/GET /memories`、`GET/PUT/DELETE /memories/{id}`、`GET /memories/{id}/history`、`POST /search`、`POST /reset` |
+| 记忆 | `POST/GET /memories`、`GET/PUT/DELETE /memories/{id}`、`GET /memories/{id}/history`、`POST /search`、`POST /reset`；非管理员只能访问自己的 `user_id` 作用域 |
 | 实体 | `GET /entities`、`DELETE /entities/{type}/{id}` |
-| Agent | `POST /agent`、`GET /agent/runs/{id}`、`GET /agent/runs/{id}/events`、`POST /agent/runs/{id}/cancel` |
+| Agent | `POST /agent`、`GET /agent/runs/{id}`、`GET /agent/runs/{id}/events`、`POST /agent/runs/{id}/cancel`、`POST /agent/runs/{id}/answers` |
 | 会话 | `GET/POST /conversations`、`GET/PUT/DELETE /conversations/{id}`、`GET /conversations/{id}/messages` |
 | 观测 | `GET /requests`、`GET /traces`、`GET /traces/{span_pk}` |
 | 评测 | `POST/GET /evals`、`GET /evals/{id}`、`POST /evals/{id}/cancel`、`GET/POST /evals/goldens`、`GET/PUT/DELETE /evals/goldens/{case_id}` |
@@ -298,11 +344,11 @@ meta → memory.recall? → (tool.call → tool.result)*
 
 ## Agent Runtime SDK
 
-`agent-loop/` 可独立安装和嵌入任意 Python 服务：
+`agent-loop/` 可独立安装和嵌入任意 Python 服务。当前尚未发布到 PyPI，从仓库安装：
 
 ```bash
-pip install bokaclaw-agent                # 仅内存会话
-pip install "bokaclaw-agent[postgres]"    # 增加 psycopg3 + 连接池
+pip install ./agent-loop                # 仅内存会话
+pip install "./agent-loop[postgres]"    # 增加 psycopg3 + 连接池
 ```
 
 ```python
@@ -378,10 +424,17 @@ docker compose logs -f server
 docker compose exec server alembic upgrade head
 ```
 
-测试（在具备服务端依赖的 Python 环境中，从仓库根目录运行）：
+测试需要服务端依赖与一个可用的 Postgres/pgvector。CI 会启动 `pgvector/pgvector:pg17`、创建 `mem0_app` 并执行迁移；本地等价命令：
 
 ```bash
-pytest tests/ server/tests/
+make server-test        # pytest server/tests + tests
+make lint               # ruff check server / agent-loop / tests
+```
+
+只跑记忆后端：
+
+```bash
+pytest server/tests/test_memory_*.py -q
 ```
 
 ### Agent SDK
@@ -411,13 +464,29 @@ pnpm lint         # prettier --check .
 
 仅使用 pnpm；API 调用统一走 `src/utils/api.ts` 与 `src/utils/api-endpoints.ts`，不要把 token 写入 `localStorage`。
 
+### CI
+
+`.github/workflows/ci-gate.yml` 是 PR 的唯一必需检查，按改动路径调用三条产品流水线：
+
+| 流水线 | 内容 |
+|---|---|
+| Server | Python 3.12 + pgvector service + Alembic；Ruff + pytest |
+| Agent Runtime | Python 3.10 / 3.12 矩阵；Ruff + pytest |
+| Dashboard | pnpm + Prettier + `tsc` + `next build` |
+
+另有 `docs-llms-txt-check.yml` 校验 `docs/llms.txt` 覆盖，以及 PR Gate、Vouch、Labeler、Stale 等仓库治理工作流。详见 [`.github/AGENTS.md`](.github/AGENTS.md)。
+
 ### 评测
 
-评测代码位于 `server/app/eval/`，独立依赖见 `server/eval-requirements.txt`。根目录的 `eval` hatch 环境把仓库内 `deepeval` 作为源码依赖：
+评测代码位于 `server/app/eval/`，依赖与 server 分开，`deepeval` 使用仓库内源码：
 
 ```bash
-hatch run eval:test
+pip install -r server/eval-requirements.txt
+pip install ./deepeval
+pytest server/tests/test_eval_*.py tests/agent_eval -q
 ```
+
+评测 worker 镜像为 `server/eval.Dockerfile`；运行中的栈会以 `bokaclaw-eval` 容器消费 DB 队列。
 
 ---
 
@@ -425,6 +494,8 @@ hatch run eval:test
 
 - **默认开启鉴权**：Dashboard 使用 JWT，程序化访问使用 `X-API-Key`；`AUTH_DISABLED=true` 只用于本地开发。
 - **工作区约束**：所有文件工具通过 `_resolve()` 解析路径，拒绝 `..` 与符号链接逃逸。
+- **记忆隔离**：每个用户一个 `AGENT_MEMORY_ROOT/users/<user_id>/` 工作区，目录 `0o700`、文件 `0o600`；通用 `Write` / `Edit` 工具不能修改记忆文件，只有记忆工具可以。
+- **信任级别**：`owner / agent / tool / untrusted / system` 由代码写入，不解析 Markdown 文本；`untrusted` 可存储、可搜索，但永不自动注入模型上下文。
 - **Shell 隔离**：executor 容器只读根文件系统、非 root、丢弃全部 capability、仅内网可达、仅挂载工作区；子进程使用净化后的环境变量。
 - **SSRF 防护**：`WebFetch` / `WebSearch` 默认禁止访问 localhost 与私有网段，可通过 `AGENT_WEB_FETCH_ALLOW_PRIVATE` 显式放开。
 - **敏感信息脱敏**：span 写入前按规则过滤 `sk-*`、`Bearer`、`api_key`、`password`、`token` 等字段。
@@ -438,6 +509,10 @@ hatch run eval:test
 
 | 主题 | 文档 |
 |---|---|
+| 记忆系统总览 | [`docs/memory/overview.mdx`](docs/memory/overview.mdx) |
+| 记忆 Markdown 格式 | [`docs/memory/markdown-format.mdx`](docs/memory/markdown-format.mdx) |
+| 记忆运维与 REST/工具 | [`docs/memory/operations.mdx`](docs/memory/operations.mdx) |
+| 旧 Mem0 数据迁移 | [`docs/memory/migration.mdx`](docs/memory/migration.mdx) |
 | Agent SDK 使用与 API | [`agent-loop/README.md`](agent-loop/README.md) |
 | Agent SDK 架构与分层 | [`docs/agent-loop/architecture.md`](docs/agent-loop/architecture.md) |
 | 运行时行为与终止条件 | [`docs/agent-loop/runtime-behavior.md`](docs/agent-loop/runtime-behavior.md) |
