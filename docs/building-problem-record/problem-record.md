@@ -856,6 +856,25 @@
 
 ---
 
+## P-30 MCP SDK 版本与固定的 pydantic 版本冲突
+
+- **状态**：已解决
+- **发现时间**：2026-11-09
+- **解决时间**：2026-11-09
+- **场景**：为 `server/` 接入远程 MCP（Streamable HTTP），评估官方 `mcp` Python SDK。
+- **现象**：最新 `mcp 2.3.0` 更换了传输 API 并引入 `httpx2`；`mcp 1.20+` 要求 `pydantic>=2.11`，而 `server/requirements.txt` 固定 `pydantic[email]==2.10.4`。直接采用新版本会触发依赖冲突或被迫升级 pydantic 与 FastAPI 组合。
+- **证据**：PyPI `mcp` 元数据（2.3.0 / 1.20.0 / 1.12.0 的 `requires_dist`）；`server/requirements.txt` 的 pydantic 固定值。
+- **根因**：MCP SDK 的 pydantic 下限随版本上移，而项目为 FastAPI/鉴权模型兼容固定了 2.10.4。
+- **解决措施**：
+  1. 固定 `mcp==1.12.0`（要求 `pydantic>=2.8`、`httpx>=0.27`），与现有依赖兼容；
+  2. 把 SDK 隔离在 `server/app/agent/mcp/client.py` 一个模块，只使用 `streamablehttp_client` 与 `ClientSession` 的稳定接口；
+  3. 在 `requirements.txt` 注释中说明：升级 MCP 需同步提升 pydantic 下限；
+  4. 用 `httpx_client_factory` 关闭重定向，补齐 SSRF 防护。
+- **解决后效果**：`bokaclaw-server:test` 构建与 `server-ok` 冒烟通过；容器内 `mcp 1.12.0`、适配器和 `httpx.AsyncClient(follow_redirects=False)` 导入验证通过；MCP 相关 48 个单测通过。
+- **可复用结论**：引入协议 SDK 前先核对它与项目固定版本的传递依赖下限，优先选择能满足现有 pin 的版本；把 SDK 收敛到单一适配器模块，后续升级只影响一层。
+
+---
+
 ## 变更记录
 
 | 日期 | 变更 |
@@ -900,4 +919,5 @@
 | 2026-11-09 | 追加并修复 P-27：启动/周期 reconcile 接入 lifespan；`ensure_fresh` 按 mtime/size 检测外部编辑并按需对账；索引写失败标记 dirty；runner 把 `memory_injected` 传给轮末 capture（发现时间 2026-11-09，解决时间 2026-11-09） |
 | 2026-11-09 | 追加并修复 P-28：轮末不再保存 research 结论（WebSearch/WebFetch 成本低，长期留存增加管理成本），`turn_memory` 只写 episode，`research_memory.py` 删除写入端、保留旧结论召回；新增轮末单测并更新文档（发现时间 2026-11-09，解决时间 2026-11-09） |
 | 2026-11-09 | 追加并修复 P-29：Agent 对话窗口助手消息改为 `markdown-content.tsx` 轻量 Markdown 渲染（GFM 表格、标题、代码块、列表、引用、强调/链接），流式半截表格容错；用户消息保持纯文本；交互设计文档同步更新（发现时间 2026-11-09，解决时间 2026-11-09） |
+| 2026-11-09 | 追加并修复 P-30：MCP SDK 1.20+ 要求 pydantic>=2.11，与项目固定的 2.10.4 冲突；固定 `mcp==1.12.0` 并把 SDK 隔离在 `server/app/agent/mcp/client.py`，server 镜像构建与容器内导入验证通过（发现时间 2026-11-09，解决时间 2026-11-09） |
 | 2026-11-09 | 追加 P-26 并完成记忆架构迁移：工作区 Markdown（`USER.md` / `MEMORY.md` / `memory/YYYY-MM-DD.md`）成为唯一权威存储，Postgres 只保留可重建的 `memory_index_*` / `memory_history` 派生索引（迁移 014）；一次性导入旧 Mem0 行与 SQLite history；agent 暴露五个记忆工具，轮末无 LLM capture，召回以 user 角色 `<recalled-memories>` 注入；移除 `mem0ai` 依赖、CLI/integrations/旧测试与文档，dashboard 去除 Mem0 云版推广与品牌链接；真实栈验证 reconcile / search / capture / recall，512 + 194 tests 通过（发现时间 2026-11-09，解决时间 2026-11-09） |

@@ -356,3 +356,14 @@ def test_delete_slide_renumbers_and_protects_the_last_slide(tmp_path):
     tools["PptxDeleteSlide"]("deck.pptx", 1)
     with pytest.raises(ValueError, match="only slide"):
         tools["PptxDeleteSlide"]("deck.pptx", 1)
+
+
+def test_pptx_tools_cannot_write_into_workspace_skills(tmp_path):
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    tools = _tools(tmp_path, workspace_skills_dir=skills.resolve())
+
+    with pytest.raises(ValueError, match="read-only workspace skills"):
+        tools["PptxBuild"]("skills/deck.pptx", _deck())
+
+    assert not (skills / "deck.pptx").exists()

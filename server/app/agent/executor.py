@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 
@@ -97,6 +97,33 @@ def run_command(
         "shell": shell,
     }
     return _post(config, "/exec", payload, timeout=request_timeout)
+
+
+def run_skill(
+    config: ExecutorConfig,
+    *,
+    skill: str,
+    entrypoint: str,
+    args: str,
+    files: List[Dict[str, str]],
+    timeout_seconds: int,
+) -> Dict[str, Any]:
+    """Run one skill script inside the sandboxed executor.
+
+    ``files`` is a bounded bundle of ``{"path": ..., "content_b64": ...}``
+    entries built by the server. The executor unpacks it into a temporary
+    directory, runs the entry point, and removes the directory afterwards.
+    """
+
+    payload = {
+        "skill": skill,
+        "entrypoint": entrypoint,
+        "args": args,
+        "files": files,
+        "timeout_seconds": int(timeout_seconds),
+    }
+    request_timeout = max(config.timeout, float(timeout_seconds) + 30.0)
+    return _post(config, "/skills/run", payload, timeout=request_timeout)
 
 
 def monitor_action(

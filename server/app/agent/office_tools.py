@@ -876,7 +876,7 @@ def build_office_tools(sdk: Any, config: DevToolConfig) -> List[Any]:
                 are RRGGBB with or without a leading '#'.
             overwrite: Replace an existing file instead of refusing the write.
         """
-        path = _resolve(config, file_path, must_exist=False)
+        path = _resolve(config, file_path, must_exist=False, for_write=True)
         if path.suffix.lower() != ".pptx":
             raise ValueError("file_path must end with .pptx")
         if path.exists() and not overwrite:
@@ -908,7 +908,7 @@ def build_office_tools(sdk: Any, config: DevToolConfig) -> List[Any]:
             index: 1-based slide number, matching the page numbers in the deck.
             slide: A slide object with the same shape PptxBuild accepts.
         """
-        path = _resolve(config, file_path, must_exist=True)
+        path = _resolve(config, file_path, must_exist=True, for_write=True)
         if not path.is_file():
             raise ValueError(f"{file_path!r} is not a file")
         presentation = _open_presentation(path)
@@ -941,7 +941,7 @@ def build_office_tools(sdk: Any, config: DevToolConfig) -> List[Any]:
             slide: A slide object with the same shape PptxBuild accepts.
             index: 1-based position to insert at; 0 appends after the last slide.
         """
-        path = _resolve(config, file_path, must_exist=True)
+        path = _resolve(config, file_path, must_exist=True, for_write=True)
         if not path.is_file():
             raise ValueError(f"{file_path!r} is not a file")
         presentation = _open_presentation(path)
@@ -984,7 +984,7 @@ def build_office_tools(sdk: Any, config: DevToolConfig) -> List[Any]:
             file_path: Existing .pptx path relative to the workspace.
             index: 1-based slide number to delete. The last remaining slide cannot be deleted.
         """
-        path = _resolve(config, file_path, must_exist=True)
+        path = _resolve(config, file_path, must_exist=True, for_write=True)
         if not path.is_file():
             raise ValueError(f"{file_path!r} is not a file")
         presentation = _open_presentation(path)

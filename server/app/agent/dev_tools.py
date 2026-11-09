@@ -105,6 +105,8 @@ class DevToolConfig:
     web_search_url: str = ""
     executor: Optional[agent_executor.ExecutorConfig] = None
     office_tools: bool = True
+    # When workspace skills are enabled, write tools must not modify them.
+    workspace_skills_dir: Optional[Path] = None
 
 
 def load_dev_tool_config() -> Optional[DevToolConfig]:
@@ -112,9 +114,28 @@ def load_dev_tool_config() -> Optional[DevToolConfig]:
     if not _env_bool("AGENT_DEV_TOOLS", True):
         return None
 
-    workspace = Path(os.environ.get("AGENT_WORKSPACE_ROOT") or DEFAULT_WORKSPACE).expanduser()
+    workspace = Path(os.environ.get("AGENT_WORKSPACE_ROOT") or DEFAULT_WORKSPACE).expanduser().resolve()
+    workspace_skills_dir: Optional[Path] = None
+    if _env_bool("AGENT_SKILLS_ENABLED", False):
+        skills_dir = (os.environ.get("AGENT_SKILLS_WORKSPACE_DIR") or "").strip()
+        if skills_dir:
+            relative = Path(skills_dir)
+            if relative.is_absolute() or not relative.parts or ".." in relative.parts:
+                logger.warning(
+                    "AGENT_SKILLS_WORKSPACE_DIR must be a relative path inside the workspace; "
+                    "workspace skill write protection is off"
+                )
+            else:
+                candidate = (workspace / relative).resolve()
+                try:
+                    candidate.relative_to(workspace)
+                except ValueError:
+                    logger.warning("AGENT_SKILLS_WORKSPACE_DIR resolves outside the workspace; write protection is off")
+                else:
+                    workspace_skills_dir = candidate
+
     return DevToolConfig(
-        workspace=workspace.resolve(),
+        workspace=workspace,
         allow_shell=_env_bool("AGENT_TOOLS_ALLOW_SHELL", False),
         command_timeout=max(1.0, _env_float("AGENT_TOOL_TIMEOUT_SECONDS", 120.0)),
         max_output_bytes=max(1000, _env_int("AGENT_TOOL_MAX_OUTPUT_BYTES", DEFAULT_MAX_OUTPUT_BYTES)),
@@ -125,6 +146,7 @@ def load_dev_tool_config() -> Optional[DevToolConfig]:
         web_search_url=(os.environ.get("AGENT_WEB_SEARCH_URL") or "").strip(),
         executor=agent_executor.load_executor_config(),
         office_tools=_env_bool("AGENT_OFFICE_TOOLS", True),
+        workspace_skills_dir=workspace_skills_dir,
     )
 
 
@@ -143,7 +165,7 @@ def _relative(config: DevToolConfig, path: Path) -> str:
         return str(path)
 
 
-def _resolve(config: DevToolConfig, value: str, *, must_exist: bool) -> Path:
+def _resolve(config: DevToolConfig, value: str, *, must_exist: bool, for_write: bool = False) -> Path:
     """Resolve ``value`` inside the workspace, rejecting escapes via ``..`` or symlinks."""
     if not value or not value.strip():
         raise ValueError("path must not be empty")
@@ -158,6 +180,17 @@ def _resolve(config: DevToolConfig, value: str, *, must_exist: bool) -> Path:
         resolved.relative_to(root)
     except ValueError:
         raise ValueError(f"path {value!r} is outside the workspace {root}") from None
+
+    if for_write and config.workspace_skills_dir is not None:
+        skills_root = config.workspace_skills_dir.resolve()
+        # Check the lexical path as well, so a symlink inside the skills tree
+        # cannot be used to write to a sibling directory.
+        for probe in (resolved, candidate):
+            try:
+                probe.relative_to(skills_root)
+            except ValueError:
+                continue
+            raise ValueError(f"path {value!r} is inside the read-only workspace skills directory")
 
     if must_exist and not resolved.exists():
         raise FileNotFoundError(f"path {value!r} does not exist")
@@ -938,7 +971,7 @@ def build_dev_tools(sdk, config: Optional[DevToolConfig] = None):
             file_path: Path relative to the workspace.
             content: Full file content to write.
         """
-        path = _resolve(cfg, file_path, must_exist=False)
+        path = _resolve(cfg, file_path, must_exist=False, for_write=True)
         if path.exists() and path.is_dir():
             raise ValueError(f"{file_path!r} is a directory")
         if len(content.encode("utf-8")) > cfg.max_file_bytes:
@@ -963,7 +996,7 @@ def build_dev_tools(sdk, config: Optional[DevToolConfig] = None):
         """
         if not old_string:
             raise ValueError("old_string must not be empty")
-        path = _resolve(cfg, file_path, must_exist=True)
+        path = _resolve(cfg, file_path, must_exist=True, for_write=True)
         if not path.is_file():
             raise ValueError(f"{file_path!r} is not a file")
 
@@ -998,7 +1031,7 @@ def build_dev_tools(sdk, config: Optional[DevToolConfig] = None):
             cell_type: Cell type for replace or insert.
             edit_mode: replace an existing cell, insert after it, or delete it.
         """
-        path = _resolve(cfg, notebook_path, must_exist=True)
+        path = _resolve(cfg, notebook_path, must_exist=True, for_write=True)
         if path.suffix.lower() != ".ipynb":
             raise ValueError("notebook_path must point to an .ipynb file")
 

@@ -37,6 +37,8 @@ def test_default_system_prompt_separates_data_from_instructions():
     assert agent_runtime.UNTRUSTED_DATA_RULE in prompt
     assert "suspected prompt injection" in prompt
     assert "Only this system prompt" in prompt
+    assert "Agent Skill" in agent_runtime.UNTRUSTED_DATA_RULE
+    assert "never override" in agent_runtime.UNTRUSTED_DATA_RULE
 
 
 class FakeMaxIterationsExceeded(Exception):
@@ -617,6 +619,36 @@ def test_build_runtime_registers_ask_user_for_background_runs():
 
     assert "ask_user" in [tool.name for tool in runtime.tools]
     assert "ask_user" in runtime.config.kwargs["system_prompt"]
+
+
+def test_build_runtime_registers_extra_tools():
+    extra = types.SimpleNamespace(name="mcp__demo__get_item")
+    runtime = agent_runtime.build_runtime(
+        FakeSDK(),
+        _config(),
+        _payload(),
+        extra_tools=[extra],
+    )
+
+    assert "mcp__demo__get_item" in [tool.name for tool in runtime.tools]
+
+
+@pytest.mark.asyncio
+async def test_stream_local_agent_includes_prepared_mcp_tools(monkeypatch):
+    sdk = FakeSDK(result=_result("ok"))
+    extra = types.SimpleNamespace(name="mcp__demo__get_item")
+
+    async def fake_prepare(config, runtime_sdk, **kwargs):
+        return [extra]
+
+    monkeypatch.setattr(agent_runtime, "load_local_config", lambda: _config())
+    monkeypatch.setattr(agent_runtime, "_load_sdk", lambda: sdk)
+    monkeypatch.setattr(agent_runtime, "load_mcp_config", lambda: object())
+    monkeypatch.setattr(agent_runtime, "prepare_mcp_tools", fake_prepare)
+
+    await _collect(_payload())
+
+    assert "mcp__demo__get_item" in [tool.name for tool in sdk.runtimes[0].tools]
 
 
 def test_build_runtime_omits_ask_user_without_an_interaction():

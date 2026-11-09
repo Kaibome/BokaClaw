@@ -57,6 +57,13 @@ AGENT_LOOP_HISTORY_MESSAGES=40
 AGENT_MAX_ITERATIONS=10
 AGENT_DEV_TOOLS=true
 AGENT_OFFICE_TOOLS=true      # PptxBuild / PptxAddSlide / PptxUpdateSlide / PptxDeleteSlide
+AGENT_MCP_ENABLED=false      # remote MCP tools (Streamable HTTP)
+# AGENT_MCP_CONFIG_FILE=/app/config/mcp.json
+AGENT_SKILLS_ENABLED=false   # local SKILL.md instruction packs
+AGENT_SKILLS_ROOT=/app/skills          # bind-mounted read-only from SKILLS_HOST
+AGENT_SKILLS_ALLOW_SCRIPTS=false       # SkillRun; executes scripts in the executor only
+# AGENT_SKILLS_USER_ROOT=/app/skills-users
+# AGENT_SKILLS_WORKSPACE_DIR=skills
 AGENT_WORKSPACE_ROOT=/app/workspace   # bind-mounted from WORKSPACE_HOST
 AGENT_TOOLS_ALLOW_SHELL=false
 AGENT_EXECUTOR_URL=http://bokaclaw-executor:8099   # appended by start-stack.sh
@@ -67,6 +74,16 @@ AGENT_EXECUTOR_TOKEN=<random>                      # appended by start-stack.sh
 `/Users/pankaibo/BokaClaw/workspace`) and mounts it at `AGENT_WORKSPACE_ROOT`.
 Agent `Write` / `Edit` / `NotebookEdit` cannot escape that directory.
 
+Agent Skills are read from `SKILLS_HOST` (default
+`/Users/pankaibo/BokaClaw/skills`), mounted **read-only** at
+`AGENT_SKILLS_ROOT`. Put one directory per skill, each with a `SKILL.md`.
+Enable them with `AGENT_SKILLS_ENABLED=true`. Per-user skills can be placed
+under a separate `AGENT_SKILLS_USER_ROOT`; workspace skills are off by default
+because the agent can write inside the workspace. With
+`AGENT_SKILLS_ALLOW_SCRIPTS=true`, `SkillRun` sends a bounded copy of the skill
+to `bokaclaw-executor` and runs one `scripts/` entry point after approval; the
+skill directory itself is never mounted into the executor.
+
 With `AGENT_EXECUTOR_URL` set, `Bash` / `PowerShell` / `Monitor` run in
 `bokaclaw-executor`, which mounts the same workspace read-write but has a
 read-only root filesystem (so `/app` is readable and immutable), runs as
@@ -74,6 +91,19 @@ UID 1000 with all capabilities dropped, and is attached only to the internal
 `bokaclaw-exec` network. Commands get a sanitised environment, so neither the
 executor token nor the server's API keys are visible. Clear the URL to fall
 back to running shell commands inside the server process (no sandbox).
+
+MCP servers can be declared inline with `AGENT_MCP_SERVERS_JSON`, or in a JSON
+file mounted read-only:
+
+```bash
+-v /path/to/mcp.json:/app/config/mcp.json:ro
+AGENT_MCP_CONFIG_FILE=/app/config/mcp.json
+```
+
+MCP runs inside the server process, so it uses the server's egress and header
+secrets. Do not mount `AGENT_MEMORY_ROOT` or provider credentials into an MCP
+server; keep MCP server credentials in the server `.env` and interpolate them
+with `${ENV_NAME}`.
 
 When `POSTGRES_HOST` is set for a container run, it is overridden with
 `-e POSTGRES_HOST=bokaclaw-postgres`; the value in the file is only a default
@@ -152,6 +182,7 @@ index in that same application database.
 | `mem0-local-history` | `/app/history` | Legacy `history.db` (migration input only) and `fastembed/`, the ONNX embedder cache |
 | `/Users/pankaibo/BokaClaw/memory` (host bind, `MEMORY_HOST`) | `/app/memory` | Authoritative workspace Markdown: `users/<user_id>/{USER.md,MEMORY.md,memory/YYYY-MM-DD.md}` |
 | `/Users/pankaibo/BokaClaw/workspace` (host bind, `WORKSPACE_HOST`) | `AGENT_WORKSPACE_ROOT` (`/app/workspace`) | Files written by the agent's `Write` / `Edit` / `NotebookEdit` tools; survives container re-creation |
+| `/Users/pankaibo/BokaClaw/skills` (host bind, `SKILLS_HOST`, **read-only**) | `AGENT_SKILLS_ROOT` (`/app/skills`) | Global Agent Skills: one directory per skill with a `SKILL.md`; mounted into the server only, never into the executor |
 
 Memory is bind-mounted so the files are directly visible on macOS. It is mounted
 into the server only, never into the executor. The old `mem0-local-memory`

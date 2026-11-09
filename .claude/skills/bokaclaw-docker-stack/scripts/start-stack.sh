@@ -42,6 +42,8 @@ DASHBOARD_PORT=${DASHBOARD_PORT:-3000}
 API_PUBLIC_URL=${API_PUBLIC_URL:-http://localhost:${API_PORT}}
 # Agent file tools write here; bind-mounted so files survive container re-creation.
 WORKSPACE_HOST=${WORKSPACE_HOST:-/Users/pankaibo/BokaClaw/workspace}
+# Global Agent Skills; read-only in the server container.
+SKILLS_HOST=${SKILLS_HOST:-/Users/pankaibo/BokaClaw/skills}
 
 log() { printf '==> %s\n' "$*"; }
 
@@ -96,6 +98,17 @@ AGENT_LOOP_HISTORY_MESSAGES=40
 # Presentation tools (PptxBuild and friends); python-pptx is baked into the image.
 AGENT_OFFICE_TOOLS=true
 
+# Remote MCP servers over Streamable HTTP. Disabled by default. To use a JSON
+# file, bind-mount it at this path (see references/env-and-volumes.md).
+AGENT_MCP_ENABLED=false
+# AGENT_MCP_CONFIG_FILE=/app/config/mcp.json
+
+# Agent Skills (SKILL.md instruction packs). The host directory is bind-mounted
+# read-only at AGENT_SKILLS_ROOT. P1 SkillRun scripts execute in the executor.
+AGENT_SKILLS_ENABLED=false
+AGENT_SKILLS_ROOT=/app/skills
+AGENT_SKILLS_ALLOW_SCRIPTS=false
+
 # Online evaluation worker (bokaclaw-eval). The judge is opt-in per run; the
 # worker receives only DB credentials and these variables, never JWT_SECRET.
 EVAL_ENABLED=true
@@ -121,6 +134,16 @@ fi
 if ! grep -q '^AGENT_EXECUTOR_TOKEN=' "$ENV_FILE"; then
   printf 'AGENT_EXECUTOR_TOKEN=%s\n' "$(openssl rand -hex 24)" >> "$ENV_FILE"
 fi
+if ! grep -q '^AGENT_SKILLS_ROOT=' "$ENV_FILE"; then
+  printf '\n# Agent Skills (SKILL.md instruction packs).\n' >> "$ENV_FILE"
+  if ! grep -q '^AGENT_SKILLS_ENABLED=' "$ENV_FILE"; then
+    printf 'AGENT_SKILLS_ENABLED=false\n' >> "$ENV_FILE"
+  fi
+  printf 'AGENT_SKILLS_ROOT=/app/skills\n' >> "$ENV_FILE"
+fi
+if ! grep -q '^AGENT_SKILLS_ALLOW_SCRIPTS=' "$ENV_FILE"; then
+  printf 'AGENT_SKILLS_ALLOW_SCRIPTS=false\n' >> "$ENV_FILE"
+fi
 
 set -a
 # shellcheck disable=SC1090
@@ -142,7 +165,8 @@ POSTGRES_DB=${POSTGRES_DB:-postgres}
 : "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in $ENV_FILE}"
 INSTANCE_NAME=${NEXT_PUBLIC_INSTANCE_NAME:-BokaClaw}
 WORKSPACE_CONTAINER=${AGENT_WORKSPACE_ROOT:-/app/workspace}
-mkdir -p "$WORKSPACE_HOST"
+SKILLS_CONTAINER=${AGENT_SKILLS_ROOT:-/app/skills}
+mkdir -p "$WORKSPACE_HOST" "$SKILLS_HOST"
 
 docker image inspect "$SERVER_IMAGE" >/dev/null 2>&1 || {
   echo "error: image $SERVER_IMAGE not found; run bokaclaw-docker-stack/scripts/build-images.sh first." >&2
@@ -278,6 +302,19 @@ if docker container inspect "$SERVER_CONTAINER" >/dev/null 2>&1; then
   esac
 fi
 
+# A container created before skills were bind-mounted must pick up the mount.
+if docker container inspect "$SERVER_CONTAINER" >/dev/null 2>&1; then
+  skills_mount=$(docker inspect -f \
+    '{{range .Mounts}}{{.Destination}}={{.Source}};{{end}}' "$SERVER_CONTAINER")
+  case "$skills_mount" in
+    *"${SKILLS_CONTAINER}=${SKILLS_HOST};"*) ;;
+    *)
+      log "$SERVER_CONTAINER skills mount changed; recreating"
+      docker rm -f "$SERVER_CONTAINER" >/dev/null
+      ;;
+  esac
+fi
+
 mkdir -p "$MEMORY_HOST"
 
 if docker container inspect "$SERVER_CONTAINER" >/dev/null 2>&1; then
@@ -304,6 +341,7 @@ else
     -v "${HISTORY_VOLUME}:/app/history" \
     -v "${MEMORY_HOST}:${MEMORY_CONTAINER}" \
     -v "${WORKSPACE_HOST}:${WORKSPACE_CONTAINER}" \
+    -v "${SKILLS_HOST}:${SKILLS_CONTAINER}:ro" \
     "$SERVER_IMAGE" uvicorn app.main:app --host 0.0.0.0 --port 8000 >/dev/null
 fi
 

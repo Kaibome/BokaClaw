@@ -219,6 +219,53 @@ File paths are resolved inside `AGENT_WORKSPACE_ROOT`, and `..` or symlink escap
 Set `AGENT_EXECUTOR_URL` to run shell tools in the sandboxed executor container; leaving it empty
 runs them inside the server process, where there is **no OS-level sandbox**.
 
+### MCP tools
+
+Set `AGENT_MCP_ENABLED=true` to register tools from remote MCP servers over Streamable HTTP. The
+default is off: no configuration is parsed and no connection is opened. Servers are declared in
+`AGENT_MCP_CONFIG_FILE` (a JSON file, recommended) or `AGENT_MCP_SERVERS_JSON`; header values may
+reference secrets with `${ENV_NAME}`. Tools are exposed as `mcp__<server>__<tool>` and filtered by
+per-server `allow_tools` / `deny_tools`.
+
+Read-only annotated tools run directly. Destructive or unannotated tools require confirmation
+through the human-in-the-loop `ask_user` channel; with no interactive run they fail closed. All
+results are wrapped in `<<<BEGIN UNTRUSTED MCP CONTENT>>>` markers, and a server that is unreachable
+is skipped without failing the turn. See [`docs/server/mcp-integration.md`](../docs/server/mcp-integration.md)
+for the schema and security policy.
+
+### Agent Skills
+
+Set `AGENT_SKILLS_ENABLED=true` to expose local `SKILL.md` instruction packs through the read-only
+`Skill` tool and, when `AGENT_SKILLS_ALLOW_SCRIPTS=true`, the sandboxed `SkillRun` tool. A skill is
+a directory with a `SKILL.md` entry point and optional `references/`, `assets/`, and `scripts/`
+files:
+
+```text
+/app/skills/
+└── release-checklist/
+    ├── SKILL.md
+    ├── references/policy.md
+    └── scripts/check.sh
+```
+
+Only `name` and `description` are required in the frontmatter. The run injects a compact
+`<available-skills>` index before the current user message; the model calls
+`Skill(name="release-checklist")` to load the instructions, then
+`Skill(name="release-checklist", resource="references/policy.md")` to read a file. The catalog is
+not part of the system prompt, and skill resources are wrapped as untrusted data.
+
+Roots are scanned in precedence order: `AGENT_SKILLS_USER_ROOT/<user_key>` (user),
+`AGENT_WORKSPACE_ROOT/$AGENT_SKILLS_WORKSPACE_DIR` (workspace), and `AGENT_SKILLS_ROOT` (global).
+The first provider of a name wins. Workspace skills are off by default because the agent can write
+inside the workspace.
+
+`SkillRun` executes only files under `scripts/` (`.sh`, `.py`, `.js`, `.mjs`) in the sandboxed
+executor. It requires `AGENT_EXECUTOR_URL`; the server never runs skill scripts in-process. The
+default `AGENT_SKILLS_SCRIPT_APPROVAL=always` asks the user before execution, and a run with no
+interactive channel fails closed. Arguments are parsed with `shlex` and are never evaluated by a
+shell. See [`docs/server/skill-integration.md`](../docs/server/skill-integration.md) for the
+bundle limits, security model, and result schema.
+
 Conversations are managed through `/conversations`. Set `AGENT_LOOP_URL` to delegate turns to an
 external executor over HTTP instead.
 
@@ -277,6 +324,22 @@ The stream emits `meta`, `message.delta`, `message.completed`, and `done`, with 
 | `AGENT_SUBAGENT_MAX_TURNS` | `8` | ReAct step budget for one child run. |
 | `AGENT_DEV_TOOLS` | `true` | Register the developer tool set. |
 | `AGENT_OFFICE_TOOLS` | `true` | Register the Pptx tools. |
+| `AGENT_MCP_ENABLED` | `false` | Register tools from remote MCP servers. |
+| `AGENT_MCP_CONFIG_FILE` | — | JSON file with MCP server definitions. |
+| `AGENT_MCP_SERVERS_JSON` | — | Inline MCP server definitions (file wins). |
+| `AGENT_SKILLS_ENABLED` | `false` | Register the read-only `Skill` tool. |
+| `AGENT_SKILLS_ROOT` | `/app/skills` | Global `SKILL.md` root, visible to all users. |
+| `AGENT_SKILLS_USER_ROOT` | — | Optional per-user skill root (`<root>/<user_key>`). |
+| `AGENT_SKILLS_WORKSPACE_DIR` | — | Optional workspace-relative skill root; off by default. |
+| `AGENT_SKILLS_CATALOG_TTL_SECONDS` | `30` | Catalog cache lifetime; `0` rescans every run. |
+| `AGENT_SKILLS_CATALOG_MAX_CHARS` | `4000` | Maximum size of the injected catalog block. |
+| `AGENT_SKILLS_ALLOW_SCRIPTS` | `false` | Register `SkillRun`; scripts execute only in the executor. |
+| `AGENT_SKILLS_SCRIPT_TIMEOUT_SECONDS` | `120` | Default script timeout, capped at 600. |
+| `AGENT_SKILLS_SCRIPT_MAX_BYTES` | `262144` | Maximum entry-script size. |
+| `AGENT_SKILLS_SCRIPT_APPROVAL` | `always` | `always`, or `auto` to skip approval for global skills only. |
+| `AGENT_SKILLS_SCRIPT_MAX_BUNDLE_FILES` | `200` | Maximum files in one skill bundle. |
+| `AGENT_SKILLS_SCRIPT_MAX_BUNDLE_BYTES` | `5000000` | Maximum uncompressed bundle size. |
+| `AGENT_SKILLS_SCRIPT_MAX_ARGS_CHARS` | `4096` | Maximum length of the `args` string. |
 | `AGENT_WORKSPACE_ROOT` | `/app/workspace` | File tools cannot escape this directory. |
 | `AGENT_TOOLS_ALLOW_SHELL` | `false` | Register `Bash`, `PowerShell`, and `Monitor`. |
 | `AGENT_EXECUTOR_URL` | — | Base URL of the sandboxed executor. |
@@ -316,6 +379,10 @@ Tool output is untrusted input. The server applies three mitigations:
 - Recalled memory and reused research conclusions are injected as a user-role message, labeled as
   reference data, and never into the system prompt. `trust="untrusted"` entries are never
   auto-injected.
+- The skill catalog is also a user-role metadata block. A loaded `SKILL.md` may guide the current
+  task but cannot override the system prompt; skill resources are wrapped as untrusted data and
+  forged wrapper markers are neutralized. `SkillRun` stdout/stderr is labeled as data, and script
+  approval shows the user the path, arguments, and a short preview before anything runs.
 
 These are mitigations, not a guarantee. There is no approval step before `Write`, `Edit`, or
 `Bash`: the executor container limits what a hijacked model can reach, but not which of its granted

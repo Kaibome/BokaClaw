@@ -1,5 +1,6 @@
 """Tests for the sandboxed shell executor and its server-side client."""
 
+import base64
 import os
 import sys
 from pathlib import Path
@@ -155,3 +156,130 @@ def test_commands_stay_local_without_executor(tmp_path):
 
     assert result["stdout"] == "hi"
     assert agent_dev_tools.command_env(config)["HOME"] == str(tmp_path.resolve())
+
+
+# ---- skill script execution ---------------------------------------------------
+
+
+def _bundle(path: str, content: str) -> dict:
+    return {
+        "path": path,
+        "content_b64": base64.b64encode(content.encode("utf-8")).decode("ascii"),
+    }
+
+
+def _skill_payload(entrypoint: str, files: list[dict], *, args: str = "", timeout_seconds: int = 5) -> dict:
+    return {
+        "skill": "demo",
+        "entrypoint": entrypoint,
+        "args": args,
+        "files": files,
+        "timeout_seconds": timeout_seconds,
+    }
+
+
+def test_skill_run_executes_a_bundled_script(tmp_path):
+    client = _client(tmp_path)
+    files = [
+        _bundle("scripts/echo.sh", "#!/bin/sh\nprintf '%s' \"$1\"\n"),
+        _bundle("references/a.md", "# A\n"),
+    ]
+    before = set(Path("/tmp").glob("skill-run-*"))
+
+    response = client.post(
+        "/skills/run",
+        json=_skill_payload("scripts/echo.sh", files, args='"hello world"'),
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["exit_code"] == 0
+    assert result["stdout"] == "hello world"
+    assert result["timed_out"] is False
+    assert result["skill"] == "demo"
+    assert result["entrypoint"] == "scripts/echo.sh"
+    assert set(Path("/tmp").glob("skill-run-*")) == before
+
+
+def test_skill_run_args_are_not_evaluated_by_a_shell(tmp_path):
+    client = _client(tmp_path)
+    files = [_bundle("scripts/argc.sh", "#!/bin/sh\nprintf '%s' \"$#\"\n")]
+
+    result = client.post(
+        "/skills/run",
+        json=_skill_payload("scripts/argc.sh", files, args="'; echo pwned'"),
+    ).json()
+
+    assert result["exit_code"] == 0
+    assert result["stdout"] == "1"
+    assert "pwned" not in result["stdout"]
+
+
+def test_skill_run_reports_timeout(tmp_path):
+    client = _client(tmp_path)
+    files = [_bundle("scripts/sleep.sh", "#!/bin/sh\nsleep 5\n")]
+
+    result = client.post(
+        "/skills/run",
+        json=_skill_payload("scripts/sleep.sh", files, timeout_seconds=1),
+    ).json()
+
+    assert result["timed_out"] is True
+    assert result["exit_code"] != 0
+
+
+def test_skill_run_rejects_path_traversal_and_unsupported_scripts(tmp_path):
+    client = _client(tmp_path)
+
+    traversal = client.post(
+        "/skills/run",
+        json=_skill_payload("scripts/a.sh", [_bundle("../evil.sh", "echo x")]),
+    )
+    assert traversal.status_code == 400
+    assert "invalid bundle path" in traversal.json()["detail"]
+
+    unsupported = client.post(
+        "/skills/run",
+        json=_skill_payload("scripts/a.rb", [_bundle("scripts/a.rb", "puts 1\n")]),
+    )
+    assert unsupported.status_code == 400
+    assert "unsupported script type" in unsupported.json()["detail"]
+
+
+def test_skill_run_rejects_missing_entrypoint_duplicates_and_bad_base64(tmp_path):
+    client = _client(tmp_path)
+
+    missing = client.post(
+        "/skills/run",
+        json=_skill_payload("scripts/run.sh", [_bundle("scripts/other.sh", "echo x\n")]),
+    )
+    assert missing.status_code == 400
+    assert "missing from the bundle" in missing.json()["detail"]
+
+    duplicate = client.post(
+        "/skills/run",
+        json=_skill_payload(
+            "scripts/run.sh",
+            [_bundle("scripts/run.sh", "echo x\n"), _bundle("scripts/run.sh", "echo y\n")],
+        ),
+    )
+    assert duplicate.status_code == 400
+    assert "duplicate bundle path" in duplicate.json()["detail"]
+
+    bad_base64 = client.post(
+        "/skills/run",
+        json=_skill_payload("scripts/run.sh", [{"path": "scripts/run.sh", "content_b64": "!!!"}]),
+    )
+    assert bad_base64.status_code == 400
+    assert "invalid base64" in bad_base64.json()["detail"]
+
+
+def test_skill_run_requires_the_executor_token(tmp_path):
+    client = TestClient(executor_app.create_app(_config(tmp_path), token="secret"))
+
+    response = client.post(
+        "/skills/run",
+        json=_skill_payload("scripts/run.sh", [_bundle("scripts/run.sh", "echo x\n")]),
+    )
+
+    assert response.status_code == 401

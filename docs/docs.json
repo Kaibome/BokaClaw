@@ -22,7 +22,9 @@
         "group": "Server",
         "pages": [
           "server/agent-execution-decoupling",
-          "server/human-in-the-loop"
+          "server/human-in-the-loop",
+          "server/mcp-integration",
+          "server/skill-integration"
         ]
       },
       {

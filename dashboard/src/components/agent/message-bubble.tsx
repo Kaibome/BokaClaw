@@ -3,6 +3,7 @@
 import { AlertCircle, RotateCcw } from "lucide-react";
 
 import { RunIdBadge } from "@/components/agent/run-id-badge";
+import { MarkdownContent } from "@/components/agent/markdown-content";
 import { ToolTrace } from "@/components/agent/tool-trace";
 import { UserQuestionCard } from "@/components/agent/user-question";
 import { Button } from "@/components/ui/button";
@@ -169,14 +170,18 @@ export function MessageBubble({
     >
       <div
         className={cn(
-          "max-w-[85%] whitespace-pre-wrap break-words rounded-xl border border-memBorder-primary px-3 py-2 text-sm text-onSurface-default-primary",
+          "max-w-[85%] break-words rounded-xl border border-memBorder-primary px-3 py-2 text-sm text-onSurface-default-primary",
           isUser
-            ? "bg-surface-default-secondary"
+            ? "whitespace-pre-wrap bg-surface-default-secondary"
             : "bg-surface-default-primary",
         )}
       >
         {message.content ? (
-          <span>{message.content}</span>
+          isUser ? (
+            <span>{message.content}</span>
+          ) : (
+            <MarkdownContent content={message.content} />
+          )
         ) : message.streaming && !isReconnecting && !hasPendingQuestion ? (
           <TypingDots />
         ) : null}

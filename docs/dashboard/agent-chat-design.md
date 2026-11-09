@@ -38,7 +38,7 @@
 | 记忆作用域 | 传给 AgentRuntime 的 `user_id` = 当前登录用户的 UUID 字符串 |
 | 更新风格 | 沿用仓库习惯使用 `PUT /conversations/{id}`（与 `PUT /memories/{id}` 一致） |
 | 未配置模型 | 返回 503 `agent_not_configured`；`AGENT_LOOP_MOCK=true` 仅用于本地联调 UI |
-| 消息渲染 | MVP 纯文本 + `whitespace-pre-wrap`，不引入 Markdown 渲染依赖 |
+| 消息渲染 | 助手消息用 `components/agent/markdown-content.tsx` 内置轻量 Markdown 渲染器（GFM 表格、标题、代码块、列表、引用、强调/链接），流式增量可安全渲染；用户消息仍为纯文本 + `whitespace-pre-wrap`；不引入第三方 Markdown 依赖 |
 
 ## 3. 总体架构
 

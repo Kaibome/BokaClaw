@@ -94,6 +94,35 @@ def test_core_tools_registered_without_shell(tmp_path):
     assert names == {"Read", "Write", "Edit", "NotebookEdit", "Glob", "Grep", "WebFetch", "WebSearch"}
 
 
+def test_workspace_skills_directory_rejects_writes_but_allows_reads(tmp_path):
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    (skills / "protect.md").write_text("old", encoding="utf-8")
+    tools = _tools(tmp_path, workspace_skills_dir=skills.resolve())
+
+    with pytest.raises(ValueError, match="read-only workspace skills"):
+        tools["Write"]("skills/protect.md", "new")
+    with pytest.raises(ValueError, match="read-only workspace skills"):
+        tools["Edit"]("skills/protect.md", "old", "new")
+
+    assert (skills / "protect.md").read_text(encoding="utf-8") == "old"
+    assert tools["Read"]("skills/protect.md")["content"] == "1\told"
+
+
+def test_workspace_skills_dir_is_configured_only_when_skills_are_enabled(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENT_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("AGENT_SKILLS_WORKSPACE_DIR", "skills")
+
+    monkeypatch.setenv("AGENT_SKILLS_ENABLED", "false")
+    assert load_dev_tool_config().workspace_skills_dir is None
+
+    monkeypatch.setenv("AGENT_SKILLS_ENABLED", "true")
+    config = load_dev_tool_config()
+
+    assert config is not None
+    assert config.workspace_skills_dir == (tmp_path / "skills").resolve()
+
+
 def test_shell_tools_registered_only_when_allowed(tmp_path):
     names = set(_tools(tmp_path, allow_shell=True))
 
