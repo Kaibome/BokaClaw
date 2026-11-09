@@ -82,7 +82,12 @@ under a separate `AGENT_SKILLS_USER_ROOT`; workspace skills are off by default
 because the agent can write inside the workspace. With
 `AGENT_SKILLS_ALLOW_SCRIPTS=true`, `SkillRun` sends a bounded copy of the skill
 to `bokaclaw-executor` and runs one `scripts/` entry point after approval; the
-skill directory itself is never mounted into the executor.
+skill directory itself is never mounted into the executor. The executor uses
+`bokaclaw-executor:test`, built by
+`build-images.sh executor` from `server/executor.Dockerfile`; it adds
+`server/executor-requirements.txt` (`czsc`, `openpyxl`, `pyharmonics`,
+`smartmoneyconcepts`) on top of the server image. Rebuild that image and let
+`start-stack.sh` replace the executor when the image ID changes.
 
 With `AGENT_EXECUTOR_URL` set, `Bash` / `PowerShell` / `Monitor` run in
 `bokaclaw-executor`, which mounts the same workspace read-write but has a
@@ -93,12 +98,18 @@ executor token nor the server's API keys are visible. Clear the URL to fall
 back to running shell commands inside the server process (no sandbox).
 
 MCP servers can be declared inline with `AGENT_MCP_SERVERS_JSON`, or in a JSON
-file mounted read-only:
+file. For the JSON file, pass its host path to `start-stack.sh`:
 
 ```bash
--v /path/to/mcp.json:/app/config/mcp.json:ro
-AGENT_MCP_CONFIG_FILE=/app/config/mcp.json
+MCP_CONFIG_HOST=/Users/pankaibo/BokaClaw/mcp.json \
+  .claude/skills/bokaclaw-docker-stack/scripts/start-stack.sh
 ```
+
+The script mounts it read-only at `/app/config/mcp.json`, adds
+`AGENT_MCP_CONFIG_FILE=/app/config/mcp.json` to `server/.env` when missing,
+turns `AGENT_MCP_ENABLED` on when the key is absent, and recreates the server
+container if the mount changed. If `AGENT_MCP_ENABLED` is explicitly `false`,
+it only logs a warning; set it to `true` yourself.
 
 MCP runs inside the server process, so it uses the server's egress and header
 secrets. Do not mount `AGENT_MEMORY_ROOT` or provider credentials into an MCP
@@ -132,12 +143,12 @@ docker run --rm --network bokaclaw-net --env-file server/.env \
 docker run -d --name bokaclaw-executor --network bokaclaw-exec --restart unless-stopped \
   --read-only --tmpfs /tmp:rw,size=256m,mode=1777 \
   --cap-drop ALL --security-opt no-new-privileges \
-  --pids-limit 256 --memory 1g --cpus 2 --user 1000:1000 \
+  --pids-limit 256 --memory 1g --cpus 2 --user 1000:1000 -e HOME=/tmp \
   -e AGENT_DEV_TOOLS=true -e AGENT_TOOLS_ALLOW_SHELL=true \
   -e AGENT_WORKSPACE_ROOT=/app/workspace \
   -e AGENT_EXECUTOR_TOKEN="$AGENT_EXECUTOR_TOKEN" -e PYTHONDONTWRITEBYTECODE=1 \
   -v /Users/pankaibo/BokaClaw/workspace:/app/workspace \
-  bokaclaw-server:test uvicorn app.agent.executor_app:app --host 0.0.0.0 --port 8099 --no-access-log
+  bokaclaw-executor:test uvicorn app.agent.executor_app:app --host 0.0.0.0 --port 8099 --no-access-log
 
 docker run -d --name bokaclaw-server --network bokaclaw-net --restart unless-stopped \
   --env-file server/.env -e POSTGRES_HOST=bokaclaw-postgres -e POSTGRES_PORT=5432 \

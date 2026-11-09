@@ -26,6 +26,7 @@ EXECUTOR_PIDS_LIMIT=${EXECUTOR_PIDS_LIMIT:-256}
 SERVER_IMAGE=${SERVER_IMAGE:-bokaclaw-server:test}
 DASHBOARD_IMAGE=${DASHBOARD_IMAGE:-bokaclaw-dashboard:test}
 EVAL_IMAGE=${EVAL_IMAGE:-bokaclaw-eval:test}
+EXECUTOR_IMAGE=${EXECUTOR_IMAGE:-bokaclaw-executor:test}
 EVAL_MEMORY=${EVAL_MEMORY:-2g}
 EVAL_CPUS=${EVAL_CPUS:-2}
 PG_IMAGE=${PG_IMAGE:-pgvector/pgvector:pg17}
@@ -44,6 +45,9 @@ API_PUBLIC_URL=${API_PUBLIC_URL:-http://localhost:${API_PORT}}
 WORKSPACE_HOST=${WORKSPACE_HOST:-/Users/pankaibo/BokaClaw/workspace}
 # Global Agent Skills; read-only in the server container.
 SKILLS_HOST=${SKILLS_HOST:-/Users/pankaibo/BokaClaw/skills}
+# Optional MCP server definitions; mounted read-only into the server container.
+MCP_CONFIG_HOST=${MCP_CONFIG_HOST:-}
+MCP_CONFIG_CONTAINER=${MCP_CONFIG_CONTAINER:-/app/config/mcp.json}
 
 log() { printf '==> %s\n' "$*"; }
 
@@ -172,6 +176,10 @@ docker image inspect "$SERVER_IMAGE" >/dev/null 2>&1 || {
   echo "error: image $SERVER_IMAGE not found; run bokaclaw-docker-stack/scripts/build-images.sh first." >&2
   exit 1
 }
+docker image inspect "$EXECUTOR_IMAGE" >/dev/null 2>&1 || {
+  echo "error: image $EXECUTOR_IMAGE not found; run bokaclaw-docker-stack/scripts/build-images.sh executor first." >&2
+  exit 1
+}
 docker image inspect "$DASHBOARD_IMAGE" >/dev/null 2>&1 || {
   echo "error: image $DASHBOARD_IMAGE not found; run bokaclaw-docker-stack/scripts/build-images.sh first." >&2
   exit 1
@@ -233,9 +241,13 @@ docker run --rm --network "$NETWORK" --env-file "$ENV_FILE" \
   "$SERVER_IMAGE" alembic upgrade head
 
 # ---- Shell executor ---------------------------------------------------------
-if [ "${RECREATE:-0}" = "1" ] && docker container inspect "$EXECUTOR_CONTAINER" >/dev/null 2>&1; then
-  log "recreating $EXECUTOR_CONTAINER"
-  docker rm -f "$EXECUTOR_CONTAINER" >/dev/null
+EXECUTOR_IMAGE_ID=$(docker image inspect -f '{{.Id}}' "$EXECUTOR_IMAGE")
+if docker container inspect "$EXECUTOR_CONTAINER" >/dev/null 2>&1; then
+  CURRENT_EXECUTOR_IMAGE=$(docker inspect -f '{{.Image}}' "$EXECUTOR_CONTAINER")
+  if [ "${RECREATE:-0}" = "1" ] || [ "$CURRENT_EXECUTOR_IMAGE" != "$EXECUTOR_IMAGE_ID" ]; then
+    log "recreating $EXECUTOR_CONTAINER (image changed or RECREATE=1)"
+    docker rm -f "$EXECUTOR_CONTAINER" >/dev/null
+  fi
 fi
 
 if docker container inspect "$EXECUTOR_CONTAINER" >/dev/null 2>&1; then
@@ -246,7 +258,7 @@ else
     --read-only --tmpfs /tmp:rw,size=256m,mode=1777 \
     --cap-drop ALL --security-opt no-new-privileges \
     --pids-limit "$EXECUTOR_PIDS_LIMIT" --memory "$EXECUTOR_MEMORY" --cpus "$EXECUTOR_CPUS" \
-    --user 1000:1000 \
+    --user 1000:1000 -e HOME=/tmp \
     -e AGENT_DEV_TOOLS=true \
     -e AGENT_TOOLS_ALLOW_SHELL=true \
     -e AGENT_WORKSPACE_ROOT="$WORKSPACE_CONTAINER" \
@@ -254,7 +266,7 @@ else
     -e AGENT_EXECUTOR_TOKEN="$AGENT_EXECUTOR_TOKEN" \
     -e PYTHONDONTWRITEBYTECODE=1 \
     -v "${WORKSPACE_HOST}:${WORKSPACE_CONTAINER}" \
-    "$SERVER_IMAGE" uvicorn app.agent.executor_app:app --host 0.0.0.0 --port "$EXECUTOR_PORT" --no-access-log >/dev/null
+    "$EXECUTOR_IMAGE" uvicorn app.agent.executor_app:app --host 0.0.0.0 --port "$EXECUTOR_PORT" --no-access-log >/dev/null
 fi
 
 log "waiting for executor"
@@ -315,6 +327,34 @@ if docker container inspect "$SERVER_CONTAINER" >/dev/null 2>&1; then
   esac
 fi
 
+MCP_MOUNT_ARGS=()
+if [ -n "$MCP_CONFIG_HOST" ]; then
+  if [ ! -f "$MCP_CONFIG_HOST" ]; then
+    echo "error: MCP_CONFIG_HOST=$MCP_CONFIG_HOST does not exist" >&2
+    exit 1
+  fi
+  MCP_MOUNT_ARGS=(-v "${MCP_CONFIG_HOST}:${MCP_CONFIG_CONTAINER}:ro")
+  grep -q '^AGENT_MCP_ENABLED=' "$ENV_FILE" ||
+    printf '\n# MCP config mounted by start-stack.sh\nAGENT_MCP_ENABLED=true\n' >> "$ENV_FILE"
+  grep -q '^AGENT_MCP_CONFIG_FILE=' "$ENV_FILE" ||
+    printf 'AGENT_MCP_CONFIG_FILE=%s\n' "$MCP_CONFIG_CONTAINER" >> "$ENV_FILE"
+  if ! grep -Eq '^AGENT_MCP_ENABLED=(true|1|yes|on)$' "$ENV_FILE"; then
+    log "warning: AGENT_MCP_ENABLED is not true in $ENV_FILE; MCP tools stay disabled"
+  fi
+fi
+
+if [ -n "$MCP_CONFIG_HOST" ] && docker container inspect "$SERVER_CONTAINER" >/dev/null 2>&1; then
+  mcp_mount=$(docker inspect -f \
+    '{{range .Mounts}}{{.Destination}}={{.Source}};{{end}}' "$SERVER_CONTAINER")
+  case "$mcp_mount" in
+    *"${MCP_CONFIG_CONTAINER}=${MCP_CONFIG_HOST};"*) ;;
+    *)
+      log "$SERVER_CONTAINER MCP config mount changed; recreating"
+      docker rm -f "$SERVER_CONTAINER" >/dev/null
+      ;;
+  esac
+fi
+
 mkdir -p "$MEMORY_HOST"
 
 if docker container inspect "$SERVER_CONTAINER" >/dev/null 2>&1; then
@@ -342,6 +382,7 @@ else
     -v "${MEMORY_HOST}:${MEMORY_CONTAINER}" \
     -v "${WORKSPACE_HOST}:${WORKSPACE_CONTAINER}" \
     -v "${SKILLS_HOST}:${SKILLS_CONTAINER}:ro" \
+    ${MCP_MOUNT_ARGS[@]+"${MCP_MOUNT_ARGS[@]}"} \
     "$SERVER_IMAGE" uvicorn app.main:app --host 0.0.0.0 --port 8000 >/dev/null
 fi
 

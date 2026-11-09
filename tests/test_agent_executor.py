@@ -201,6 +201,18 @@ def test_skill_run_executes_a_bundled_script(tmp_path):
     assert set(Path("/tmp").glob("skill-run-*")) == before
 
 
+def test_skill_run_sets_the_czsc_python_compatibility_flag(tmp_path):
+    files = [_bundle("scripts/env.sh", 'printf "%s" "$CZSC_USE_PYTHON"\n')]
+
+    result = _client(tmp_path).post(
+        "/skills/run",
+        json=_skill_payload("scripts/env.sh", files),
+    ).json()
+
+    assert result["exit_code"] == 0
+    assert result["stdout"] == "1"
+
+
 def test_skill_run_args_are_not_evaluated_by_a_shell(tmp_path):
     client = _client(tmp_path)
     files = [_bundle("scripts/argc.sh", "#!/bin/sh\nprintf '%s' \"$#\"\n")]

@@ -875,6 +875,29 @@
 
 ---
 
+## P-31 Skill 脚本依赖与 executor 只读环境不兼容
+
+- **状态**：已解决
+- **发现时间**：2026-11-09
+- **解决时间**：2026-11-09
+- **场景**：为 `workbuddy-finance-skill` 在 `bokaclaw-executor` 镜像中安装 `czsc`、`pyharmonics`、`smartmoneyconcepts`、`openpyxl`，并验证 `chan` / `smc` / `harmonic` 引擎。
+- **现象**：
+  1. `czsc 1.0.2` 不再提供 `czsc.signals`，`chan_theory.py` 的 `from czsc.signals.cxt import ...` 导入失败；
+  2. `czsc 0.10.x` 默认绑定 Rust 版 `CZSC`，构造函数只接受 `(bars_raw, max_bi_num=50)`，运行时报 `TypeError: CZSC.__new__() got an unexpected keyword argument 'get_signals'`；
+  3. `czsc` 导入时会创建 `~/.czsc`；executor 根文件系统只读且 `HOME` 不可写时，报 `OSError: [Errno 30] Read-only file system: '/.czsc'`；
+  4. `czsc -> streamlit 1.61+` 要求 `starlette>=0.46`，会升级 executor 中与 FastAPI 0.115.8 配套的 `starlette 0.45.3`。
+- **证据**：镜像内 `CZSC.__module__` 为 `builtins`、`inspect.signature(CZSC)` 为 `(bars_raw, max_bi_num=50)`；`CZSC_USE_PYTHON=1` 时签名恢复为 `(bars, get_signals=None, max_bi_num=50)`；`streamlit 1.67.0` 的 `Requires-Dist: starlette<2,>=0.46.0`。
+- **根因**：skill 面向经典 czsc Python API；executor 采用只读根文件系统；重型依赖树未做版本约束。
+- **解决措施**：
+  1. 新增 `server/executor-requirements.txt` 与 `server/executor.Dockerfile`，固定 `czsc==0.10.12`、`streamlit<1.61`、`openpyxl==3.1.5`、`pyharmonics==1.5.3`、`smartmoneyconcepts==0.0.27`；
+  2. `SkillRun` 为脚本子进程设置 `CZSC_USE_PYTHON=1`，强制使用纯 Python `CZSC`；
+  3. executor 容器设置 `HOME=/tmp`，`SkillRun` 仍把子进程 `HOME` 指向临时技能目录；
+  4. `build-images.sh` 增加 `executor` 目标与只读/非 root 冒烟检查；`start-stack.sh` 在镜像 ID 变化时自动重建 executor。
+- **解决后效果**：`chan` / `smc` / `harmonic` 三个引擎均通过 `SkillRun` 执行，`exit_code=0`；相关 256 个单测通过；`build-images.sh executor` 冒烟输出 `executor-ok`。
+- **可复用结论**：给沙箱镜像加第三方包时，要同时验证导入期副作用（HOME/缓存目录）和传递依赖是否会把基础镜像的关键版本顶掉；优先用库自带的兼容开关，而不是修改用户提供的 skill 代码。
+
+---
+
 ## 变更记录
 
 | 日期 | 变更 |
@@ -920,4 +943,5 @@
 | 2026-11-09 | 追加并修复 P-28：轮末不再保存 research 结论（WebSearch/WebFetch 成本低，长期留存增加管理成本），`turn_memory` 只写 episode，`research_memory.py` 删除写入端、保留旧结论召回；新增轮末单测并更新文档（发现时间 2026-11-09，解决时间 2026-11-09） |
 | 2026-11-09 | 追加并修复 P-29：Agent 对话窗口助手消息改为 `markdown-content.tsx` 轻量 Markdown 渲染（GFM 表格、标题、代码块、列表、引用、强调/链接），流式半截表格容错；用户消息保持纯文本；交互设计文档同步更新（发现时间 2026-11-09，解决时间 2026-11-09） |
 | 2026-11-09 | 追加并修复 P-30：MCP SDK 1.20+ 要求 pydantic>=2.11，与项目固定的 2.10.4 冲突；固定 `mcp==1.12.0` 并把 SDK 隔离在 `server/app/agent/mcp/client.py`，server 镜像构建与容器内导入验证通过（发现时间 2026-11-09，解决时间 2026-11-09） |
+| 2026-11-09 | 追加并修复 P-31：executor 镜像预装 `czsc==0.10.12` / `openpyxl` / `pyharmonics` / `smartmoneyconcepts`，用 `CZSC_USE_PYTHON=1` 兼容经典 `get_signals` API，设置 `HOME=/tmp` 解决只读根文件系统下的 `~/.czsc` 创建失败，并新增专用 `executor.Dockerfile` 与构建/冒烟流程（发现时间 2026-11-09，解决时间 2026-11-09） |
 | 2026-11-09 | 追加 P-26 并完成记忆架构迁移：工作区 Markdown（`USER.md` / `MEMORY.md` / `memory/YYYY-MM-DD.md`）成为唯一权威存储，Postgres 只保留可重建的 `memory_index_*` / `memory_history` 派生索引（迁移 014）；一次性导入旧 Mem0 行与 SQLite history；agent 暴露五个记忆工具，轮末无 LLM capture，召回以 user 角色 `<recalled-memories>` 注入；移除 `mem0ai` 依赖、CLI/integrations/旧测试与文档，dashboard 去除 Mem0 云版推广与品牌链接；真实栈验证 reconcile / search / capture / recall，512 + 194 tests 通过（发现时间 2026-11-09，解决时间 2026-11-09） |

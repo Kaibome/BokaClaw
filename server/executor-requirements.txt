@@ -1,0 +1,31 @@
+# Extra packages for the sandboxed executor image (bokaclaw-executor).
+#
+# These are intentionally kept out of server/requirements.txt: they are only
+# needed by skill scripts run through SkillRun, and some of them pull large
+# transitive trees (polars, scipy, statsmodels, plotly, numba). The API image
+# stays lean; the executor gets these on top of it.
+#
+# Pins match the versions resolved against server/requirements.txt on Python
+# 3.12. Bump them together and rebuild with:
+#   .claude/skills/bokaclaw-docker-stack/scripts/build-images.sh executor
+
+# Chan theory engine: czsc.signals.cxt + CZSC/RawBar/Freq/ZS.
+# czsc 0.10.x keeps the classic Python API used by the skill; czsc 1.x moved
+# the core classes and no longer ships czsc.signals. SkillRun also sets
+# CZSC_USE_PYTHON=1 for the script process: otherwise czsc binds the Rust
+# CZSC, which does not accept the get_signals= keyword used by classic skills.
+czsc==0.10.12
+
+# czsc pulls streamlit, and streamlit 1.61+ requires starlette>=0.46, which
+# would upgrade the FastAPI-compatible starlette (0.45.x) from the server
+# image. Cap streamlit so the executor keeps the server's FastAPI stack.
+streamlit<1.61
+
+# Excel workbooks used by the IB / DCF skill scripts.
+openpyxl==3.1.5
+
+# Harmonic pattern engine.
+pyharmonics==1.5.3
+
+# Smart Money Concepts (BOS / ChoCH / FVG) engine.
+smartmoneyconcepts==0.0.27

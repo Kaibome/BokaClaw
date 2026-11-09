@@ -1,6 +1,6 @@
 ---
 name: bokaclaw-docker-stack
-description: 在 Docker 中本地构建并运行 BokaClaw：从仓库根目录构建 `bokaclaw-server:test`、从 `dashboard/` 构建 `bokaclaw-dashboard:test` 两个镜像（为 Lima/Colima 虚拟机配置了快速软件源），然后在 `bokaclaw-net` 和内部 `bokaclaw-exec` 网桥上启动四个容器——`bokaclaw-postgres`（pgvector/pg17）、`bokaclaw-server`（FastAPI，端口 8000）、`bokaclaw-dashboard`（Next.js，端口 3000）和 `bokaclaw-executor`（沙箱化的 Agent shell，仅内网可达）——并负责 Alembic 迁移、`server/.env` 生成和健康检查。触发场景：要求构建/重建 BokaClaw 镜像，启动或停止本地前端 + 后端 + Postgres，执行数据库迁移，重置管理员密码，或排查构建卡在软件包下载、dashboard 连不上 API/数据库的问题。不触发场景：要求修改应用代码，或仍在处理旧版 all-in-one 镜像。
+description: 在 Docker 中本地构建并运行 BokaClaw：从仓库根目录构建 `bokaclaw-server:test`、从 `dashboard/` 构建 `bokaclaw-dashboard:test`，并以 server 镜像为基础构建带 skill 脚本依赖的 `bokaclaw-executor:test`（为 Lima/Colima 虚拟机配置了快速软件源），然后在 `bokaclaw-net` 和内部 `bokaclaw-exec` 网桥上启动四个容器——`bokaclaw-postgres`（pgvector/pg17）、`bokaclaw-server`（FastAPI，端口 8000）、`bokaclaw-dashboard`（Next.js，端口 3000）和 `bokaclaw-executor`（沙箱化的 Agent shell，仅内网可达）——并负责 Alembic 迁移、`server/.env` 生成和健康检查。触发场景：要求构建/重建 BokaClaw 镜像，启动或停止本地前端 + 后端 + Postgres，执行数据库迁移，重置管理员密码，或排查构建卡在软件包下载、dashboard 连不上 API/数据库的问题。不触发场景：要求修改应用代码，或仍在处理旧版 all-in-one 镜像。
 license: Apache-2.0
 metadata:
   author: BokaClaw
@@ -31,9 +31,10 @@ for "build".
 
 | Request | Command |
 |---|---|
-| 只打镜像（两个） | `scripts/build-images.sh` |
+| 只打镜像（全部） | `scripts/build-images.sh` |
 | 只打 server 镜像 | `scripts/build-images.sh server` |
 | 只打 dashboard 镜像 | `scripts/build-images.sh dashboard` |
+| 只打 executor 镜像（需先有 server 镜像） | `scripts/build-images.sh executor` |
 | 只启动 / 只运行 | `scripts/start-stack.sh` |
 | 重建镜像并让容器用上新镜像 | `scripts/build-images.sh && RECREATE=1 scripts/start-stack.sh` |
 | 只停止 | `scripts/stop-stack.sh` |
@@ -58,12 +59,18 @@ docker build --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple 
 # dashboard: context is dashboard/
 docker build --build-arg NPM_REGISTRY=https://registry.npmmirror.com \
   -t bokaclaw-dashboard:test dashboard
+
+# executor: extends the server image with skill script packages
+docker build --build-arg BASE_IMAGE=bokaclaw-server:test \
+  --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+  -f server/executor.Dockerfile -t bokaclaw-executor:test .
 ```
 
 | Image | Dockerfile | Context | Why |
 |---|---|---|---|
 | `bokaclaw-server` | `server/Dockerfile` | repo root `.` | Installs `server/requirements.txt`, installs `agent-loop/` as `bokaclaw-agent` for the in-process Agent runtime, copies `server/` |
 | `bokaclaw-dashboard` | `dashboard/Dockerfile` | `dashboard/` | Next.js standalone build; `entrypoint.sh` comes from the context |
+| `bokaclaw-executor` | `server/executor.Dockerfile` | repo root `.` | Layers `server/executor-requirements.txt` (`czsc`, `openpyxl`, `pyharmonics`, `smartmoneyconcepts`, …) on `bokaclaw-server:test` for skill scripts |
 
 Never build the server from inside `server/` — its `COPY server/...` lines
 only resolve with the repo-root context.
@@ -75,6 +82,8 @@ docker run --rm --entrypoint python bokaclaw-server:test \
   -c 'import fastapi, httpx, sqlalchemy, alembic, bokaclaw_agent; print("server-ok")'
 docker run --rm --entrypoint sh bokaclaw-dashboard:test \
   -c 'test -f /app/server.js && test -d /app/.next/static && echo dashboard-ok'
+docker run --rm --entrypoint python bokaclaw-executor:test \
+  -c 'import czsc, openpyxl, pyharmonics, smartmoneyconcepts; print("executor-ok")'
 ```
 
 Expected sizes: server ~900 MB, dashboard ~310 MB.
@@ -101,7 +110,7 @@ Build pitfalls (full log in `references/troubleshooting.md`):
 | `bokaclaw-postgres` | `pgvector/pgvector:pg17` | 8432 | `postgres` DB (legacy Mem0 tables) + `mem0_app` DB (users, conversations, `memory_index_*`) |
 | `bokaclaw-server` | `bokaclaw-server:test` | 8000 | FastAPI; `/agent`, `/conversations`, `/memories`, `/auth` |
 | `bokaclaw-dashboard` | `bokaclaw-dashboard:test` | 3000 | Next.js UI; `/` redirects to `/login` |
-| `bokaclaw-executor` | `bokaclaw-server:test` | none | Sandboxed shell executor for agent `Bash` / `PowerShell` / `Monitor` |
+| `bokaclaw-executor` | `bokaclaw-executor:test` | none | Sandboxed executor for agent `Bash` / `PowerShell` / `Monitor` and `SkillRun` skill scripts |
 
 Browser → `http://localhost:3000`; browser API calls →
 `http://localhost:8000`; dashboard server-side calls →
@@ -209,7 +218,7 @@ and conflicts on ports 8432/3000.
 ## Done criteria
 
 Build:
-- Both builds exit 0 and the smoke checks print `server-ok` / `dashboard-ok`.
+- All builds exit 0 and the smoke checks print `server-ok` / `dashboard-ok` / `executor-ok`.
 
 Run:
 - All four containers are `Up`; postgres/server/dashboard publish the ports above, the executor publishes none.

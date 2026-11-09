@@ -155,7 +155,7 @@ POST /agent
 | `prompts.py` | 渲染 `<available-skills>` 块与静态使用说明 |
 | `__init__.py` | `load_skills_config`、`prepare_skill_context` |
 
-依赖：新增 `PyYAML>=6.0,<7.0`（写入 `server/requirements.txt` 并注明用途），只使用受限的 `SafeLoader`。P1 脚本运行在 executor（与 server 同镜像），因此同文件还预装 `numpy` / `pandas` / `requests`；其他 skill 依赖需要自定义 executor 镜像或显式加入 requirements。
+依赖：新增 `PyYAML>=6.0,<7.0`（写入 `server/requirements.txt` 并注明用途），只使用受限的 `SafeLoader`。P1 脚本运行在专用 executor 镜像（`server/executor.Dockerfile`，基于 server 镜像叠加 `server/executor-requirements.txt`）：server 镜像预装 `numpy` / `pandas` / `requests`，executor 额外预装 `czsc` / `openpyxl` / `pyharmonics` / `smartmoneyconcepts`。新增 skill 依赖时把它们加入 `executor-requirements.txt` 并重建 executor 镜像，不必重建 server 镜像。czsc 0.10.x 默认绑定 Rust 版 `CZSC`，其构造函数不接受经典 skill 使用的 `get_signals=`；`SkillRun` 为脚本子进程设置 `CZSC_USE_PYTHON=1`，强制使用纯 Python 实现。
 
 ## 7. 渐进披露与上下文注入
 
@@ -331,7 +331,7 @@ SkillRun(
 - 脚本的 stdout/stderr 继续受 executor 输出上限和 `AGENT_TOOL_RESULT_MAX_CHARS` 约束；输出是数据，不是指令。
 - 取消通过 `cancel_event` 传递；超时由 executor 和 server 双重限制，超时后杀掉整个进程组。
 - 脚本产物默认写在临时目录，执行结束即删除；需要持久化的产物必须显式写到 `/app/workspace`。
-- 依赖：executor 镜像（与 server 同镜像）已预装 `numpy`、`pandas`、`requests`；`czsc`、`smartmoneyconcepts` 等 niche 包需要自定义 executor 镜像或显式加入 `server/requirements.txt`。
+- 依赖：executor 镜像由 `server/executor.Dockerfile` 构建，在 server 镜像之上叠加 `server/executor-requirements.txt`，当前预装 `numpy`、`pandas`、`requests` 以及 `czsc`、`openpyxl`、`pyharmonics`、`smartmoneyconcepts`。新增依赖时更新该文件并运行 `build-images.sh executor`，不需要重建 server 镜像。
 
 ## 10. 安全与信任边界
 
@@ -459,7 +459,7 @@ P0 + P1 的具体改动点：
    把返回的 block 插入消息、把 tools 并入 `extra_tools`，并传入 `interaction` / `cancel_event`。
 3. `server/app/agent/dev_tools.py`：workspace skill 目录的写保护（仅当配置启用）。
 4. `server/app/agent/executor.py` / `executor_app.py`：新增 `/skills/run`、bundle 解包、临时目录、超时与输出限制。
-5. `server/requirements.txt`：`PyYAML` + 脚本基础依赖 `numpy` / `pandas` / `requests`。
+5. `server/requirements.txt`：`PyYAML` + 脚本基础依赖 `numpy` / `pandas` / `requests`；`server/executor-requirements.txt` + `server/executor.Dockerfile`：专用 executor 镜像的额外 skill 包。
 6. `server/.env.example`、`server/README.md`、`docs/docs.json`、本页。
 7. 本地栈 `start-stack.sh` 增加只读 bind mount 与 `AGENT_SKILLS_ALLOW_SCRIPTS` 默认值。
 
@@ -508,7 +508,7 @@ P0 + P1 的具体改动点：
 | 资源读取失败 | 路径是否相对、是否在 skill 目录内、是否符号链接、是否超过大小限制 |
 | `scripts_disabled=true` | `AGENT_SKILLS_ALLOW_SCRIPTS` 是否为 true |
 | `SkillRun` 拒绝执行 | 是否配置 `AGENT_EXECUTOR_URL`；当前 run 是否有交互通道；审批是否被拒绝/超时 |
-| 脚本 ImportError | executor 镜像是否安装了脚本依赖（仓库自带 numpy/pandas/requests，其他包需自定义镜像） |
+| 脚本 ImportError | 包是否在 `server/executor-requirements.txt` 中；更新后运行 `build-images.sh executor` 并让 executor 容器使用新镜像 |
 | 脚本超时 | 调整 `AGENT_SKILLS_SCRIPT_TIMEOUT_SECONDS` 或 `timeout_seconds`；确认脚本没有等待网络 |
 
 ## 19. 验证

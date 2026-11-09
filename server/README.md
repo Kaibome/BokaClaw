@@ -266,6 +266,14 @@ interactive channel fails closed. Arguments are parsed with `shlex` and are neve
 shell. See [`docs/server/skill-integration.md`](../docs/server/skill-integration.md) for the
 bundle limits, security model, and result schema.
 
+Skill scripts run in the dedicated `bokaclaw-executor` image, which layers
+`server/executor-requirements.txt` on top of the server image. That file carries `czsc`,
+`openpyxl`, `pyharmonics`, and `smartmoneyconcepts` for finance skills. Add a missing package
+there and rebuild with
+`.claude/skills/bokaclaw-docker-stack/scripts/build-images.sh executor`; the API image stays lean.
+`SkillRun` sets `CZSC_USE_PYTHON=1` for czsc-based scripts so the classic
+`CZSC(..., get_signals=...)` API works instead of the Rust binding.
+
 Conversations are managed through `/conversations`. Set `AGENT_LOOP_URL` to delegate turns to an
 external executor over HTTP instead.
 

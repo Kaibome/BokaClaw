@@ -203,6 +203,11 @@ def run_skill_bundle(config: DevToolConfig, payload: SkillRunRequest) -> dict:
         environment = command_env(config)
         environment["HOME"] = str(root)
         environment["PWD"] = str(root)
+        # czsc 0.10.x binds the Rust CZSC by default, whose constructor does not
+        # accept the ``get_signals=`` keyword used by classic czsc skills. The
+        # compatibility switch forces the pure-Python implementation and only
+        # affects this child process.
+        environment["CZSC_USE_PYTHON"] = "1"
 
         started = time.monotonic()
         try:
