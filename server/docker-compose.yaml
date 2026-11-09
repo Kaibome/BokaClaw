@@ -17,7 +17,7 @@ services:
       - bokaclaw_network
     volumes:
       - ./history:/app/history
-      - memory_data:/app/memory
+      - ${AGENT_MEMORY_HOST:-../memory}:/app/memory
       - .:/app
     depends_on:
       postgres:
@@ -77,7 +77,6 @@ services:
 
 volumes:
   postgres_db:
-  memory_data:
 
 networks:
   bokaclaw_network:

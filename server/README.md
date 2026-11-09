@@ -48,7 +48,7 @@ Teardown:
 
 ```bash
 cd server && make down      # stop the stack
-cd server && make clean     # stop and delete volumes, including memory workspaces
+cd server && make clean     # stop and delete the Postgres volume; host memory files remain
 ```
 
 ### Browser-first
@@ -64,7 +64,9 @@ Then open `http://localhost:3000` and complete the setup wizard.
 
 ### Workspace Markdown is authoritative
 
-Each dashboard user gets a workspace under `AGENT_MEMORY_ROOT/users/<user_id>/`:
+`AGENT_MEMORY_ROOT` is a host bind mount (`AGENT_MEMORY_HOST`, default `../memory` from
+`server/`), so the files are directly visible on the host instead of living in a Docker
+volume. Each dashboard user gets a workspace under `AGENT_MEMORY_ROOT/users/<user_id>/`:
 
 ```
 USER.md                # identity and durable preferences, always injected

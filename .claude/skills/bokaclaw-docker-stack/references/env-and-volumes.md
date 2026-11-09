@@ -115,7 +115,8 @@ docker run -d --name bokaclaw-server --network bokaclaw-net --restart unless-sto
   -e AGENT_EXECUTOR_TOKEN="$AGENT_EXECUTOR_TOKEN" \
   -e FASTEMBED_CACHE_PATH=/app/history/fastembed \
   --add-host host.docker.internal:host-gateway \
-  -p 8000:8000 -v mem0-local-history:/app/history -v mem0-local-memory:/app/memory \
+  -p 8000:8000 -v mem0-local-history:/app/history \
+  -v /Users/pankaibo/BokaClaw/memory:/app/memory \
   -v /Users/pankaibo/BokaClaw/workspace:/app/workspace \
   bokaclaw-server:test uvicorn app.main:app --host 0.0.0.0 --port 8000
 
@@ -149,13 +150,18 @@ index in that same application database.
 |---|---|---|
 | `mem0-local-pg` | `/var/lib/postgresql/data` | The whole PG 17 cluster (both databases, `pgvector` extension, memories) |
 | `mem0-local-history` | `/app/history` | Legacy `history.db` (migration input only) and `fastembed/`, the ONNX embedder cache |
-| `mem0-local-memory` | `/app/memory` | Authoritative workspace Markdown: `users/<user_id>/{USER.md,MEMORY.md,memory/YYYY-MM-DD.md}` |
+| `/Users/pankaibo/BokaClaw/memory` (host bind, `MEMORY_HOST`) | `/app/memory` | Authoritative workspace Markdown: `users/<user_id>/{USER.md,MEMORY.md,memory/YYYY-MM-DD.md}` |
 | `/Users/pankaibo/BokaClaw/workspace` (host bind, `WORKSPACE_HOST`) | `AGENT_WORKSPACE_ROOT` (`/app/workspace`) | Files written by the agent's `Write` / `Edit` / `NotebookEdit` tools; survives container re-creation |
 
+Memory is bind-mounted so the files are directly visible on macOS. It is mounted
+into the server only, never into the executor. The old `mem0-local-memory`
+volume may still exist after the switch; keep it as a rollback copy until the
+host directory has been verified, then remove it explicitly.
+
 `docker rm` does not delete volumes. `docker volume rm mem0-local-pg` **does**,
-and it wipes the derived memory index, users, and conversations;
-`docker volume rm mem0-local-memory` deletes the authoritative Markdown files.
-Never run either without an explicit request.
+and it wipes the derived memory index, users, and conversations. Deleting the
+host `MEMORY_HOST` directory deletes the authoritative Markdown files. Never do
+either without an explicit request.
 
 ## pgvector dimensions
 

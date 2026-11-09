@@ -139,9 +139,9 @@ field meanings: `references/env-and-volumes.md`. Minimum for this stack:
   (`FASTEMBED_CACHE_PATH`, passed by `start-stack.sh`), so `RECREATE=1` does not
   download it again; if a first download crawls, see
   `references/troubleshooting.md` §9.
-- `MEMORY_BACKEND=markdown`, `AGENT_MEMORY_ROOT=/app/memory` (the
-  `mem0-local-memory` volume, mounted into the server only — never into the
-  executor)
+- `MEMORY_BACKEND=markdown`, `AGENT_MEMORY_ROOT=/app/memory`; the host directory
+  `MEMORY_HOST` (default `/Users/pankaibo/BokaClaw/memory`) is bind-mounted
+  there. It is mounted into the server only — never into the executor.
 - `AGENT_LOOP_MOCK=true` for UI-only tests; real replies need
   `AGENT_LOOP_MOCK=false` plus `AGENT_MODEL` / `AGENT_API_KEY` / `AGENT_BASE_URL`
   (DeepSeek: `deepseek-flash`, `https://api.deepseek.com`)

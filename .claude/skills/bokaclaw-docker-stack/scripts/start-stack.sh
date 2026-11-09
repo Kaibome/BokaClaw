@@ -2,7 +2,8 @@
 # Start Postgres + BokaClaw server + dashboard + sandboxed shell executor.
 # Generates server/.env with random secrets when it is missing.
 # Recreate the server/dashboard/executor containers with RECREATE=1 to pick up new images.
-# The agent workspace is bind-mounted from $WORKSPACE_HOST so files survive re-creation.
+# The agent workspace is bind-mounted from $WORKSPACE_HOST and authoritative memory
+# from $MEMORY_HOST so both survive re-creation and are visible on macOS.
 # Shell tools reach the executor over the internal $EXECUTOR_NETWORK bridge; the
 # executor has no other network, a read-only root filesystem and a non-root user.
 set -euo pipefail
@@ -30,7 +31,9 @@ EVAL_CPUS=${EVAL_CPUS:-2}
 PG_IMAGE=${PG_IMAGE:-pgvector/pgvector:pg17}
 PG_VOLUME=${PG_VOLUME:-mem0-local-pg}
 HISTORY_VOLUME=${HISTORY_VOLUME:-mem0-local-history}
-MEMORY_VOLUME=${MEMORY_VOLUME:-mem0-local-memory}
+# Memory Markdown is authoritative: bind-mount it into the Mac host instead of
+# keeping it inside the VM's Docker volume. Never mount it into the executor.
+MEMORY_HOST=${MEMORY_HOST:-}
 MEMORY_CONTAINER=${AGENT_MEMORY_ROOT:-/app/memory}
 MEMORY_BACKEND=${MEMORY_BACKEND:-markdown}
 PG_PORT=${PG_PORT:-8432}
@@ -123,6 +126,16 @@ set -a
 # shellcheck disable=SC1090
 . "$ENV_FILE"
 set +a
+
+# Prefer an explicit shell override, then .env (shared with docker-compose),
+# then the local default. Memory must stay outside AGENT_WORKSPACE_ROOT.
+MEMORY_HOST=${MEMORY_HOST:-${AGENT_MEMORY_HOST:-/Users/pankaibo/BokaClaw/memory}}
+case "$MEMORY_HOST" in
+  "$WORKSPACE_HOST" | "$WORKSPACE_HOST"/*)
+    echo "error: MEMORY_HOST ($MEMORY_HOST) must not be inside WORKSPACE_HOST ($WORKSPACE_HOST)" >&2
+    exit 1
+    ;;
+esac
 
 POSTGRES_USER=${POSTGRES_USER:-postgres}
 POSTGRES_DB=${POSTGRES_DB:-postgres}
@@ -251,6 +264,22 @@ if docker container inspect "$SERVER_CONTAINER" >/dev/null 2>&1 &&
   docker rm -f "$SERVER_CONTAINER" >/dev/null
 fi
 
+# A container created with the old named volume must switch to the host bind.
+if docker container inspect "$SERVER_CONTAINER" >/dev/null 2>&1; then
+  memory_mount=$(docker inspect -f \
+    '{{range .Mounts}}{{.Destination}}={{if .Name}}{{.Name}}{{else}}{{.Source}}{{end}};{{end}}' \
+    "$SERVER_CONTAINER")
+  case "$memory_mount" in
+    *"${MEMORY_CONTAINER}=${MEMORY_HOST};"*) ;;
+    *)
+      log "$SERVER_CONTAINER memory mount changed; recreating"
+      docker rm -f "$SERVER_CONTAINER" >/dev/null
+      ;;
+  esac
+fi
+
+mkdir -p "$MEMORY_HOST"
+
 if docker container inspect "$SERVER_CONTAINER" >/dev/null 2>&1; then
   docker start "$SERVER_CONTAINER" >/dev/null
 else
@@ -273,7 +302,7 @@ else
     --add-host host.docker.internal:host-gateway \
     -p "${API_PORT}:8000" \
     -v "${HISTORY_VOLUME}:/app/history" \
-    -v "${MEMORY_VOLUME}:${MEMORY_CONTAINER}" \
+    -v "${MEMORY_HOST}:${MEMORY_CONTAINER}" \
     -v "${WORKSPACE_HOST}:${WORKSPACE_CONTAINER}" \
     "$SERVER_IMAGE" uvicorn app.main:app --host 0.0.0.0 --port 8000 >/dev/null
 fi
@@ -378,4 +407,4 @@ printf '    API:       %s\n' "$API_PUBLIC_URL"
 printf '    Postgres:  localhost:%s\n' "$PG_PORT"
 printf '    Eval:      %s (worker %s)\n' "$EVAL_CONTAINER" "${EVAL_WORKER_ID:-eval-1}"
 printf '    Workspace: %s -> %s\n' "$WORKSPACE_HOST" "$WORKSPACE_CONTAINER"
-printf '    Memory:    volume %s -> %s\n' "$MEMORY_VOLUME" "$MEMORY_CONTAINER"
+printf '    Memory:    bind %s -> %s\n' "$MEMORY_HOST" "$MEMORY_CONTAINER"

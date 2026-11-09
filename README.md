@@ -186,7 +186,7 @@ make up
 RECREATE=1 .claude/skills/bokaclaw-docker-stack/scripts/start-stack.sh
 ```
 
-该栈会把 `server/.env` 中的 `AGENT_EXECUTOR_URL` 指向 `http://bokaclaw-executor:8099`，并把记忆工作区挂载为独立 volume `mem0-local-memory`（只挂载到 server，不挂载到 executor）。注意此脚本使用端口 **8000**（Compose 栈为 8888）。
+该栈会把 `server/.env` 中的 `AGENT_EXECUTOR_URL` 指向 `http://bokaclaw-executor:8099`，并把记忆工作区以 bind mount 方式挂载到宿主机：默认 `MEMORY_HOST=/Users/pankaibo/BokaClaw/memory` → 容器 `/app/memory`（只挂载到 server，不挂载到 executor）。可通过 `MEMORY_HOST=/path/to/memory` 覆盖。注意此脚本使用端口 **8000**（Compose 栈为 8888）。
 
 ### 单容器部署
 
