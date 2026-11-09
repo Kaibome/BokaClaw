@@ -442,6 +442,7 @@ class AgentRunManager:
         interrupted = False
         spans: SpanRecorder | None = None
         usage_meter = RunUsageMeter()
+        memory_injected = False
 
         try:
             async with self._semaphore:
@@ -480,6 +481,8 @@ class AgentRunManager:
                     async for event in self._events(run, metadata, usage_meter):
                         if not writer.available:
                             break
+                        if isinstance(event, AgentMemoryRecall) and (event.chars or 0) > 0:
+                            memory_injected = True
                         await self._handle_event(writer, spans, trace, metadata, event, usage_meter)
                     # Deltas are buffered; settle them before judging the reply,
                     # or a short answer with no tool events looks like no content.
@@ -496,6 +499,7 @@ class AgentRunManager:
                         code,
                         detail,
                         interrupted=False,
+                        memory_injected=memory_injected,
                     )
                 except AgentLoopError as exc:
                     status = "cancelled" if exc.code == "agent_cancelled" else "failed"
@@ -510,6 +514,7 @@ class AgentRunManager:
                         exc.code,
                         exc.detail,
                         interrupted=False,
+                        memory_injected=memory_injected,
                     )
                 except asyncio.CancelledError:
                     _clear_cancellation()
@@ -532,6 +537,7 @@ class AgentRunManager:
                         code,
                         detail,
                         interrupted=interrupted,
+                        memory_injected=memory_injected,
                     )
                 except Exception as exc:  # pragma: no cover - defensive
                     logger.exception("Agent run %s crashed", run_id)
@@ -546,6 +552,7 @@ class AgentRunManager:
                         "agent_upstream_error",
                         f"Agent run crashed: {exc}",
                         interrupted=False,
+                        memory_injected=memory_injected,
                     )
                 finally:
                     # Wake any tool blocked in ask_user before the writer goes
@@ -725,6 +732,7 @@ class AgentRunManager:
         error_detail: str | None,
         *,
         interrupted: bool,
+        memory_injected: bool = False,
     ) -> None:
         # Stop accepting answers before the first terminal write. seal() waits
         # for an answer write already in flight, so user.* cannot land after
@@ -849,6 +857,7 @@ class AgentRunManager:
                         dict(run.request_payload or {}),
                         writer.content,
                         trace.snapshot(),
+                        memory_injected=memory_injected,
                     )
             except Exception as exc:
                 logger.warning("Failed to record turn memory for run %s", run.id, exc_info=True)

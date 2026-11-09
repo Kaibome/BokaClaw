@@ -41,8 +41,9 @@ python -m app.memory.cli prune --retention-days 180
 ```
 
 Startup and periodic reconciliation are controlled by `AGENT_MEMORY_RECONCILE_ON_START` and
-`AGENT_MEMORY_RECONCILE_INTERVAL_SECONDS`. A crash between the file write and the index commit
-leaves the user marked dirty; the next reconcile repairs it.
+`AGENT_MEMORY_RECONCILE_INTERVAL_SECONDS`. Recall and scoped search also compare Markdown
+mtime/size with `memory_index_files`, so a file edited outside the service is reconciled before
+it is queried. A failed index write marks the user dirty; the next reconcile repairs it.
 
 ## Configuration
 

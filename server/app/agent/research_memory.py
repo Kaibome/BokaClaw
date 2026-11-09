@@ -1,43 +1,33 @@
-"""Persist and reuse research conclusions across runs.
+"""Reuse research conclusions saved by earlier runs.
 
-A successful web-research turn is valuable beyond the conversation it happened
-in: the same user often asks the same question again weeks later and the agent
-otherwise starts from zero. This module has two halves:
+Turns no longer persist new research conclusions: ``WebSearch`` and ``WebFetch``
+are cheap to call again, and storing their answers added review and cleanup
+cost. This module keeps the read half so conclusions saved before that change
+(or carried over by migration) can still be reused.
 
-* ``remember_research`` (and its reporting form ``save_research``) runs after a
-  completed turn. When the tool trace shows a successful ``WebSearch`` or
-  ``WebFetch``, it stores the final answer, the source URLs, and the capture
-  time as one user-scoped workspace memory entry. Entries are labeled
-  ``kind="research_conclusion"`` and stored verbatim, so the conclusion and its
-  sources are preserved exactly. An identical question
-  updates the existing memory instead of appending a duplicate.
-* ``prior_research_block`` (and its reporting form ``recall_research``) runs
-  before a turn. It first looks up an identical question by its stable key,
-  then searches by similarity for paraphrases, drops anything older than the
-  TTL, and renders a short block of reference notes. The block tells the model
-  to reuse a saved conclusion instead of repeating the same web research. It is
-  deliberately injected as a user-role message, never into the system prompt:
-  saved conclusions derive from untrusted web pages, so they must not gain
-  system-level authority.
+``prior_research_block`` (and its reporting form ``recall_research``) runs
+before a turn. It first looks up an identical question by its stable key, then
+searches by similarity for paraphrases, drops anything older than the TTL, and
+renders a short block of reference notes. The block is deliberately injected as
+a user-role message, never into the system prompt: saved conclusions derive
+from untrusted web pages, so they must not gain system-level authority.
 
-The reporting forms return a ``ResearchRecall`` / ``ResearchSave`` dataclass so
-the runner can persist a ``memory.recall`` / ``memory.save`` event and span;
-without them a lookup that found nothing looks identical to one that never ran.
+The reporting form returns a ``ResearchRecall`` dataclass so the runner can
+persist a ``memory.recall`` event and span; without it a lookup that found
+nothing looks identical to one that never ran.
 
-Both halves are best-effort: memory being unavailable or slow must never fail
-the turn. The caller can disable the feature with ``AGENT_RESEARCH_MEMORY``.
+Recall is best-effort: memory being unavailable or slow must never fail the
+turn. The caller can disable the feature with ``AGENT_RESEARCH_MEMORY``.
 """
 
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional, Tuple
-from urllib.parse import urlsplit, urlunsplit
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -51,13 +41,8 @@ DEFAULT_TOP_K = 3
 # the floor is applied to the raw semantic score exposed by ``explain=True``.
 DETAILS_KEY = "score_details"
 
-MAX_SOURCES = 8
-MAX_SAVED_ANSWER_CHARS = 4_000
 MAX_INJECTED_CHARS = 3_000
 MAX_INJECTED_CONCLUSION_CHARS = 1_200
-
-_WEB_SEARCH_NAMES = {"websearch"}
-_WEB_FETCH_NAMES = {"webfetch"}
 
 
 @dataclass
@@ -106,20 +91,6 @@ class ResearchRecall:
         return len(self.block)
 
 
-@dataclass
-class ResearchSave:
-    """What the post-turn write decided to do."""
-
-    action: str = "skipped"  # added | updated | skipped | failed
-    question: str = ""
-    memory_id: Optional[str] = None
-    sources: int = 0
-    chars: int = 0
-    reason: Optional[str] = None  # why a skip happened
-    error: Optional[str] = None
-    duration_ms: Optional[int] = None
-
-
 def memory_enabled() -> bool:
     raw = os.environ.get("AGENT_RESEARCH_MEMORY")
     if raw is None or not raw.strip():
@@ -136,178 +107,10 @@ def min_score_from_env() -> float:
 
 
 def question_key(question: str) -> str:
-    """Stable key for exact question repeats, used to update instead of append."""
+    """Stable key for exact question repeats, used by the recall lookup."""
 
     normalized = " ".join(question.lower().split())
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:32]
-
-
-def extract_web_sources(entries: Iterable[Dict[str, Any]]) -> Tuple[List[Dict[str, str]], Optional[str]]:
-    """Collect successful web sources from a ``ToolTrace`` snapshot.
-
-    Returns ``(sources, fetched_at)`` where ``sources`` preserves first-seen
-    order and ``fetched_at`` is the latest web tool ``finished_at`` value.
-    """
-
-    sources: Dict[str, Dict[str, str]] = {}
-    fetched_at: Optional[str] = None
-
-    for entry in entries or []:
-        if not isinstance(entry, dict):
-            continue
-        if entry.get("is_error") or entry.get("status") != "completed":
-            continue
-
-        name = _normalize_tool_name(entry.get("name"))
-        if name not in _WEB_SEARCH_NAMES and name not in _WEB_FETCH_NAMES:
-            continue
-
-        payload = _json_object(entry.get("content"))
-        if name in _WEB_SEARCH_NAMES:
-            if isinstance(payload, dict):
-                for item in payload.get("results") or []:
-                    if not isinstance(item, dict):
-                        continue
-                    url = str(item.get("url") or "").strip()
-                    if url:
-                        _add_source(sources, url, str(item.get("title") or "").strip())
-        else:
-            arguments = entry.get("arguments") if isinstance(entry.get("arguments"), dict) else {}
-            url = ""
-            if isinstance(payload, dict):
-                url = str(payload.get("url") or "").strip()
-            if not url:
-                url = str(arguments.get("url") or "").strip()
-            if url:
-                _add_source(sources, url, "")
-
-        finished_at = entry.get("finished_at")
-        if isinstance(finished_at, str) and finished_at:
-            fetched_at = finished_at if fetched_at is None else max(fetched_at, finished_at)
-
-    return list(sources.values())[:MAX_SOURCES], fetched_at
-
-
-def build_conclusion_text(
-    question: str,
-    answer: str,
-    sources: List[Dict[str, str]],
-    captured_at: str,
-) -> str:
-    lines = [
-        "Research conclusion",
-        f"Question: {_clip(question.strip(), 500)}",
-        f"Answer: {_clip(answer.strip(), MAX_SAVED_ANSWER_CHARS)}",
-        "Sources:",
-    ]
-    for source in sources:
-        title = source.get("title") or ""
-        prefix = f"{title} - " if title else ""
-        lines.append(f"- {prefix}{source['url']}")
-    lines.append(f"Captured at: {captured_at}")
-    return "\n".join(lines)
-
-
-def remember_research(
-    payload: Dict[str, Any],
-    content: str,
-    entries: Iterable[Dict[str, Any]],
-) -> Optional[str]:
-    """Store one completed turn's research conclusion. Returns the memory id."""
-
-    report = save_research(payload, content, entries)
-    return report.memory_id if report.action in {"added", "updated"} else None
-
-
-def save_research(
-    payload: Dict[str, Any],
-    content: str,
-    entries: Iterable[Dict[str, Any]],
-) -> ResearchSave:
-    """Store one completed turn's research conclusion and report the outcome.
-
-    The write is skipped unless the feature is enabled, the run is user-scoped,
-    the answer is non-empty, and at least one successful web source exists.
-    """
-
-    question = str(payload.get("message") or "").strip()
-    report = ResearchSave(question=question)
-
-    if not memory_enabled():
-        report.reason = "disabled"
-        return report
-
-    user_id = str(payload.get("user_id") or "").strip()
-    answer = (content or "").strip()
-    if not user_id:
-        report.reason = "no_user"
-        return report
-    if not question:
-        report.reason = "no_question"
-        return report
-    if not answer:
-        report.reason = "no_answer"
-        return report
-
-    sources, fetched_at = extract_web_sources(entries)
-    if not sources:
-        report.reason = "no_sources"
-        return report
-
-    captured_at = datetime.now(timezone.utc).isoformat()
-    text = build_conclusion_text(question, answer, sources, captured_at)
-    key = question_key(question)
-    metadata: Dict[str, Any] = {
-        "kind": RESEARCH_KIND,
-        "question_key": key,
-        "question": _clip(question, 500),
-        "captured_at": captured_at,
-        "sources": [source["url"] for source in sources],
-    }
-    if fetched_at:
-        metadata["fetched_at"] = fetched_at
-    for name in ("run_id", "conversation_id"):
-        value = payload.get(name)
-        if value:
-            metadata[name] = str(value)
-
-    memory = _memory()
-    if memory is None:
-        report.reason = "memory_unavailable"
-        return report
-
-    report.sources = len(sources)
-    report.chars = len(text)
-
-    existing = _find_existing(memory, user_id, key)
-    if existing:
-        try:
-            memory.update(existing, text=text, metadata=metadata)
-            logger.info("research memory updated user=%s memory_id=%s", user_id, existing)
-            report.action = "updated"
-            report.memory_id = str(existing)
-            return report
-        except Exception:
-            # The memory may have been deleted between the lookup and the
-            # update; fall through and add a fresh one.
-            logger.warning("Failed to update research memory %s; adding a new one", existing, exc_info=True)
-
-    try:
-        response = memory.add(
-            messages=[{"role": "assistant", "content": text}],
-            user_id=user_id,
-            metadata=metadata,
-            infer=False,
-        )
-    except Exception as exc:
-        logger.warning("Failed to save research memory for user %s", user_id, exc_info=True)
-        report.action = "failed"
-        report.error = f"{type(exc).__name__}: {exc}"
-        return report
-
-    report.action = "added"
-    report.memory_id = _first_memory_id(response)
-    return report
 
 
 def prior_research_block(
@@ -482,13 +285,6 @@ def _render_block(items: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def _find_existing(memory: Any, user_id: str, key: str) -> Optional[str]:
-    for item in _exact_matches(memory, user_id, key):
-        if item.get("id"):
-            return str(item["id"])
-    return None
-
-
 def _exact_matches(memory: Any, user_id: str, key: str) -> List[Dict[str, Any]]:
     """Return memories whose metadata proves they are this question's conclusion."""
 
@@ -604,58 +400,6 @@ def _results(response: Any) -> List[Any]:
     else:
         results = response
     return results if isinstance(results, list) else []
-
-
-def _first_memory_id(response: Any) -> Optional[str]:
-    for item in _results(response):
-        if isinstance(item, dict) and item.get("id"):
-            return str(item["id"])
-    return None
-
-
-def _add_source(sources: Dict[str, Dict[str, str]], url: str, title: str) -> None:
-    key = _source_key(url)
-    if not key:
-        return
-    current = sources.get(key)
-    if current is None:
-        sources[key] = {"url": url.strip(), "title": title}
-    elif not current.get("title") and title:
-        current["title"] = title
-
-
-def _source_key(url: str) -> str:
-    """Dedupe URLs without treating path case as insignificant."""
-
-    text = url.strip()
-    if not text:
-        return ""
-    try:
-        parts = urlsplit(text)
-    except ValueError:
-        return text.rstrip("/")
-    if not parts.scheme and not parts.netloc:
-        return text.rstrip("/")
-    path = parts.path or "/"
-    if path != "/":
-        path = path.rstrip("/")
-    return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), path, parts.query, ""))
-
-
-def _normalize_tool_name(name: Any) -> str:
-    return str(name or "").replace("_", "").replace("-", "").strip().lower()
-
-
-def _json_object(text: Any) -> Any:
-    if not isinstance(text, str):
-        return None
-    value = text.strip()
-    if not value or value[0] not in "[{":
-        return None
-    try:
-        return json.loads(value)
-    except (TypeError, ValueError):
-        return None
 
 
 def _parse_datetime(value: Any) -> Optional[datetime]:

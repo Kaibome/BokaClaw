@@ -523,18 +523,18 @@ async def test_manager_uses_transport_aggregate_when_no_per_call_events():
 
 
 @pytest.mark.asyncio
-async def test_manager_saves_research_memory_after_completion(monkeypatch):
+async def test_manager_saves_only_the_episode_after_a_web_turn(monkeypatch):
     saved = []
 
-    def fake_save(payload, content, entries):
+    def fake_save(payload, content, entries, **_kwargs):
         saved.append((payload, content, entries))
         return TurnMemorySave(
-            action="added",
+            action="appended",
             question=payload["message"],
             memory_id="mem-1",
-            sources=1,
+            sources=0,
             chars=180,
-            kind="research_conclusion",
+            kind="episode",
             entries=1,
         )
 
@@ -584,18 +584,27 @@ async def test_manager_saves_research_memory_after_completion(monkeypatch):
     event_types = [event.event_type for event in repo.events[run.id]]
     assert event_types[-1] == "memory.save"
     save_event = repo.events[run.id][-1].payload
-    assert save_event["action"] == "added"
+    assert save_event["action"] == "appended"
     assert save_event["memory_id"] == "mem-1"
-    assert save_event["sources"] == 1
+    assert save_event["sources"] == 0
+    assert save_event["kind"] == "episode"
     assert save_event["duration_ms"] is not None
     span = repo.spans[(run.id, "memory:save")]
     assert span["span_type"] == "memory"
     assert span["status"] == "completed"
-    assert span["attributes"]["action"] == "added"
+    assert span["attributes"]["action"] == "appended"
 
 
 @pytest.mark.asyncio
-async def test_manager_persists_the_memory_recall_before_the_reply():
+async def test_manager_persists_the_memory_recall_before_the_reply(monkeypatch):
+    seen = {}
+
+    def fake_save(_payload, _content, _entries, **kwargs):
+        seen.update(kwargs)
+        return TurnMemorySave(action="skipped")
+
+    monkeypatch.setattr(agent_runner, "save_turn_memory", fake_save)
+
     async def executor(_payload, _request_id, *, cancel_event=None, max_seconds=None):
         yield AgentMemoryRecall(
             question="which model?",
@@ -630,6 +639,7 @@ async def test_manager_persists_the_memory_recall_before_the_reply():
     span = repo.spans[(run.id, "memory:recall")]
     assert span["span_type"] == "memory"
     assert span["attributes"]["floor"] == 0.5
+    assert seen["memory_injected"] is True
 
 
 @pytest.mark.asyncio

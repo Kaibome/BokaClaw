@@ -195,8 +195,15 @@ def capture_turn(
             report.memory_id = entry.id
             return report
         path = service.store.append_entry(user_id, entry)
-        service.repository.upsert_entries([entry])
-        service.repository.record_history(entry.id, user_id, "ADD", None, entry.content)
+        try:
+            service.repository.upsert_entries([entry])
+            service.repository.record_history(entry.id, user_id, "ADD", None, entry.content)
+        except Exception as exc:
+            if hasattr(service, "mark_dirty"):
+                service.mark_dirty(user_id, exc)
+            raise
+        if hasattr(service, "refresh_file_state"):
+            service.refresh_file_state(user_id, path)
         report.action = "appended"
         report.memory_id = entry.id
         report.path = str(path)

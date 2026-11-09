@@ -1,11 +1,10 @@
-"""Tests for reusable research conclusions stored in workspace memory.
+"""Tests for reusing research conclusions saved by earlier runs.
 
 The memory service is replaced with a fake so no embedding model or database is
-needed; these tests cover source extraction, the save/update decision, TTL and
-score filtering, and the block rendered into the system prompt.
+needed; these tests cover TTL and score filtering and the block rendered for
+the next turn.
 """
 
-import json
 import os
 import sys
 import types
@@ -26,8 +25,6 @@ class FakeMemory:
         self.all_results = all_results or []
         self.search_calls = []
         self.get_all_calls = []
-        self.add_calls = []
-        self.update_calls = []
 
     def search(self, **kwargs):
         self.search_calls.append(kwargs)
@@ -36,14 +33,6 @@ class FakeMemory:
     def get_all(self, **kwargs):
         self.get_all_calls.append(kwargs)
         return {"results": self.all_results}
-
-    def add(self, **kwargs):
-        self.add_calls.append(kwargs)
-        return {"results": [{"id": "mem-new", "memory": kwargs["messages"][0]["content"]}]}
-
-    def update(self, memory_id, **kwargs):
-        self.update_calls.append((memory_id, kwargs))
-        return {"message": "Memory updated successfully!"}
 
 
 @pytest.fixture(autouse=True)
@@ -65,42 +54,6 @@ def _now():
     return datetime.now(timezone.utc)
 
 
-def _payload(**overrides):
-    payload = {
-        "user_id": "user-1",
-        "message": "Which Qwen model is best for personal developers?",
-        "run_id": "run-1",
-        "conversation_id": "conv-1",
-    }
-    payload.update(overrides)
-    return payload
-
-
-def _search_entry(*results, **overrides):
-    entry = {
-        "name": "WebSearch",
-        "status": "completed",
-        "is_error": False,
-        "finished_at": "2026-11-04T10:00:00+00:00",
-        "content": json.dumps({"results": list(results)}),
-    }
-    entry.update(overrides)
-    return entry
-
-
-def _fetch_entry(url, **overrides):
-    entry = {
-        "name": "WebFetch",
-        "status": "completed",
-        "is_error": False,
-        "arguments": {"url": url},
-        "finished_at": "2026-11-04T10:05:00+00:00",
-        "content": json.dumps({"url": url, "content": "page body"}),
-    }
-    entry.update(overrides)
-    return entry
-
-
 def _memory_item(text, *, score=0.8, captured_at=None, kind=rm.RESEARCH_KIND):
     captured = captured_at or _now() - timedelta(days=1)
     return {
@@ -110,141 +63,6 @@ def _memory_item(text, *, score=0.8, captured_at=None, kind=rm.RESEARCH_KIND):
         "created_at": captured.isoformat(),
         "metadata": {"kind": kind, "captured_at": captured.isoformat()},
     }
-
-
-# ---- source extraction --------------------------------------------------------
-
-
-def test_extract_sources_collects_search_and_fetch_urls_without_duplicates():
-    entries = [
-        _search_entry(
-            {"url": "https://a.example/qwen", "title": "Qwen"},
-            {"url": "https://b.example/", "title": "B"},
-        ),
-        _fetch_entry("https://a.example/qwen/"),
-        _fetch_entry("https://c.example/pricing"),
-    ]
-
-    sources, fetched_at = rm.extract_web_sources(entries)
-
-    assert [source["url"] for source in sources] == [
-        "https://a.example/qwen",
-        "https://b.example/",
-        "https://c.example/pricing",
-    ]
-    assert sources[0]["title"] == "Qwen"
-    assert fetched_at == "2026-11-04T10:05:00+00:00"
-
-
-def test_extract_sources_ignores_errors_and_non_web_tools():
-    entries = [
-        _search_entry({"url": "https://ignored.example"}, is_error=True),
-        _search_entry({"url": "https://ignored2.example"}, status="failed"),
-        {"name": "Read", "status": "completed", "content": "file body"},
-        {"name": "WebSearch", "status": "completed", "content": "not json"},
-    ]
-
-    assert rm.extract_web_sources(entries) == ([], None)
-
-
-def test_extract_sources_uses_the_fetch_argument_when_the_body_has_no_url():
-    entry = _fetch_entry("")
-    entry["arguments"] = {"url": "https://args.example/page"}
-    entry["content"] = json.dumps({"content": "body"})
-
-    sources, _ = rm.extract_web_sources([entry])
-
-    assert sources == [{"url": "https://args.example/page", "title": ""}]
-
-
-# ---- saving -------------------------------------------------------------------
-
-
-def test_identical_questions_update_the_existing_memory(monkeypatch):
-    key = rm.question_key("Which Qwen model is best for personal developers?")
-    memory = FakeMemory(
-        all_results=[
-            {
-                "id": "mem-existing",
-                "metadata": {"kind": rm.RESEARCH_KIND, "question_key": key},
-            }
-        ]
-    )
-    _install_memory(monkeypatch, memory)
-    entries = [_search_entry({"url": "https://a.example", "title": "A"})]
-
-    memory_id = rm.remember_research(_payload(), "A detailed answer.", entries)
-
-    assert memory_id == "mem-existing"
-    assert memory.add_calls == []
-    updated_id, update = memory.update_calls[0]
-    assert updated_id == "mem-existing"
-    assert "A detailed answer." in update["text"]
-    assert "https://a.example" in update["text"]
-    assert update["metadata"]["kind"] == rm.RESEARCH_KIND
-    assert update["metadata"]["sources"] == ["https://a.example"]
-    assert update["metadata"]["run_id"] == "run-1"
-    assert update["metadata"]["conversation_id"] == "conv-1"
-    assert memory.get_all_calls[0]["filters"]["question_key"] == rm.question_key(
-        "Which Qwen model is best for personal developers?"
-    )
-
-
-def test_an_unrelated_memory_is_never_overwritten(monkeypatch):
-    memory = FakeMemory(all_results=[{"id": "mem-other", "metadata": {"kind": "note"}}])
-    _install_memory(monkeypatch, memory)
-    entries = [_search_entry({"url": "https://a.example", "title": "A"})]
-
-    assert rm.remember_research(_payload(), "Answer.", entries) == "mem-new"
-    assert memory.update_calls == []
-    assert len(memory.add_calls) == 1
-
-
-def test_a_new_question_adds_a_verbatim_memory(monkeypatch):
-    memory = FakeMemory()
-    _install_memory(monkeypatch, memory)
-    entries = [_search_entry({"url": "https://a.example", "title": "A"})]
-
-    memory_id = rm.remember_research(_payload(), "Answer.", entries)
-
-    assert memory_id == "mem-new"
-    assert memory.update_calls == []
-    call = memory.add_calls[0]
-    assert call["user_id"] == "user-1"
-    assert call["infer"] is False
-    assert call["messages"][0]["role"] == "assistant"
-    assert "Question: Which Qwen model" in call["messages"][0]["content"]
-    assert call["metadata"]["question_key"] == rm.question_key(_payload()["message"])
-
-
-def test_saving_is_skipped_without_web_sources_user_or_answer(monkeypatch):
-    memory = FakeMemory()
-    _install_memory(monkeypatch, memory)
-
-    assert rm.remember_research(_payload(), "answer", [{"name": "Read", "status": "completed", "content": "x"}]) is None
-    assert rm.remember_research(_payload(user_id=""), "answer", [_search_entry({"url": "https://a.example"})]) is None
-    assert rm.remember_research(_payload(), "   ", [_search_entry({"url": "https://a.example"})]) is None
-    assert memory.add_calls == []
-
-
-def test_saving_can_be_disabled(monkeypatch):
-    monkeypatch.setenv("AGENT_RESEARCH_MEMORY", "false")
-    memory = FakeMemory()
-    _install_memory(monkeypatch, memory)
-
-    assert rm.remember_research(_payload(), "answer", [_search_entry({"url": "https://a.example"})]) is None
-    assert memory.search_calls == []
-
-
-def test_memory_failures_never_raise(monkeypatch):
-    class BrokenMemory(FakeMemory):
-        def add(self, **kwargs):
-            raise RuntimeError("embedding offline")
-
-    memory = BrokenMemory()
-    _install_memory(monkeypatch, memory)
-
-    assert rm.remember_research(_payload(), "answer", [_search_entry({"url": "https://a.example"})]) is None
 
 
 # ---- retrieval ----------------------------------------------------------------
@@ -556,33 +374,3 @@ def test_recall_surfaces_search_failures(monkeypatch):
 
     assert report.block == ""
     assert report.error == "RuntimeError: vector store offline"
-
-
-def test_save_report_names_the_action_it_took(monkeypatch):
-    entries = [_search_entry({"url": "https://a.example", "title": "A"})]
-    memory = FakeMemory()
-    _install_memory(monkeypatch, memory)
-
-    added = rm.save_research(_payload(), "Answer.", entries)
-    assert (added.action, added.memory_id, added.sources) == ("added", "mem-new", 1)
-    assert added.chars > 0
-    assert added.reason is None
-
-    key = rm.question_key(_payload()["message"])
-    _install_memory(
-        monkeypatch,
-        FakeMemory(all_results=[{"id": "mem-existing", "metadata": {"kind": rm.RESEARCH_KIND, "question_key": key}}]),
-    )
-    updated = rm.save_research(_payload(), "Answer.", entries)
-    assert (updated.action, updated.memory_id) == ("updated", "mem-existing")
-
-    skipped = rm.save_research(_payload(user_id=""), "Answer.", entries)
-    assert (skipped.action, skipped.reason) == ("skipped", "no_user")
-
-    class BrokenMemory(FakeMemory):
-        def add(self, **kwargs):
-            raise RuntimeError("embedding offline")
-
-    _install_memory(monkeypatch, BrokenMemory())
-    failed = rm.save_research(_payload(), "Answer.", entries)
-    assert (failed.action, failed.error) == ("failed", "RuntimeError: embedding offline")

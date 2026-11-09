@@ -137,7 +137,7 @@ class AgentMemoryRecall:
 
 @dataclass
 class AgentMemorySave:
-    """The post-turn write of one research conclusion."""
+    """The post-turn write of one episodic capture."""
 
     action: str = "skipped"
     question: str = ""

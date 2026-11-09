@@ -62,13 +62,13 @@ flowchart LR
 <AGENT_MEMORY_ROOT>/users/<user_id>/
   USER.md                # 身份与稳定偏好，常驻注入
   MEMORY.md              # 显式保存的长期事实
-  memory/YYYY-MM-DD.md   # 轮末情节与研究结论
+  memory/YYYY-MM-DD.md   # 轮末情节
 ```
 
 - **轮末捕获**：仅在 run `completed` 后追加一条经过噪声过滤与密钥脱敏的原始情节，不调用模型。已使用记忆写工具、子代理、cron/heartbeat 等非交互轮次会跳过。
 - **显式写入**：`save_memory` 写入 `MEMORY.md`，`kind=identity` 写入 `USER.md`；`update_memory` / `delete_memory` 可通过 `AGENT_MEMORY_REQUIRE_APPROVAL=true` 走人工确认。
 - **召回**：每轮加载小画像并执行混合检索（语义 + 全文 + 重要度 + 时间衰减），结果作为 user 角色的 `<recalled-memories>` 块注入，绝不写入 system prompt；`trust="untrusted"` 内容永不自动注入。
-- **一致性**：先原子写文件，再更新索引；两者之间失败会把用户标记为 dirty，启动对账或手动 reconcile 会修复。
+- **一致性**：先原子写文件，再更新索引；索引写入失败会把用户标记为 dirty。启动时和每 5 分钟后台对账，召回/搜索也会按文件 mtime/size 检测外部编辑并即时 reconcile。
 - **每用户隔离**：目录为 `0o700`、文件为 `0o600`；`AGENT_MEMORY_ROOT` 不得位于 `AGENT_WORKSPACE_ROOT` 内，也不会挂载进 executor 容器。
 
 维护命令（Compose 栈）：
@@ -300,7 +300,7 @@ make prune-logs              # 清理 30 天前的请求日志
 |---|---|
 | 鉴权 | `POST /auth/register`、`POST /auth/login`、`POST /auth/refresh`、`GET/PATCH /auth/me`、`POST /auth/change-password`、`GET /auth/setup-status` |
 | API Key | `GET/POST /api-keys`、`DELETE /api-keys/{key_id}` |
-| 记忆 | `POST/GET /memories`、`GET/PUT/DELETE /memories/{id}`、`GET /memories/{id}/history`、`POST /search`、`POST /reset`；非管理员只能访问自己的 `user_id` 作用域 |
+| 记忆 | `POST/GET /memories`、`GET/PUT/DELETE /memories/{id}`、`GET /memories/{id}/history`、`POST /search`、`POST /reset` |
 | 实体 | `GET /entities`、`DELETE /entities/{type}/{id}` |
 | Agent | `POST /agent`、`GET /agent/runs/{id}`、`GET /agent/runs/{id}/events`、`POST /agent/runs/{id}/cancel`、`POST /agent/runs/{id}/answers` |
 | 会话 | `GET/POST /conversations`、`GET/PUT/DELETE /conversations/{id}`、`GET /conversations/{id}/messages` |

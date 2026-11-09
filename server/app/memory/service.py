@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from datetime import datetime, time, timezone
 from typing import Any, Callable, Dict, List, Optional
@@ -17,7 +18,7 @@ from .grammar import (
     parse_datetime,
     stable_id,
 )
-from .paths import scan_user_roots
+from .paths import memory_files, scan_user_roots
 from .repository import MemoryIndexRepository
 from .workspace import WorkspaceStore
 
@@ -132,6 +133,80 @@ class WorkspaceMemory:
     ) -> "WorkspaceMemory":
         return cls(settings, session_factory=session_factory)
 
+    # ---------------------------------------------------------- consistency
+
+    def mark_dirty(self, user_id: str, error: Exception) -> None:
+        """Record that the index may no longer match the Markdown files."""
+
+        try:
+            self.repository.set_dirty(
+                str(user_id), True, f"{type(error).__name__}: {error}"[:500]
+            )
+        except Exception:
+            logger.warning("Could not mark memory index dirty for %s", user_id, exc_info=True)
+
+    def refresh_file_state(self, user_id: str, path: Any) -> None:
+        """Update the file hash/mtime after this process wrote the file."""
+
+        try:
+            stat = path.stat()
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            self.repository.upsert_file_state(
+                str(user_id),
+                str(path),
+                digest,
+                int(stat.st_size),
+                datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc),
+            )
+        except Exception:
+            logger.warning("Could not refresh file state for %s", path, exc_info=True)
+
+    def ensure_fresh(self, user_id: str) -> bool:
+        """Reconcile one user when Markdown was changed outside the service."""
+
+        root = self.store.existing_root(user_id)
+        if not root.exists():
+            return False
+        files = {str(path): path for path in memory_files(root)}
+        try:
+            states = self.repository.file_states(user_id)
+        except Exception:
+            logger.warning("Could not read file state for %s", user_id, exc_info=True)
+            return False
+        needs_reconcile = set(files) != set(states)
+        if not needs_reconcile and not files:
+            try:
+                needs_reconcile = self.repository.count(user_id) > 0
+            except Exception:
+                needs_reconcile = False
+        if not needs_reconcile:
+            for path_text, path in files.items():
+                state = states.get(path_text) or {}
+                try:
+                    stat = path.stat()
+                except OSError:
+                    needs_reconcile = True
+                    break
+                mtime = state.get("mtime")
+                if not isinstance(mtime, datetime):
+                    needs_reconcile = True
+                    break
+                if mtime.tzinfo is None:
+                    mtime = mtime.replace(tzinfo=timezone.utc)
+                if int(state.get("size_bytes") or 0) != int(stat.st_size) or abs(
+                    stat.st_mtime - mtime.timestamp()
+                ) > 1.0:
+                    needs_reconcile = True
+                    break
+        if not needs_reconcile:
+            return False
+        from .maintenance import reconcile_user
+
+        result = reconcile_user(self, user_id)
+        if result.error:
+            logger.warning("On-demand reconcile failed for %s: %s", user_id, result.error)
+        return result.error is None
+
     # --------------------------------------------------------------- writes
 
     def add(
@@ -180,9 +255,14 @@ class WorkspaceMemory:
         existing = self.repository.get_entry(entry.id, show_expired=True)
         if existing is not None and existing.get("user_id") == scope:
             return {"results": [{"id": entry.id, "memory": entry.content, "event": "ADD"}]}
-        self.store.append_entry(scope, entry)
-        self.repository.upsert_entries([entry])
-        self.repository.record_history(entry.id, scope, "ADD", None, entry.content)
+        path = self.store.append_entry(scope, entry)
+        try:
+            self.repository.upsert_entries([entry])
+            self.repository.record_history(entry.id, scope, "ADD", None, entry.content)
+        except Exception as exc:
+            self.mark_dirty(scope, exc)
+            raise
+        self.refresh_file_state(scope, path)
         return {"results": [{"id": entry.id, "memory": entry.content, "event": "ADD"}]}
 
     def update(
@@ -222,9 +302,14 @@ class WorkspaceMemory:
         if expiration_date is not UNSET:
             entry.expires = _parse_expiration(expiration_date)
         entry.updated = _now()
-        self.store.replace_entry(user_id, entry)
-        self.repository.upsert_entries([entry])
-        self.repository.record_history(memory_id, user_id, "UPDATE", old, entry.content)
+        path = self.store.replace_entry(user_id, entry)
+        try:
+            self.repository.upsert_entries([entry])
+            self.repository.record_history(memory_id, user_id, "UPDATE", old, entry.content)
+        except Exception as exc:
+            self.mark_dirty(user_id, exc)
+            raise
+        self.refresh_file_state(user_id, path)
         return {"message": "Memory updated successfully!"}
 
     def delete(self, memory_id: str) -> Dict[str, Any]:
@@ -232,9 +317,14 @@ class WorkspaceMemory:
         if existing is None:
             raise MemoryNotFound(f"Memory {memory_id} not found")
         user_id = str(existing.get("user_id") or "")
-        self.store.delete_entry(user_id, memory_id)
-        self.repository.delete_entries([memory_id])
-        self.repository.record_history(memory_id, user_id, "DELETE", existing.get("memory"), None)
+        path = self.store.delete_entry(user_id, memory_id)
+        try:
+            self.repository.delete_entries([memory_id])
+            self.repository.record_history(memory_id, user_id, "DELETE", existing.get("memory"), None)
+        except Exception as exc:
+            self.mark_dirty(user_id, exc)
+            raise
+        self.refresh_file_state(user_id, path)
         return {"message": "Memory deleted successfully"}
 
     def delete_all(
@@ -252,13 +342,26 @@ class WorkspaceMemory:
         by_user: Dict[str, List[str]] = {}
         for row in rows:
             by_user.setdefault(str(row.get("user_id") or ""), []).append(str(row["id"]))
-        for scope, ids in by_user.items():
+        try:
+            for scope, ids in by_user.items():
+                if not scope:
+                    continue
+                self.store.delete_entries(scope, ids)
+                for memory_id in ids:
+                    self.repository.record_history(memory_id, scope, "DELETE", None, None)
+            self.repository.delete_entries([str(row["id"]) for row in rows])
+        except Exception as exc:
+            for scope in by_user:
+                if scope:
+                    self.mark_dirty(scope, exc)
+            raise
+        for scope in by_user:
             if not scope:
                 continue
-            self.store.delete_entries(scope, ids)
-            for memory_id in ids:
-                self.repository.record_history(memory_id, scope, "DELETE", None, None)
-        self.repository.delete_entries([str(row["id"]) for row in rows])
+            root = self.store.existing_root(scope)
+            if root.exists():
+                for path in memory_files(root):
+                    self.refresh_file_state(scope, path)
         return {"message": "All relevant memories deleted"}
 
     def reset(self) -> Dict[str, Any]:
@@ -282,6 +385,9 @@ class WorkspaceMemory:
         top_k: int = 20,
         show_expired: bool = False,
     ) -> Dict[str, Any]:
+        scope = (filters or {}).get("user_id")
+        if isinstance(scope, str) and scope:
+            self.ensure_fresh(scope)
         return {
             "results": self.repository.get_all(
                 filters or {},
@@ -301,6 +407,9 @@ class WorkspaceMemory:
         show_expired: bool = False,
         **_: Any,
     ) -> Dict[str, Any]:
+        scope = (filters or {}).get("user_id")
+        if isinstance(scope, str) and scope:
+            self.ensure_fresh(scope)
         return {
             "results": self.repository.search(
                 query,
@@ -332,6 +441,7 @@ class WorkspaceMemory:
     ) -> Any:
         from .retrieval import recall_for_turn
 
+        self.ensure_fresh(user_id)
         return recall_for_turn(self, user_id, question, conversation_id=conversation_id)
 
     def capture_turn(self, *args: Any, **kwargs: Any) -> Any:

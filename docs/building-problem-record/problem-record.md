@@ -795,6 +795,67 @@
 
 ---
 
+## P-27 工作区记忆一致性：对账未接线、外部编辑不可见、写失败不标记、注入检测未生效
+
+- **状态**：已解决
+- **发现时间**：2026-11-09
+- **解决时间**：2026-11-09
+- **场景**：梳理记忆读写机制时，对照配置、文档与实际调用链。
+- **现象**：
+  1. `AGENT_MEMORY_RECONCILE_ON_START` / `AGENT_MEMORY_RECONCILE_INTERVAL_SECONDS` 只被读入配置，`main.py` 没有启动对账任务；
+  2. 召回只读 Postgres 索引，直接编辑 Markdown 后不执行 CLI reconcile 就看不到变化；
+  3. 文件写入成功、索引写入失败时，没有把用户标记为 dirty；
+  4. `capture_turn` 支持 `injected_memory` 跳过规则，但 `turn_memory` / `runner` 从未传入。
+- **根因**：对账功能只在 CLI 中调用；写路径没有维护 `memory_index_files`，无法低成本判断外部编辑；写入异常路径只向上抛出；召回事件没有向轮末保存传递。
+- **解决措施**：
+  1. `main.py` lifespan 新增后台 `_memory_reconcile_loop`：启动时对账一次，之后按配置间隔周期对账，关闭时取消；
+  2. `service.ensure_fresh()` 对比 Markdown 文件集合与 `memory_index_files` 的 mtime/size，外部编辑、增删文件时按需 reconcile；召回和按 `user_id` 的搜索/列表先调用它；每次正常写入后刷新文件状态；
+  3. `add` / `update` / `delete` / `delete_all` / `capture_turn` 在索引写入异常时调用 `mark_dirty`；
+  4. runner 在收到带内容的 `AgentMemoryRecall` 时记录 `memory_injected`，传给 `save_turn_memory` 与 `capture_turn`。
+- **解决后效果**：新增 3 个单元测试（注入跳过、写失败标记 dirty、外部编辑按需对账），并扩展 runner 注入传递断言；server + 根测试 515 passed / 1 skipped，ruff 全绿；真实栈启动日志出现启动对账完成，手工编辑后 `/search` 无需 CLI 即可命中。
+- **可复用结论**：派生索引的“最终一致”不能只靠一个手动 CLI；写路径要维护足够便宜的新鲜度标记（mtime/size），读路径在必要时自愈，异常路径要留下可被后台任务发现的 dirty 信号。
+
+---
+
+## P-28 轮末研究结论持久化：写多读少，管理成本高于收益
+
+- **状态**：已解决
+- **发现时间**：2026-11-09
+- **解决时间**：2026-11-09
+- **场景**：复核工作区记忆的轮末写入路径时，用户指出 `WebSearch` / `WebFetch` 的调用成本并不高，把研究结论写入记忆反而增加了管理成本。
+- **现象**：每个含成功 `WebSearch` / `WebFetch` 的 completed run 都会经 `save_research` 追加一条 `research_conclusion` 到 `memory/<date>.md` 的 `## Research`，并维护 `question_key`、`sources`、TTL 与同题更新逻辑；召回端再按相似度把这些结论注入下一轮。
+- **根因**：该功能假设“重复研究很贵”，但 web 工具成本低，而长期保存结论带来审查、过期、去重和索引维护成本，收益不成比例。
+- **解决措施**：
+  1. `turn_memory.save_turn_memory` 只做轮末 episode capture，不再调用研究结论保存；
+  2. `research_memory.py` 删除 `save_research` / `remember_research` / `ResearchSave` 以及来源提取、结论渲染、同题更新等写入端代码；
+  3. 保留 `recall_research`，迁移前已保存的 `research_conclusion` 仍可按 TTL 与相似度复用，到期自然退出；
+  4. 同步更新 `AgentMemorySave` 描述、记忆文档与测试。
+- **解决后效果**：新增 `tests/test_agent_turn_memory.py` 两条（只写 episode、注入标记透传），研究记忆测试收敛为召回端；轮末不再产生研究条目，旧条目继续可搜可召回。
+- **可复用结论**：持久化一项派生内容前先问“重算一次有多贵”；工具成本低、结果易变的中间产物更适合留在会话里，而不是进入长期记忆承担生命周期管理。
+
+---
+
+## P-29 Agent 对话窗口把 Markdown 表格原样显示为文本
+
+- **状态**：已解决
+- **发现时间**：2026-11-09
+- **解决时间**：2026-11-09
+- **场景**：Agent 回复包含 GFM 表格（`| 步骤 | 做什么 | 工程要点 |` / `|---|---|---|`），并夹带 `**该不该记**` 等强调标记。
+- **现象**：`/dashboard/agent` 的助手气泡把 `message.content` 直接放进 `<span>`，容器只有 `whitespace-pre-wrap`；表格、标题、列表、代码块、加粗全部按原始字符显示，长回复可读性差。
+- **根因**：
+  1. `docs/dashboard/agent-chat-design.md` 的 MVP 决策是纯文本渲染，未引入 Markdown 解析；
+  2. `dashboard/src/components/agent/message-bubble.tsx` 没有渲染层，只有文本节点；
+  3. Dashboard 约定不新增 UI/图标/图表库，`package.json` 也没有 `react-markdown` / `remark-gfm`。
+- **解决措施**：
+  1. 新增 `dashboard/src/components/agent/markdown-content.tsx`：自研轻量渲染器，覆盖 GFM 表格（含对齐、转义管道、行内代码中的管道）、标题、围栏代码块、有序/无序列表、引用、分隔线、粗体/斜体/删除线/行内代码/链接；
+  2. 助手消息改由 `MarkdownContent` 渲染，用户消息保持 `whitespace-pre-wrap` 纯文本；
+  3. 表格在气泡内横向滚动，表头与斑马纹复用 `surface-*` / `memBorder-*` token；链接只允许 `http(s)` / `mailto` 并带 `rel="noopener noreferrer"`；全程渲染 React 元素，不使用 `dangerouslySetInnerHTML`；
+  4. 流式容错：表格分隔行尚未到达时先按段落显示，分隔行到达后自动切换为表格，半截行按缺列补空。
+- **解决后效果**：示例表格渲染为三列表格，第三列 `**该不该记**` 渲染为粗体；`tsc --noEmit`、Prettier check 与 `next build` 均通过（Agent 路由 First Load JS 228 kB）。
+- **可复用结论**：聊天窗口只需要 Markdown 子集时，自研渲染器比引入第三方依赖更可控：能做流式半截语法容错、直接对齐现有主题 token，也不会扩大前端依赖面。
+
+---
+
 ## 变更记录
 
 | 日期 | 变更 |
@@ -836,4 +897,7 @@
 | 2026-11-07 | 实现工具并发（P0 + server 接入）：`Tool.effect` / `concurrency_safe`、`ToolRegistry.plan_batches` / `invoke_batch` / `invoke_many`、`AgentConfig.tool_concurrency`；runtime 改为按批执行、按批次顺序回放事件与 run 级状态，保留取消与协议配对；server 新增 `AGENT_TOOL_CONCURRENCY`（默认 1），Read/Glob/Grep/WebFetch/WebSearch 标记为并发安全，写工具、shell、Monitor、子 Agent 保持串行；新增 13 个测试，agent-loop 194 passed / 1 skipped，ruff 通过 |
 | 2026-11-07 | 启用 Eval 页 LLM judge：确认按钮禁用源于 `EVAL_JUDGE_ENABLED` 默认 false（`server/app/eval/config.py`，前端 `judgeDisabled = !config?.judge_enabled`）；在 `server/.env` 写入 `EVAL_JUDGE_*`（provider `deepseek`、model `deepseek-chat`、key 复用 `AGENT_API_KEY`），重建 `bokaclaw-server` 与 `bokaclaw-eval`；`GET /evals/config` 返回 `judge_enabled=true`，容器内验证 DeepSeek key 可用且 deepeval `DeepSeekModel` 调用成功（发现时间 2026-11-07，解决时间 2026-11-07） |
 | 2026-11-07 | 追加 P-25（部分缓解）：新增系统提示指令层级条款、WebFetch 不可信内容包裹（带 source、防伪造边界）、研究记忆从 system prompt 降级为当前提问前的 user 参考消息；同步 `server/README.md` 的 Prompt-injection posture 与新单测（发现时间 2026-11-07，解决时间 2026-11-07） |
+| 2026-11-09 | 追加并修复 P-27：启动/周期 reconcile 接入 lifespan；`ensure_fresh` 按 mtime/size 检测外部编辑并按需对账；索引写失败标记 dirty；runner 把 `memory_injected` 传给轮末 capture（发现时间 2026-11-09，解决时间 2026-11-09） |
+| 2026-11-09 | 追加并修复 P-28：轮末不再保存 research 结论（WebSearch/WebFetch 成本低，长期留存增加管理成本），`turn_memory` 只写 episode，`research_memory.py` 删除写入端、保留旧结论召回；新增轮末单测并更新文档（发现时间 2026-11-09，解决时间 2026-11-09） |
+| 2026-11-09 | 追加并修复 P-29：Agent 对话窗口助手消息改为 `markdown-content.tsx` 轻量 Markdown 渲染（GFM 表格、标题、代码块、列表、引用、强调/链接），流式半截表格容错；用户消息保持纯文本；交互设计文档同步更新（发现时间 2026-11-09，解决时间 2026-11-09） |
 | 2026-11-09 | 追加 P-26 并完成记忆架构迁移：工作区 Markdown（`USER.md` / `MEMORY.md` / `memory/YYYY-MM-DD.md`）成为唯一权威存储，Postgres 只保留可重建的 `memory_index_*` / `memory_history` 派生索引（迁移 014）；一次性导入旧 Mem0 行与 SQLite history；agent 暴露五个记忆工具，轮末无 LLM capture，召回以 user 角色 `<recalled-memories>` 注入；移除 `mem0ai` 依赖、CLI/integrations/旧测试与文档，dashboard 去除 Mem0 云版推广与品牌链接；真实栈验证 reconcile / search / capture / recall，512 + 194 tests 通过（发现时间 2026-11-09，解决时间 2026-11-09） |

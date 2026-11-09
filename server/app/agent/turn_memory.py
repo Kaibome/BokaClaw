@@ -1,12 +1,10 @@
-"""Combine episodic capture and research-conclusion saving for one turn."""
+"""Append one filtered episode at the end of a completed turn."""
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Optional
-
-from app.agent.research_memory import save_research
 
 logger = logging.getLogger(__name__)
 
@@ -43,8 +41,15 @@ def save_turn_memory(
     payload: Dict[str, Any],
     content: str,
     entries: Iterable[Dict[str, Any]],
+    *,
+    memory_injected: bool = False,
 ) -> TurnMemorySave:
-    """Best-effort: append an episode and persist a research conclusion."""
+    """Best-effort: append one filtered episode for a completed turn.
+
+    Research conclusions are no longer persisted: the web tools are cheap to
+    call again, and keeping their answers in memory added review and cleanup
+    cost without improving the next turn.
+    """
 
     report = TurnMemorySave(question=str(payload.get("message") or "")[:200])
     trace = list(entries or [])
@@ -64,32 +69,23 @@ def save_turn_memory(
             trigger=metadata.get("trigger"),
             is_subagent=bool(metadata.get("is_subagent") or metadata.get("subagent")),
             used_memory_tool=_used_memory_tool(trace),
+            injected_memory=memory_injected,
         )
     except Exception as exc:
         logger.warning("Episodic capture failed for run %s", payload.get("run_id"), exc_info=True)
         report.error = f"{type(exc).__name__}: {exc}"
-        capture = None
+        report.action = "failed"
+        return report
 
-    research = save_research(payload, content, trace)
-
-    report.sources = research.sources
-    report.chars = (capture.chars if capture is not None else 0) + research.chars
-    report.memory_id = (capture.memory_id if capture is not None else None) or research.memory_id
-    report.path = capture.path if capture is not None else None
-    report.error = report.error or research.error
-    if capture is not None and capture.action == "appended":
+    report.chars = capture.chars
+    report.memory_id = capture.memory_id
+    report.path = capture.path
+    if capture.action == "appended":
         report.action = "appended"
         report.kind = "episode"
         report.captured = 1
-        report.entries += 1
-    elif research.action in {"added", "updated"}:
-        report.action = research.action
-        report.kind = "research_conclusion"
-        report.entries += 1
-    elif capture is not None:
-        report.action = capture.action
-        report.reason = capture.reason or research.reason
+        report.entries = 1
     else:
-        report.action = "failed"
-        report.reason = research.reason
+        report.action = capture.action
+        report.reason = capture.reason
     return report

@@ -28,6 +28,12 @@ tolerated: the entry is treated as a manual one.
 | `expires` | Optional ISO timestamp; expired entries stay in the file but leave recall |
 | `question_key` / `sources` | Research-conclusion metadata |
 
+<Note>
+`research_conclusion` entries are legacy data. Turns no longer save research conclusions — web
+tools are cheap to call again — so new files only contain the kinds above except that one. Existing
+entries and entries written by migration stay readable and can still be recalled until they expire.
+</Note>
+
 ## Manual edits
 
 You can edit a bullet by hand. Keep the `id` unchanged to update the indexed entry; remove the

@@ -571,6 +571,25 @@ class MemoryIndexRepository:
         except SQLAlchemyError as exc:
             logger.warning("Could not record file state for %s: %s", path, exc, exc_info=True)
 
+    def file_states(self, user_id: str) -> Dict[str, Dict[str, Any]]:
+        """Return the last reconciled state for each of a user's files."""
+
+        try:
+            with self._session() as session:
+                rows = session.execute(
+                    text(
+                        "SELECT path, mtime, size_bytes FROM memory_index_files "
+                        "WHERE user_id = :user_id"
+                    ),
+                    {"user_id": user_id},
+                ).all()
+        except SQLAlchemyError:
+            return {}
+        return {
+            str(row[0]): {"mtime": row[1], "size_bytes": int(row[2] or 0)}
+            for row in rows
+        }
+
     def count(self, user_id: str | None = None) -> int:
         with self._session() as session:
             if user_id is None:

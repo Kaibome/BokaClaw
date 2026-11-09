@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import logging
 import os
 import time
@@ -155,9 +156,32 @@ set_session_factory(SessionLocal)
 initialize_state(DEFAULT_CONFIG)
 
 
+async def _memory_reconcile_loop(service: Any) -> None:
+    """Reconcile dirty workspaces at startup and on a fixed interval."""
+
+    settings = getattr(service, "settings", None)
+    if settings is None:
+        return
+    if getattr(settings, "reconcile_on_start", False):
+        try:
+            stats = await asyncio.to_thread(service.reconcile_all)
+            logging.info("Startup memory reconcile completed for %d workspace(s)", len(stats))
+        except Exception:
+            logging.warning("Startup memory reconcile failed", exc_info=True)
+    interval = int(getattr(settings, "reconcile_interval_seconds", 0) or 0)
+    if interval <= 0:
+        return
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            await asyncio.to_thread(service.reconcile_all)
+        except Exception:
+            logging.warning("Periodic memory reconcile failed", exc_info=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Own the background agent-run worker for this process.
+    """Own the background agent-run worker and memory reconciler for this process.
 
     Startup recovery and shutdown finalization are best effort: a database that
     has not been migrated yet must not stop the rest of the API (memories,
@@ -169,9 +193,20 @@ async def lifespan(app: FastAPI):
             await manager.startup()
         except Exception:
             logging.exception("Failed to start the agent run manager")
+    reconcile_task: Optional[asyncio.Task] = None
+    try:
+        reconcile_task = asyncio.create_task(
+            _memory_reconcile_loop(get_memory_instance())
+        )
+    except Exception:
+        logging.warning("Failed to start the memory reconcile loop", exc_info=True)
     try:
         yield
     finally:
+        if reconcile_task is not None:
+            reconcile_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await reconcile_task
         if manager.config.background:
             try:
                 await manager.shutdown()
