@@ -45,7 +45,9 @@ API_PUBLIC_URL=${API_PUBLIC_URL:-http://localhost:${API_PORT}}
 WORKSPACE_HOST=${WORKSPACE_HOST:-/Users/pankaibo/BokaClaw/workspace}
 # Global Agent Skills; read-only in the server container.
 SKILLS_HOST=${SKILLS_HOST:-/Users/pankaibo/BokaClaw/skills}
-# Optional MCP server definitions; mounted read-only into the server container.
+# Optional MCP server definitions. Pass a directory (recommended) containing
+# mcp.json, or a single JSON file. A directory is mounted at /app/config so
+# edits are visible without recreating the container.
 MCP_CONFIG_HOST=${MCP_CONFIG_HOST:-}
 MCP_CONFIG_CONTAINER=${MCP_CONFIG_CONTAINER:-/app/config/mcp.json}
 
@@ -328,12 +330,21 @@ if docker container inspect "$SERVER_CONTAINER" >/dev/null 2>&1; then
 fi
 
 MCP_MOUNT_ARGS=()
+MCP_MOUNT_TARGET=""
 if [ -n "$MCP_CONFIG_HOST" ]; then
-  if [ ! -f "$MCP_CONFIG_HOST" ]; then
+  if [ -d "$MCP_CONFIG_HOST" ]; then
+    MCP_MOUNT_TARGET=$(dirname "$MCP_CONFIG_CONTAINER")
+    if [ ! -f "${MCP_CONFIG_HOST}/$(basename "$MCP_CONFIG_CONTAINER")" ]; then
+      echo "error: ${MCP_CONFIG_HOST}/$(basename "$MCP_CONFIG_CONTAINER") does not exist" >&2
+      exit 1
+    fi
+  elif [ -f "$MCP_CONFIG_HOST" ]; then
+    MCP_MOUNT_TARGET="$MCP_CONFIG_CONTAINER"
+  else
     echo "error: MCP_CONFIG_HOST=$MCP_CONFIG_HOST does not exist" >&2
     exit 1
   fi
-  MCP_MOUNT_ARGS=(-v "${MCP_CONFIG_HOST}:${MCP_CONFIG_CONTAINER}:ro")
+  MCP_MOUNT_ARGS=(-v "${MCP_CONFIG_HOST}:${MCP_MOUNT_TARGET}:ro")
   grep -q '^AGENT_MCP_ENABLED=' "$ENV_FILE" ||
     printf '\n# MCP config mounted by start-stack.sh\nAGENT_MCP_ENABLED=true\n' >> "$ENV_FILE"
   grep -q '^AGENT_MCP_CONFIG_FILE=' "$ENV_FILE" ||
@@ -347,7 +358,7 @@ if [ -n "$MCP_CONFIG_HOST" ] && docker container inspect "$SERVER_CONTAINER" >/d
   mcp_mount=$(docker inspect -f \
     '{{range .Mounts}}{{.Destination}}={{.Source}};{{end}}' "$SERVER_CONTAINER")
   case "$mcp_mount" in
-    *"${MCP_CONFIG_CONTAINER}=${MCP_CONFIG_HOST};"*) ;;
+    *"${MCP_MOUNT_TARGET}=${MCP_CONFIG_HOST};"*) ;;
     *)
       log "$SERVER_CONTAINER MCP config mount changed; recreating"
       docker rm -f "$SERVER_CONTAINER" >/dev/null

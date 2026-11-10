@@ -98,18 +98,22 @@ executor token nor the server's API keys are visible. Clear the URL to fall
 back to running shell commands inside the server process (no sandbox).
 
 MCP servers can be declared inline with `AGENT_MCP_SERVERS_JSON`, or in a JSON
-file. For the JSON file, pass its host path to `start-stack.sh`:
+file. For the JSON file, keep it in a dedicated directory and pass that
+directory to `start-stack.sh`:
 
 ```bash
-MCP_CONFIG_HOST=/Users/pankaibo/BokaClaw/mcp.json \
+MCP_CONFIG_HOST=/Users/pankaibo/BokaClaw/mcp-config \
   .claude/skills/bokaclaw-docker-stack/scripts/start-stack.sh
 ```
 
-The script mounts it read-only at `/app/config/mcp.json`, adds
-`AGENT_MCP_CONFIG_FILE=/app/config/mcp.json` to `server/.env` when missing,
-turns `AGENT_MCP_ENABLED` on when the key is absent, and recreates the server
-container if the mount changed. If `AGENT_MCP_ENABLED` is explicitly `false`,
-it only logs a warning; set it to `true` yourself.
+The directory must contain `mcp.json`. It is mounted read-only at `/app/config`,
+so later edits to `mcp.json` are visible without recreating the container. The
+script adds `AGENT_MCP_CONFIG_FILE=/app/config/mcp.json` to `server/.env` when
+missing, turns `AGENT_MCP_ENABLED` on when the key is absent, and recreates the
+server container if the mount changed. If `AGENT_MCP_ENABLED` is explicitly
+`false`, it only logs a warning; set it to `true` yourself. A single-file
+`MCP_CONFIG_HOST` is still accepted, but atomic saves replace the inode and may
+require a server recreate.
 
 MCP runs inside the server process, so it uses the server's egress and header
 secrets. Do not mount `AGENT_MEMORY_ROOT` or provider credentials into an MCP
