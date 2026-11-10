@@ -7,4 +7,3 @@
 - [Memory Overview](https://docs.bokaclaw.ai/memory/overview) [Both]: Use when you need to understand where durable memories live and how the derived index relates to the Markdown files.
 - [Markdown Format](https://docs.bokaclaw.ai/memory/markdown-format) [Both]: Use when you are editing a workspace memory file by hand or adding an entry programmatically.
 - [Memory Operations](https://docs.bokaclaw.ai/memory/operations) [Both]: Use when you need the REST endpoints, agent tools, reconciliation commands, or configuration variables.
-- [Migrating Old Memories](https://docs.bokaclaw.ai/memory/migration) [Both]: Use when importing legacy Mem0 pgvector rows and SQLite history into workspace Markdown.

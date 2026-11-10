@@ -149,9 +149,6 @@ docker exec bokaclaw-server python scripts/migrate_mem0_to_workspace_memory.py -
 docker exec bokaclaw-server python scripts/migrate_mem0_to_workspace_memory.py --verify
 ```
 
-See [`docs/memory/migration.mdx`](../docs/memory/migration.mdx) for user mapping, backups, and
-rollback.
-
 ## Security defaults
 
 - Dashboard login uses JWTs.

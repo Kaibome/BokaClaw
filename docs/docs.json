@@ -14,8 +14,7 @@
         "pages": [
           "memory/overview",
           "memory/markdown-format",
-          "memory/operations",
-          "memory/migration"
+          "memory/operations"
         ]
       },
       {

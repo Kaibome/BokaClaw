@@ -79,15 +79,6 @@ docker compose exec server python -m app.memory.cli reindex --user <user_id>
 docker compose exec server python -m app.memory.cli prune --retention-days 180
 ```
 
-迁移旧 Mem0 数据：
-
-```bash
-docker compose exec server python scripts/migrate_mem0_to_workspace_memory.py --dry-run
-docker compose exec server python scripts/migrate_mem0_to_workspace_memory.py --verify
-```
-
-迁移脚本保留旧 ID，可重复执行；写前会备份旧行与历史库。详见 [`docs/memory/migration.mdx`](docs/memory/migration.mdx)。
-
 ---
 
 ## 仓库结构
@@ -424,7 +415,7 @@ docker compose logs -f server
 docker compose exec server alembic upgrade head
 ```
 
-测试需要服务端依赖与一个可用的 Postgres/pgvector。CI 会启动 `pgvector/pgvector:pg17`、创建 `mem0_app` 并执行迁移；本地等价命令：
+测试需要服务端依赖与一个可用的 Postgres/pgvector。CI 会启动 `pgvector/pgvector:pg17`、创建应用数据库并执行迁移；本地等价命令：
 
 ```bash
 make server-test        # pytest server/tests + tests
@@ -512,7 +503,6 @@ pytest server/tests/test_eval_*.py tests/agent_eval -q
 | 记忆系统总览 | [`docs/memory/overview.mdx`](docs/memory/overview.mdx) |
 | 记忆 Markdown 格式 | [`docs/memory/markdown-format.mdx`](docs/memory/markdown-format.mdx) |
 | 记忆运维与 REST/工具 | [`docs/memory/operations.mdx`](docs/memory/operations.mdx) |
-| 旧 Mem0 数据迁移 | [`docs/memory/migration.mdx`](docs/memory/migration.mdx) |
 | Agent SDK 使用与 API | [`agent-loop/README.md`](agent-loop/README.md) |
 | Agent SDK 架构与分层 | [`docs/agent-loop/architecture.md`](docs/agent-loop/architecture.md) |
 | 运行时行为与终止条件 | [`docs/agent-loop/runtime-behavior.md`](docs/agent-loop/runtime-behavior.md) |
@@ -541,5 +531,3 @@ pytest server/tests/test_eval_*.py tests/agent_eval -q
 ## License
 
 Apache-2.0，见 [`LICENSE`](LICENSE)。
-
-BokaClaw 的早期版本基于 [Mem0](https://github.com/mem0ai/mem0) 构建，感谢其 Apache-2.0 许可与贡献；当前运行时已移除 Mem0 依赖，记忆改为工作区 Markdown 权威存储。

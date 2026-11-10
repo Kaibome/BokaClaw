@@ -1,0 +1,1422 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Loop 状态机</title>
+<style>
+  /* ---------------------------------------------------------------
+     Design plan
+     Subject: the runtime state machines of BokaClaw's agent loop.
+     Palette: cool slate paper + ink, teal as the working accent,
+              semantic green / amber / red / blue / violet for states.
+     Type: serif display for headings, system sans for body,
+           monospace for states, code and file references.
+     Layout: manual-style page with a sticky contents rail; wide
+             diagrams and tables scroll inside their own containers.
+     --------------------------------------------------------------- */
+  :root {
+    --bg: #eef2f5;
+    --surface: #ffffff;
+    --surface-2: #e5ecf1;
+    --ink: #14202a;
+    --muted: #526475;
+    --line: #ccd8e0;
+    --accent: #0b6f68;
+    --accent-ink: #ffffff;
+    --accent-soft: #d9efec;
+    --ok: #1d7a4c;
+    --warn: #986000;
+    --bad: #b23b3b;
+    --info: #2b5f9c;
+    --violet: #6a4a9e;
+    --code-bg: #0f1b23;
+    --code-ink: #dbe7ef;
+    --font-display: "Iowan Old Style", "Palatino Linotype", Palatino, "Songti SC", "Noto Serif SC", Georgia, serif;
+    --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    --step--1: 0.78rem;
+    --step-0: 1rem;
+    --step-1: 1.18rem;
+    --step-2: 1.45rem;
+    --step-3: 1.85rem;
+    --step-4: clamp(2.1rem, 4.6vw, 3rem);
+    color-scheme: light;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0b1218;
+      --surface: #111b22;
+      --surface-2: #17242d;
+      --ink: #dbe6ee;
+      --muted: #93a5b4;
+      --line: #263641;
+      --accent: #63d2c4;
+      --accent-ink: #062a27;
+      --accent-soft: #12322f;
+      --ok: #74d6a0;
+      --warn: #e6b45f;
+      --bad: #f18c8c;
+      --info: #8cbcf3;
+      --violet: #b79bea;
+      --code-bg: #070f15;
+      --code-ink: #d5e2ea;
+      color-scheme: dark;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --bg: #0b1218;
+    --surface: #111b22;
+    --surface-2: #17242d;
+    --ink: #dbe6ee;
+    --muted: #93a5b4;
+    --line: #263641;
+    --accent: #63d2c4;
+    --accent-ink: #062a27;
+    --accent-soft: #12322f;
+    --ok: #74d6a0;
+    --warn: #e6b45f;
+    --bad: #f18c8c;
+    --info: #8cbcf3;
+    --violet: #b79bea;
+    --code-bg: #070f15;
+    --code-ink: #d5e2ea;
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+
+  html { scroll-behavior: smooth; }
+
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    *, *::before, *::after { transition: none !important; animation: none !important; }
+  }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--font-body);
+    font-size: var(--step-0);
+    line-height: 1.72;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    padding-block: 0 72px;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  a { color: var(--accent); text-underline-offset: 3px; }
+
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+    border-radius: 3px;
+  }
+
+  .skip {
+    position: absolute;
+    left: 16px;
+    top: -60px;
+    background: var(--surface);
+    color: var(--ink);
+    padding: 8px 12px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    z-index: 50;
+  }
+  .skip:focus { top: 12px; }
+
+  .shell {
+    max-width: 1200px;
+    margin: 0 auto;
+    display: grid;
+    grid-template-columns: 238px minmax(0, 1fr);
+    gap: 56px;
+    padding-block: 32px 0;
+    align-items: start;
+  }
+
+  .toc {
+    position: sticky;
+    top: 24px;
+    align-self: start;
+    max-height: calc(100vh - 48px);
+    overflow-y: auto;
+    padding: 4px 0 20px;
+    border-right: 1px solid var(--line);
+    padding-right: 20px;
+    font-size: 0.86rem;
+  }
+
+  .toc-title {
+    margin: 0 0 12px;
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .toc ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+
+  .toc a {
+    display: block;
+    padding: 5px 0 5px 12px;
+    color: var(--muted);
+    text-decoration: none;
+    border-left: 2px solid transparent;
+    line-height: 1.45;
+  }
+
+  .toc a:hover { color: var(--ink); }
+
+  .toc a.active {
+    color: var(--accent);
+    border-left-color: var(--accent);
+    background: linear-gradient(90deg, var(--accent-soft), transparent);
+  }
+
+  main { min-width: 0; }
+
+  .hero {
+    border-bottom: 1px solid var(--line);
+    padding-block: 10px 30px;
+    margin-bottom: 8px;
+  }
+
+  .eyebrow {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 12px;
+  }
+
+  h1 {
+    font-family: var(--font-display);
+    font-size: var(--step-4);
+    line-height: 1.12;
+    letter-spacing: -0.015em;
+    margin: 0 0 14px;
+    text-wrap: balance;
+  }
+
+  .lede {
+    max-width: 64ch;
+    color: var(--muted);
+    font-size: 1.03rem;
+    margin: 0 0 22px;
+  }
+
+  .meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 14px;
+    font-family: var(--font-mono);
+    font-size: 0.73rem;
+    color: var(--muted);
+  }
+
+  .meta code { font-size: 0.73rem; }
+
+  .theme-btn {
+    margin-left: auto;
+    appearance: none;
+    border: 1px solid var(--line);
+    background: var(--surface);
+    color: var(--ink);
+    border-radius: 999px;
+    padding: 5px 12px;
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    cursor: pointer;
+  }
+  .theme-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 22px;
+  }
+
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    border: 1px solid currentColor;
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    line-height: 1.4;
+    background: var(--surface);
+  }
+  .chip::before {
+    content: "";
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: currentColor;
+  }
+  .s-queued { color: var(--muted); }
+  .s-running { color: var(--info); }
+  .s-completed { color: var(--ok); }
+  .s-failed { color: var(--bad); }
+  .s-cancelled { color: var(--warn); }
+  .s-interrupted { color: var(--violet); }
+  .s-aborted { color: var(--warn); }
+
+  section { margin-top: 58px; scroll-margin-top: 24px; }
+
+  .kicker {
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 8px;
+  }
+
+  h2 {
+    font-family: var(--font-display);
+    font-size: var(--step-3);
+    line-height: 1.2;
+    letter-spacing: -0.01em;
+    margin: 0 0 16px;
+    text-wrap: balance;
+  }
+
+  h3 {
+    font-size: var(--step-1);
+    line-height: 1.35;
+    margin: 34px 0 10px;
+    letter-spacing: -0.005em;
+  }
+
+  p { margin: 0 0 14px; max-width: 72ch; }
+
+  ul, ol { margin: 0 0 16px; padding-left: 1.3em; max-width: 72ch; }
+  li { margin: 0 0 7px; }
+  li::marker { color: var(--muted); }
+
+  strong { font-weight: 650; }
+
+  code {
+    font-family: var(--font-mono);
+    font-size: 0.86em;
+    background: var(--surface-2);
+    padding: 1px 5px;
+    border-radius: 4px;
+  }
+
+  .overview-table td:first-child,
+  .overview-table th:first-child { white-space: nowrap; }
+
+  .table-wrap {
+    margin: 18px 0 22px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    overflow-x: auto;
+    background: var(--surface);
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.9rem;
+    line-height: 1.55;
+  }
+
+  th {
+    text-align: left;
+    font-family: var(--font-mono);
+    font-size: 0.69rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+    background: var(--surface-2);
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--line);
+    white-space: nowrap;
+  }
+
+  td {
+    padding: 10px 14px;
+    border-top: 1px solid var(--line);
+    vertical-align: top;
+  }
+
+  tbody tr:first-child td { border-top: 0; }
+  tbody tr:hover td { background: color-mix(in srgb, var(--accent-soft) 45%, transparent); }
+
+  td code { white-space: nowrap; }
+
+  .callout {
+    margin: 20px 0 24px;
+    padding: 14px 18px;
+    border-left: 3px solid var(--accent);
+    border-radius: 0 9px 9px 0;
+    background: var(--accent-soft);
+    font-size: 0.94rem;
+  }
+  .callout p:last-child { margin-bottom: 0; }
+  .callout strong { color: var(--accent); }
+  .callout.is-warn { border-left-color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, var(--surface)); }
+  .callout.is-warn strong { color: var(--warn); }
+  .callout.is-bad { border-left-color: var(--bad); background: color-mix(in srgb, var(--bad) 11%, var(--surface)); }
+  .callout.is-bad strong { color: var(--bad); }
+
+  pre {
+    margin: 16px 0 22px;
+    padding: 16px 18px;
+    background: var(--code-bg);
+    color: var(--code-ink);
+    border-radius: 10px;
+    overflow-x: auto;
+    font-family: var(--font-mono);
+    font-size: 0.82rem;
+    line-height: 1.65;
+    tab-size: 2;
+  }
+  pre code { background: none; padding: 0; color: inherit; font-size: inherit; }
+  pre .c { color: #7f9aa8; }
+  pre .k { color: #7fd0c4; }
+  pre .s { color: #e3c07d; }
+  pre .n { color: #9cc4ee; }
+
+  .diagram {
+    margin: 20px 0 26px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--surface);
+    padding: 10px;
+    overflow-x: auto;
+  }
+  .diagram svg { display: block; min-width: 700px; width: 100%; height: auto; }
+  .diagram-hint {
+    display: none;
+    margin: -14px 0 22px;
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    color: var(--muted);
+  }
+  @media (max-width: 899px) { .diagram-hint { display: block; } }
+  .d-label { font-family: var(--font-mono); font-size: 12px; fill: var(--ink); }
+  .d-sub { font-family: var(--font-mono); font-size: 10.5px; fill: var(--muted); }
+  .d-box { fill: var(--surface-2); stroke: var(--line); stroke-width: 1.2; }
+  .d-box-accent { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.2; }
+  .d-box-ok { fill: color-mix(in srgb, var(--ok) 14%, var(--surface)); stroke: var(--ok); stroke-width: 1.2; }
+  .d-box-bad { fill: color-mix(in srgb, var(--bad) 13%, var(--surface)); stroke: var(--bad); stroke-width: 1.2; }
+  .d-box-warn { fill: color-mix(in srgb, var(--warn) 13%, var(--surface)); stroke: var(--warn); stroke-width: 1.2; }
+  .d-box-violet { fill: color-mix(in srgb, var(--violet) 13%, var(--surface)); stroke: var(--violet); stroke-width: 1.2; }
+  .d-edge { fill: none; stroke: var(--muted); stroke-width: 1.3; marker-end: url(#arrow); }
+  .d-edge-accent { fill: none; stroke: var(--accent); stroke-width: 1.5; marker-end: url(#arrow-accent); }
+  .d-edge-bad { fill: none; stroke: var(--bad); stroke-width: 1.3; stroke-dasharray: 5 4; marker-end: url(#arrow-bad); }
+  .d-label-box { fill: var(--surface); }
+
+  .flow {
+    display: grid;
+    gap: 10px;
+    margin: 20px 0 24px;
+  }
+  .flow-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: stretch;
+    gap: 8px;
+  }
+  .flow-node {
+    flex: 1 1 150px;
+    min-width: 0;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--surface);
+    padding: 10px 12px;
+    font-size: 0.85rem;
+    line-height: 1.45;
+  }
+  .flow-node b {
+    display: block;
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.05em;
+    color: var(--accent);
+    margin-bottom: 3px;
+  }
+  .flow-arrow {
+    align-self: center;
+    color: var(--muted);
+    font-family: var(--font-mono);
+    font-size: 0.9rem;
+  }
+
+  .two-col {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 18px;
+    margin: 18px 0 22px;
+  }
+  .panel {
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--surface);
+    padding: 16px 18px;
+    min-width: 0;
+  }
+  .panel h3 { margin-top: 0; font-size: 1rem; }
+  .panel ul { margin-bottom: 0; }
+
+  .src {
+    font-family: var(--font-mono);
+    font-size: 0.76rem;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+
+  footer {
+    margin-top: 64px;
+    padding-top: 20px;
+    border-top: 1px solid var(--line);
+    color: var(--muted);
+    font-size: 0.82rem;
+  }
+
+  @media (max-width: 920px) {
+    .shell {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 24px;
+      padding-block: 20px 0;
+    }
+    .toc {
+      position: static;
+      max-height: none;
+      border-right: 0;
+      border-bottom: 1px solid var(--line);
+      padding-right: 0;
+      padding-bottom: 14px;
+    }
+    .toc ol {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0 12px;
+    }
+    .two-col { grid-template-columns: minmax(0, 1fr); }
+    section { margin-top: 46px; }
+  }
+
+  @media (max-width: 520px) {
+    .toc ol { grid-template-columns: minmax(0, 1fr); }
+    .meta { font-size: 0.68rem; }
+    .theme-btn { margin-left: 0; }
+    .diagram { padding: 6px; }
+  }
+
+  @media print {
+    .toc, .theme-btn, .skip { display: none; }
+    .shell { display: block; max-width: none; }
+    body { background: #fff; color: #000; }
+    .diagram, .table-wrap, pre { break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+<a class="skip" href="#main">跳到正文</a>
+
+<div class="shell">
+  <aside class="toc" aria-label="目录">
+    <p class="toc-title">On this page</p>
+    <ol>
+      <li><a href="#overview">三层状态机</a></li>
+      <li><a href="#run-lifecycle">Run 生命周期</a></li>
+      <li><a href="#react-loop">ReAct 循环</a></li>
+      <li><a href="#tools">工具执行</a></li>
+      <li><a href="#subagents">子 Agent</a></li>
+      <li><a href="#spans">Span 状态</a></li>
+      <li><a href="#cancellation">取消传播</a></li>
+      <li><a href="#recovery">重启与恢复</a></li>
+      <li><a href="#events">事件与落库</a></li>
+      <li><a href="#invariants">不变量与失败模式</a></li>
+      <li><a href="#code-map">代码地图</a></li>
+    </ol>
+  </aside>
+
+  <main id="main">
+    <header class="hero">
+      <p class="eyebrow">BokaClaw · 运行时机制</p>
+      <h1>Agent Loop 状态机</h1>
+      <p class="lede">
+        一个 Agent 回合不是单个循环，而是三层嵌套的状态机：服务端的 run 生命周期、
+        SDK 的 ReAct 轮次、以及工具与子 Agent 的执行状态。它们之间只通过事件通信，
+        状态分别落在 Postgres、进程内存和子 runtime 里。
+      </p>
+      <div class="meta">
+        <span><code>server/app/agent/runner.py</code></span>
+        <span><code>agent-loop/src/bokaclaw_agent/agent/runtime.py</code></span>
+        <span>更新于 2026-11-10</span>
+        <button class="theme-btn" id="themeBtn" type="button" aria-label="切换明暗主题">◐ 主题</button>
+      </div>
+      <div class="legend" aria-label="状态图例">
+        <span class="chip s-queued">queued</span>
+        <span class="chip s-running">running</span>
+        <span class="chip s-completed">completed</span>
+        <span class="chip s-failed">failed</span>
+        <span class="chip s-cancelled">cancelled</span>
+        <span class="chip s-interrupted">interrupted</span>
+        <span class="chip s-aborted">aborted</span>
+      </div>
+    </header>
+
+    <section id="overview">
+      <p class="kicker">Overview</p>
+      <h2>三层状态机，各管一段</h2>
+      <p>
+        把 Agent Loop 当成一个状态机会看不清问题，因为它的状态跨越三个生命周期完全不同的层。
+        每一层只向下调用，向上只通过事件反馈；没有任何一层共享另一层的内存状态。
+      </p>
+
+      <div class="table-wrap">
+        <table class="overview-table">
+          <thead>
+            <tr><th>层</th><th>状态机</th><th>状态存在哪</th><th>负责什么</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><b>L1 调度层</b></td>
+              <td><span class="chip s-queued">queued</span> → <span class="chip s-running">running</span> → 终态</td>
+              <td>Postgres：<code>agent_runs</code></td>
+              <td>claim、并发、取消、超时、重启恢复、SSE 事件持久化</td>
+            </tr>
+            <tr>
+              <td><b>L2 推理层</b></td>
+              <td>ReAct 迭代循环</td>
+              <td>进程内存 + 事件流</td>
+              <td>上下文构建、模型调用、工具调度、停止判定、用量统计</td>
+            </tr>
+            <tr>
+              <td><b>L3 执行层</b></td>
+              <td>工具调用 / 子 Agent 子状态机</td>
+              <td>线程池、子 runtime、span 表</td>
+              <td>工具执行、并行批次、协作式取消、结果封装</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="flow" aria-label="分层调用关系">
+        <div class="flow-row">
+          <div class="flow-node"><b>L1 · AgentRunManager</b>以 run 为单位调度，落库、发 SSE</div>
+          <span class="flow-arrow">→</span>
+          <div class="flow-node"><b>L2 · AgentRuntime</b>一轮 ReAct，迭代 1…max_iterations</div>
+          <span class="flow-arrow">→</span>
+          <div class="flow-node"><b>L3 · ToolRegistry / SubagentTool</b>一次工具批次，串行或并行</div>
+        </div>
+      </div>
+
+      <div class="callout">
+        <p><strong>关键边界：</strong>L1 不认识 ReAct 的内部变量，L2 不认识 Postgres。
+        L2 通过 <code>on_event</code> 回调把 <code>EventType</code> 交给 L1 的 wrapper，
+        wrapper 转成 <code>AgentEvent</code> 后，L1 再决定写 span、写事件表还是发 SSE。</p>
+      </div>
+    </section>
+
+    <section id="run-lifecycle">
+      <p class="kicker">Layer 1</p>
+      <h2>Run 生命周期</h2>
+      <p>
+        L1 的状态是持久化的，因此它能在进程重启后回答“这个 run 走到哪了”。
+        但它目前只做到“收尾”，不做“续跑”：重启后残留的 running 会被收敛成 interrupted。
+      </p>
+
+      <div class="diagram">
+        <svg viewBox="0 0 820 350" role="img" aria-labelledby="runFigureTitle">
+          <title id="runFigureTitle">Run 生命周期状态图：queued 经 claim 进入 running，随后收敛到 completed、failed、cancelled 或 interrupted</title>
+          <defs>
+            <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" style="fill:var(--muted)"/>
+            </marker>
+            <marker id="arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" style="fill:var(--accent)"/>
+            </marker>
+            <marker id="arrow-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" style="fill:var(--bad)"/>
+            </marker>
+          </defs>
+
+          <rect class="d-box" x="40" y="140" width="140" height="52" rx="9"/>
+          <text class="d-label" x="110" y="163" text-anchor="middle">queued</text>
+          <text class="d-sub" x="110" y="180" text-anchor="middle">等待 claim</text>
+
+          <rect class="d-box-accent" x="250" y="140" width="150" height="52" rx="9"/>
+          <text class="d-label" x="325" y="163" text-anchor="middle">running</text>
+          <text class="d-sub" x="325" y="180" text-anchor="middle">worker 持有</text>
+
+          <rect class="d-box-ok" x="580" y="34" width="180" height="52" rx="9"/>
+          <text class="d-label" x="670" y="57" text-anchor="middle">completed</text>
+          <text class="d-sub" x="670" y="74" text-anchor="middle">有内容或 tool_trace</text>
+
+          <rect class="d-box-bad" x="580" y="114" width="180" height="52" rx="9"/>
+          <text class="d-label" x="670" y="137" text-anchor="middle">failed</text>
+          <text class="d-sub" x="670" y="154" text-anchor="middle">AgentLoopError / 异常</text>
+
+          <rect class="d-box-warn" x="580" y="194" width="180" height="52" rx="9"/>
+          <text class="d-label" x="670" y="217" text-anchor="middle">cancelled</text>
+          <text class="d-sub" x="670" y="234" text-anchor="middle">用户取消</text>
+
+          <rect class="d-box-violet" x="580" y="274" width="180" height="52" rx="9"/>
+          <text class="d-label" x="670" y="297" text-anchor="middle">interrupted</text>
+          <text class="d-sub" x="670" y="314" text-anchor="middle">shutdown / 重启恢复</text>
+
+          <path class="d-edge-accent" d="M 180 166 L 244 166"/>
+          <text class="d-sub" x="212" y="156" text-anchor="middle">claim</text>
+
+          <path class="d-edge" d="M 400 158 C 480 158, 500 60, 574 60"/>
+          <text class="d-sub" x="492" y="92" text-anchor="middle">finish(completed)</text>
+
+          <path class="d-edge" d="M 400 166 C 480 166, 500 140, 574 140"/>
+          <text class="d-sub" x="496" y="145" text-anchor="middle">finish(failed)</text>
+
+          <path class="d-edge" d="M 400 174 C 480 174, 500 220, 574 220"/>
+          <text class="d-sub" x="496" y="196" text-anchor="middle">cancel → agent_cancelled</text>
+
+          <path class="d-edge" d="M 400 182 C 480 182, 500 300, 574 300"/>
+          <text class="d-sub" x="496" y="286" text-anchor="middle">shutdown / recovery</text>
+
+          <path class="d-edge-bad" d="M 110 192 L 110 332 L 574 332 L 574 244"/>
+          <text class="d-sub" x="300" y="346" text-anchor="middle">queued 取消：cancel_queued，不经过 running</text>
+
+          <text class="d-sub" x="40" y="28">漂移提示：进程崩溃时 DB 仍是 running，直到下次 startup() 才被收敛为 interrupted。</text>
+        </svg>
+      </div>
+      <p class="diagram-hint">图可横向滚动查看完整状态。</p>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>状态</th><th>含义</th><th>写入者</th><th>终态</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><span class="chip s-queued">queued</span></td><td>请求已落库，等待 worker claim</td><td>路由创建 run</td><td>否</td></tr>
+            <tr><td><span class="chip s-running">running</span></td><td>worker 已 claim，执行中</td><td><code>repo.claim</code></td><td>否</td></tr>
+            <tr><td><span class="chip s-completed">completed</span></td><td>正常结束，且有内容或工具 trace</td><td><code>repo.finish</code></td><td>是</td></tr>
+            <tr><td><span class="chip s-failed">failed</span></td><td>协议错误、上游错误、未捕获异常</td><td><code>repo.finish</code></td><td>是</td></tr>
+            <tr><td><span class="chip s-cancelled">cancelled</span></td><td>用户取消，或取消时正在运行</td><td><code>repo.finish</code> / <code>cancel_queued</code></td><td>是</td></tr>
+            <tr><td><span class="chip s-interrupted">interrupted</span></td><td>服务关闭、崩溃后恢复</td><td><code>repo.finish</code></td><td>是</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>转移规则</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>从</th><th>触发</th><th>到</th><th>约束</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>queued</td><td><code>claim(run_id, worker_id)</code></td><td>running</td><td>条件更新 <code>status = queued</code>；抢不到就返回 false</td></tr>
+            <tr><td>queued</td><td><code>cancel_queued</code></td><td>cancelled</td><td>直接终结，usage 归零，不启动 worker</td></tr>
+            <tr><td>running</td><td>正常结束</td><td>completed</td><td><code>_completion_state</code>：内容非空或存在工具 trace</td></tr>
+            <tr><td>running</td><td><code>AgentLoopError</code>（非取消）</td><td>failed</td><td>保留部分内容与 <code>error_code</code></td></tr>
+            <tr><td>running</td><td>用户取消</td><td>cancelled</td><td>SDK 抛 <code>RunCancelled</code> 或 wrapper 抛 <code>agent_cancelled</code></td></tr>
+            <tr><td>running</td><td>进程关闭</td><td>interrupted</td><td><code>shutdown()</code> 取消 task，5 秒后兜底</td></tr>
+            <tr><td>running</td><td>下次启动</td><td>interrupted</td><td><code>startup()</code> 对残留 running 调 <code>_recover_run</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout is-warn">
+        <p><strong>单副本假设：</strong><code>RunConfig.lease_seconds</code> 目前只定义未使用，
+        服务启动时会无条件接管所有 <code>running</code> run。多副本部署会重复执行；
+        在引入 lease 回收之前，不要把 agent worker 扩到两个进程。</p>
+      </div>
+    </section>
+
+    <section id="react-loop">
+      <p class="kicker">Layer 2</p>
+      <h2>ReAct 循环</h2>
+      <p>
+        L2 是真正推进任务的状态机。它不是“一次模型调用”，而是最多
+        <code>max_iterations</code> 轮的循环：每轮构建上下文、问模型、执行本轮的
+        工具批次、把结果写回上下文，然后进入下一轮。停止条件只有五类：正常作答、
+        长度/内容过滤、步数耗尽、无进展、取消。
+      </p>
+
+      <div class="diagram">
+        <svg viewBox="0 0 860 430" role="img" aria-labelledby="reactFigureTitle">
+          <title id="reactFigureTitle">ReAct 循环状态图：模型请求、模型响应、工具批次、结果回写，循环直到终态或取消</title>
+          <defs>
+            <marker id="arrow2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" style="fill:var(--muted)"/>
+            </marker>
+            <marker id="arrow2-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" style="fill:var(--accent)"/>
+            </marker>
+            <marker id="arrow2-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" style="fill:var(--bad)"/>
+            </marker>
+          </defs>
+
+          <rect class="d-box" x="24" y="36" width="120" height="48" rx="8"/>
+          <text class="d-label" x="84" y="58" text-anchor="middle">init</text>
+          <text class="d-sub" x="84" y="74" text-anchor="middle">context / ledger</text>
+
+          <rect class="d-box" x="180" y="36" width="132" height="48" rx="8"/>
+          <text class="d-label" x="246" y="58" text-anchor="middle">MODEL_REQUEST</text>
+          <text class="d-sub" x="246" y="74" text-anchor="middle">build + compress</text>
+
+          <rect class="d-box" x="348" y="36" width="136" height="48" rx="8"/>
+          <text class="d-label" x="416" y="58" text-anchor="middle">MODEL_RESPONSE</text>
+          <text class="d-sub" x="416" y="74" text-anchor="middle">stream / complete</text>
+
+          <polygon class="d-box-accent" points="560,60 626,28 692,60 626,92"/>
+          <text class="d-label" x="626" y="57" text-anchor="middle">tool_calls?</text>
+          <text class="d-sub" x="626" y="74" text-anchor="middle">decision</text>
+
+          <rect class="d-box-ok" x="736" y="36" width="104" height="48" rx="8"/>
+          <text class="d-label" x="788" y="58" text-anchor="middle">final</text>
+          <text class="d-sub" x="788" y="74" text-anchor="middle">RUN_END</text>
+
+          <rect class="d-box" x="560" y="154" width="132" height="48" rx="8"/>
+          <text class="d-label" x="626" y="176" text-anchor="middle">TOOL_CALL ×N</text>
+          <text class="d-sub" x="626" y="192" text-anchor="middle">all announced</text>
+
+          <rect class="d-box" x="386" y="154" width="140" height="48" rx="8"/>
+          <text class="d-label" x="456" y="176" text-anchor="middle">execute batches</text>
+          <text class="d-sub" x="456" y="192" text-anchor="middle">serial / parallel</text>
+
+          <rect class="d-box" x="212" y="154" width="140" height="48" rx="8"/>
+          <text class="d-label" x="282" y="176" text-anchor="middle">TOOL_RESULT ×N</text>
+          <text class="d-sub" x="282" y="192" text-anchor="middle">ordered replay</text>
+
+          <rect class="d-box" x="24" y="154" width="152" height="48" rx="8"/>
+          <text class="d-label" x="100" y="176" text-anchor="middle">ledger + guard</text>
+          <text class="d-sub" x="100" y="192" text-anchor="middle">progress check</text>
+
+          <rect class="d-box-bad" x="180" y="300" width="176" height="56" rx="8"/>
+          <text class="d-label" x="268" y="322" text-anchor="middle">RunCancelled</text>
+          <text class="d-sub" x="268" y="339" text-anchor="middle">_cancel_run → persist cancelled</text>
+
+          <rect class="d-box-warn" x="540" y="300" width="300" height="56" rx="8"/>
+          <text class="d-label" x="690" y="322" text-anchor="middle">max_iterations / no_progress</text>
+          <text class="d-sub" x="690" y="339" text-anchor="middle">tool-free answer → final | error</text>
+
+          <path class="d-edge" d="M 144 60 L 174 60"/>
+          <path class="d-edge" d="M 312 60 L 342 60"/>
+          <path class="d-edge" d="M 484 60 L 554 60"/>
+          <path class="d-edge" d="M 692 60 L 730 60"/>
+          <text class="d-sub" x="711" y="52" text-anchor="middle">no</text>
+
+          <path class="d-edge" d="M 626 92 L 626 148"/>
+          <text class="d-sub" x="646" y="124" text-anchor="middle">yes</text>
+          <path class="d-edge" d="M 560 178 L 532 178"/>
+          <path class="d-edge" d="M 386 178 L 358 178"/>
+          <path class="d-edge" d="M 212 178 L 182 178"/>
+
+          <path class="d-edge-accent" d="M 100 154 C 100 112, 176 96, 180 84"/>
+          <text class="d-sub" x="130" y="116" text-anchor="middle">next iteration</text>
+
+          <path class="d-edge-bad" d="M 246 84 L 246 118 L 10 118 L 10 328 L 174 328"/>
+          <text class="d-sub" x="256" y="240" text-anchor="middle">safe point</text>
+
+          <path class="d-edge" d="M 456 202 C 456 262, 560 272, 610 296"/>
+          <text class="d-sub" x="520" y="266" text-anchor="middle">budget exhausted</text>
+
+          <path class="d-edge" d="M 100 202 C 100 270, 520 270, 540 314"/>
+          <text class="d-sub" x="330" y="270" text-anchor="middle">guard_stop</text>
+
+          <text class="d-sub" x="24" y="404">虚线表示协作式取消：只在安全点检查，绝不在流式 token 循环内部中断。</text>
+        </svg>
+      </div>
+      <p class="diagram-hint">图可横向滚动查看完整循环。</p>
+
+      <h3>一轮迭代的完整步骤</h3>
+      <ol>
+        <li><b>初始化。</b>规范化输入、确定 <code>session_id</code>、重置子 Agent 预算与台账、创建上下文、压缩器、ledger、progress guard。</li>
+        <li><b>取消检查。</b>进入本轮前检查 <code>cancel_event</code>。</li>
+        <li><b>构建请求。</b>拼上下文，必要时压缩，注入运行时提示，发出 <code>MODEL_REQUEST</code>。</li>
+        <li><b>模型调用。</b>流式或非流式；合并 usage；发出 <code>MODEL_RESPONSE</code>。</li>
+        <li><b>写回助手消息。</b>把 assistant 消息加入上下文和 <code>new_messages</code>；记录本轮的 <code>tool_calls</code>。</li>
+        <li><b>取消检查。</b>模型响应已完整，执行工具之前再检查一次。</li>
+        <li><b>无工具调用。</b>把 <code>finish_reason</code> 映射为 <code>final</code> / <code>length</code> / <code>content_filter</code>，结束循环。</li>
+        <li><b>声明全部调用。</b>先为每个 <code>tool_call</code> 发 <code>TOOL_CALL</code>，让前端能同时显示 running。</li>
+        <li><b>执行批次。</b>连续的 <code>concurrency_safe</code> 调用可并行，其余作为串行屏障。</li>
+        <li><b>回放结果。</b>按声明顺序处理 ledger、guard、<code>TOOL_RESULT</code> 和 tool 消息；每批结束后再做一次取消检查。</li>
+        <li><b>守卫停止。</b>如果 guard 判定无进展，在轮次之间停止，进入 tool-free 最终作答。</li>
+      </ol>
+
+      <h3>停止原因与最终状态</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>stop_reason</th><th>触发</th><th>SDK 结果</th><th>服务端 run</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>final</code></td><td>模型正常作答，无工具调用</td><td><code>RunResult</code></td><td><span class="chip s-completed">completed</span>（有内容）</td></tr>
+            <tr><td><code>length</code> / <code>content_filter</code></td><td>provider 截断或内容过滤</td><td><code>RunResult</code></td><td>有内容则 completed；空内容则 failed</td></tr>
+            <tr><td><code>max_iterations</code></td><td>步数耗尽</td><td>可先做一次 tool-free 作答；否则抛 <code>MaxIterationsExceeded</code></td><td>有内容 completed；否则 failed（wrapper 映射为 <code>agent_upstream_error</code>）</td></tr>
+            <tr><td><code>no_progress</code></td><td>连续工具调用没有新证据</td><td>可先做一次 tool-free 作答；否则抛 <code>NoProgressError</code></td><td>有内容 completed；否则 failed（<code>agent_no_progress</code>）</td></tr>
+            <tr><td><code>cancelled</code></td><td><code>cancel_event</code> 在安全点命中</td><td>抛 <code>RunCancelled</code>，异常上挂 partial result</td><td><span class="chip s-cancelled">cancelled</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>取消检查点</h3>
+      <p>
+        <code>check_cancelled()</code> 只在安全边界调用，保证助手消息与工具消息始终成对：
+      </p>
+      <ul>
+        <li>每轮迭代开始前；</li>
+        <li>模型响应完整、工具执行之前；</li>
+        <li>每个工具批次结束后、下一批或下一轮之前；</li>
+        <li>步数耗尽、进入 tool-free 最终作答之前；</li>
+        <li>无进展停止、进入 tool-free 最终作答之前。</li>
+      </ul>
+      <div class="callout">
+        <p><strong>不在流式 token 循环内部检查。</strong>否则会留下半截 assistant 消息，
+        破坏下一轮的消息协议。取消的代价是“等到当前模型流结束或当前工具返回”。</p>
+      </div>
+
+      <h3>失败路径</h3>
+      <pre><code><span class="c"># 伪代码：循环的骨架</span>
+<span class="k">for</span> iteration <span class="k">in</span> <span class="n">1</span>..max_iterations:
+    check_cancelled(iteration)
+    messages = context.build()
+    response = model(messages)                    <span class="c"># MODEL_REQUEST / MODEL_RESPONSE</span>
+    pending_calls = response.tool_calls
+    check_cancelled(iteration)
+
+    <span class="k">if not</span> pending_calls:
+        stop_reason = map_finish_reason(response)
+        <span class="k">break</span>
+
+    announce_all(pending_calls)                   <span class="c"># TOOL_CALL ×N</span>
+    results = invoke_many(pending_calls, cancel_event)
+    <span class="k">for</span> call, result <span class="k">in</span> zip(pending_calls, results):
+        apply_to_context(call, result)
+        emit_tool_result(call, result)             <span class="c"># TOOL_RESULT ×N</span>
+    pending_calls = []
+    check_cancelled(iteration)
+
+<span class="k">else</span>:
+    <span class="c"># 步数耗尽：先尝试一次不带工具的作答</span>
+    <span class="k">if not</span> tool_free_answer():
+        persist_failed(<span class="s">"max_iterations"</span>)
+        <span class="k">raise</span> MaxIterationsExceeded
+</code></pre>
+
+      <div class="callout is-bad">
+        <p><strong>协议不变量：</strong>每个 assistant 的 <code>tool_call</code> 必须有配对的 tool 消息。
+        取消、异常、步数耗尽时，<code>_abort_pending_tool_calls</code> 会给未执行的调用补一条
+        <code>{"error": "run aborted: ..."}</code>，否则下一次对话会把残缺历史发给模型。</p>
+      </div>
+    </section>
+
+    <section id="tools">
+      <p class="kicker">Layer 3</p>
+      <h2>工具执行状态机</h2>
+      <p>
+        工具状态挂在每个 <code>tool_call_id</code> 上，而不是整个 run 上。一次模型响应里的
+        N 个调用可以处在不同状态：已声明、执行中、完成、失败或中止。
+      </p>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>状态</th><th>产生方式</th><th>可见位置</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><span class="chip s-running">declared</span></td><td>模型返回 tool_calls 后，先统一发 <code>TOOL_CALL</code></td><td><code>agent_run_events</code>、tool span</td></tr>
+            <tr><td><span class="chip s-running">running</span></td><td>批次开始执行</td><td>tool span <code>status=running</code></td></tr>
+            <tr><td><span class="chip s-completed">completed</span></td><td>工具返回，<code>is_error=false</code></td><td>tool span、<code>TOOL_RESULT</code></td></tr>
+            <tr><td><span class="chip s-failed">failed</span></td><td>工具返回，<code>is_error=true</code></td><td>tool span、<code>TOOL_RESULT</code></td></tr>
+            <tr><td><span class="chip s-aborted">aborted</span></td><td>取消时未开始或被丢弃的调用</td><td><code>metadata.aborted=true</code> 的结果</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>批次调度</h3>
+      <ul>
+        <li><code>invoke_many</code> 把连续、声明了 <code>concurrency_safe=True</code> 的调用合成一批并行执行。</li>
+        <li>任何非并发安全的调用都是单调用批次，同时是前后屏障：前一批必须结束，后一批才能开始。</li>
+        <li>返回列表始终与声明顺序一致，即使完成顺序不同。</li>
+        <li>子 Agent 工具默认是写类型（<code>effect=write</code>），因此是串行屏障。</li>
+      </ul>
+
+      <h3>取消时的工具语义</h3>
+      <div class="two-col">
+        <div class="panel">
+          <h3>并行批次</h3>
+          <ul>
+            <li>每 0.2 秒轮询 <code>cancel_event</code>；</li>
+            <li>已完成的 future 保留结果；</li>
+            <li>未开始的 future 调 <code>cancel()</code>；</li>
+            <li>没有结果的槽位补 <code>aborted</code> ToolResult。</li>
+          </ul>
+        </div>
+        <div class="panel">
+          <h3>串行工具</h3>
+          <ul>
+            <li>执行期间不轮询取消；</li>
+            <li>必须等工具自己返回；</li>
+            <li>副作用已经发生，不能回滚；</li>
+            <li>取消延迟等于当前工具剩余时间。</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="callout is-warn">
+        <p><strong>结果可能被丢弃，副作用不会。</strong>取消后，已开始工具的结果可能不写入上下文，
+        但它对文件、网络或 shell 的影响已经存在。恢复/重试时必须按 at-most-once 处理。</p>
+      </div>
+    </section>
+
+    <section id="subagents">
+      <p class="kicker">Layer 3</p>
+      <h2>子 Agent 状态机</h2>
+      <p>
+        子 Agent 在父 Agent 看来就是一个普通工具调用：一次 <code>tool.call</code>，
+        一次 <code>tool.result</code>。但在内部，它是一个独立的 ReAct runtime，拥有自己的
+        上下文、工具白名单、轮次预算和取消事件。
+      </p>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>状态</th><th>含义</th><th>父 Agent 看到的</th><th>span 状态</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><span class="chip s-running">started</span></td><td>委派开始，子 runtime 创建</td><td>tool call running</td><td>running</td></tr>
+            <tr><td><span class="chip s-completed">completed</span></td><td>子 Agent 正常作答</td><td>tool result，<code>is_error=false</code></td><td>completed</td></tr>
+            <tr><td><span class="chip s-running">partial</span></td><td>截断或步数耗尽但有内容</td><td>tool result，<code>is_error=true</code>（视情况）</td><td>completed</td></tr>
+            <tr><td><span class="chip s-failed">failed</span></td><td>子 runtime 异常或无内容</td><td>tool result，<code>is_error=true</code></td><td>failed</td></tr>
+            <tr><td><span class="chip s-failed">timeout</span></td><td>子 Agent 自己的计时器触发</td><td>tool result，<code>is_error=true</code></td><td>failed</td></tr>
+            <tr><td><span class="chip s-cancelled">cancelled</span></td><td>父取消镜像到 <code>child_cancel</code></td><td>tool result，<code>is_error=true</code></td><td>aborted</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>两个独立的中止源</h3>
+      <ul>
+        <li><b>父取消镜像：</b>每个委派创建新的 <code>child_cancel</code>；一个 daemon watcher 每 50 毫秒轮询父事件，命中就置位。嵌套委派逐层镜像。</li>
+        <li><b>子 Agent 超时：</b><code>threading.Timer</code> 在 <code>default_timeout_seconds</code> 后置位同一个 <code>child_cancel</code>，并单独记录 <code>timed_out</code> 用于区分原因。</li>
+      </ul>
+      <p>
+        子 Agent 在安全点退出后，<code>RunCancelled</code> 带着 partial <code>RunResult</code>
+        返回；<code>SubagentTool</code> 把它归一化成结果信封，父 Agent 继续自己的循环。
+        父是否也停下，取决于父自己的 <code>cancel_event</code>，子 Agent 不会反向取消父。
+      </p>
+
+      <div class="callout">
+        <p><strong>可恢复性：</strong>只有 <code>completed</code> / <code>partial</code> 且最后一条是
+        assistant 消息的子会话才标记 <code>resumable=true</code>。取消、超时、失败都不保留
+        resume 会话；父 Agent 只能看到有损的结果信封。</p>
+      </div>
+    </section>
+
+    <section id="spans">
+      <p class="kicker">Observability</p>
+      <h2>Span 状态机</h2>
+      <p>
+        Span 是 run 的旁路状态机，不参与调度。它的职责是把“发生了什么”变成可查询的树，
+        并保证取消、崩溃后不会留下永远 running 的行。
+      </p>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>span 状态</th><th>何时写入</th><th>来源</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><span class="chip s-running">running</span></td><td>模型请求、工具调用、子 Agent 开始</td><td><code>MODEL_REQUEST</code> / <code>TOOL_CALL</code> / <code>SUBAGENT_STARTED</code></td></tr>
+            <tr><td><span class="chip s-completed">completed</span></td><td>模型响应、工具结果成功、run 正常结束</td><td><code>MODEL_RESPONSE</code> / <code>TOOL_RESULT</code> / finalize</td></tr>
+            <tr><td><span class="chip s-failed">failed</span></td><td>工具错误、run failed</td><td><code>TOOL_RESULT(is_error)</code> / finalize</td></tr>
+            <tr><td><span class="chip s-aborted">aborted</span></td><td>取消或 run cancelled</td><td><code>abort_open</code> / finalize</td></tr>
+            <tr><td><span class="chip s-interrupted">interrupted</span></td><td>服务关闭或崩溃恢复</td><td><code>settle_open_spans</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p>
+        run 状态到 span 状态的映射是固定的：<code>completed → completed</code>、
+        <code>failed → failed</code>、<code>cancelled → aborted</code>、
+        <code>interrupted → interrupted</code>。写入按 <code>(run_id, span_id)</code> 幂等 upsert，
+        已终态的行不会被迟到的重复事件重新打开。
+      </p>
+
+      <div class="callout is-warn">
+        <p><strong>采集不是必然的：</strong><code>AGENT_SPAN_CAPTURE</code> 关闭或采样未命中时，
+        整个 run 不写 span；eval 会因为没有 span 拒绝评分。取消/恢复逻辑不能依赖 span 存在。</p>
+      </div>
+    </section>
+
+    <section id="cancellation">
+      <p class="kicker">Signal path</p>
+      <h2>取消信号怎么传</h2>
+      <p>
+        取消是协作式的：前端发一个 HTTP 请求，服务端置位一个进程内的
+        <code>threading.Event</code>，执行层在各自的安全点轮询。没有任何地方强杀线程。
+      </p>
+
+      <div class="flow" aria-label="取消传播时序">
+        <div class="flow-row">
+          <div class="flow-node"><b>1 · 前端</b><code>POST /agent/runs/{id}/cancel</code>，不主动断开 SSE</div>
+          <span class="flow-arrow">→</span>
+          <div class="flow-node"><b>2 · Manager</b>写 <code>cancel_requested_at</code>，<code>cancel_event.set()</code></div>
+          <span class="flow-arrow">→</span>
+          <div class="flow-node"><b>3 · Wrapper</b>每 0.5 秒轮询，抛 <code>agent_cancelled</code></div>
+        </div>
+        <div class="flow-row">
+          <div class="flow-node"><b>4 · SDK</b>安全点命中 → <code>_cancel_run</code></div>
+          <span class="flow-arrow">→</span>
+          <div class="flow-node"><b>5 · 工具 / 子 Agent</b>批次 0.2 秒轮询；子 Agent watcher 50 毫秒镜像</div>
+          <span class="flow-arrow">→</span>
+          <div class="flow-node"><b>6 · Finalize</b>flush、abort open、写消息、<code>finish(cancelled)</code></div>
+        </div>
+      </div>
+
+      <h3>三种取消路径</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>run 状态</th><th>行为</th><th>结果</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>queued</td><td><code>cancel_queued</code> 直接改状态，不启动 worker</td><td>cancelled + <code>error</code> / <code>done</code> 事件</td></tr>
+            <tr><td>running（进程内有 task）</td><td>只写时间戳并置位 Event，不 <code>task.cancel()</code></td><td>执行层在安全点退出，finalize 为 cancelled</td></tr>
+            <tr><td>running（进程内无 task）</td><td><code>_finalize_orphan_cancel</code> 直接收尾</td><td>cancelled，补齐 open 工具的 aborted 结果</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout is-bad">
+        <p><strong>关流不等于取消。</strong>background 模式下断开 SSE 不会停止 run，客户端用
+        <code>run_id + after_seq</code> 重连即可续看。只有显式 cancel 请求才会停。
+        legacy 模式（<code>AGENT_RUN_BACKGROUND=false</code>）是例外：断流会取消本地 task。</p>
+      </div>
+
+      <p>
+        “用户取消”和“服务关闭”是两种终态：前者是 <span class="chip s-cancelled">cancelled</span> /
+        <code>agent_cancelled</code>，后者是 <span class="chip s-interrupted">interrupted</span> /
+        <code>agent_interrupted</code>。它们在前端的显示和重试语义不同。
+      </p>
+    </section>
+
+    <section id="recovery">
+      <p class="kicker">Durability</p>
+      <h2>重启与恢复</h2>
+      <p>
+        当前实现能恢复“现场”，不能恢复“执行”：重启后残留的 running 会被收敛成 interrupted，
+        已生成的内容和工具 trace 会保留，但 ReAct 循环不会接着跑。理解恢复需要区分三件事：
+        <b>中断时写什么</b>、<b>启动时怎么收尾</b>、<b>下一轮从哪里读上下文</b>。
+      </p>
+
+      <h3>三种中断</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>场景</th><th>谁收尾</th><th>run 终态</th><th>助手消息</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>用户取消</td><td><code>_finalize(cancelled)</code></td><td><span class="chip s-cancelled">cancelled</span></td><td><code>cancelled</code>，保留 <code>tool_trace</code></td></tr>
+            <tr><td>优雅关闭</td><td><code>_finalize(interrupted)</code></td><td><span class="chip s-interrupted">interrupted</span></td><td><code>failed</code>（消息状态只有 completed/cancelled/failed）</td></tr>
+            <tr><td>崩溃 / SIGKILL</td><td>下次 <code>startup()</code> → <code>_recover_run</code></td><td><span class="chip s-interrupted">interrupted</span>（或按已有消息推断）</td><td><code>failed</code>，或沿用已经写好的消息</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>恢复步骤</h3>
+      <ol>
+        <li><code>startup()</code> 读取所有 <code>running</code> run。</li>
+        <li><code>_recover_run</code> 读取 run、用户消息、助手消息。</li>
+        <li>按助手消息是否存在推断 span 终态，<code>settle_open_spans</code> 关闭仍 running 的 span。</li>
+        <li>从 <code>partial_content</code> 和 <code>partial_metadata</code> 重建 writer 的内存态。</li>
+        <li><code>_abort_trace_entries</code> 把 running 的工具条目改成 aborted，并补写 <code>tool.result</code>。</li>
+        <li>写助手消息（通常 <code>status=failed</code>），把 run 标成 <code>interrupted</code>。</li>
+        <li>补 <code>error</code> 事件，publish <code>done</code>。</li>
+      </ol>
+
+      <div class="callout">
+        <p><strong>优雅关闭 vs 崩溃：</strong>优雅关闭时 <code>_finalize(interrupted)</code> 在进程退出前完成，
+        不进入恢复；崩溃时 run 停留在 running，直到下次启动才被收敛。</p>
+      </div>
+
+      <h3>现场存在哪，下一轮读什么</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>数据</th><th>位置</th><th>写入时机</th><th>下一轮读取</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>文本增量</td><td><code>agent_runs.partial_content</code></td><td>每次事件 flush，≤150ms 延迟</td><td>否</td></tr>
+            <tr><td>工具 trace</td><td><code>agent_runs.partial_metadata.tool_trace</code></td><td>每个 tool.call / tool.result</td><td>否</td></tr>
+            <tr><td>事件流</td><td><code>agent_run_events</code></td><td>每个对外事件，delta 合并</td><td>否（SSE 重连、审计）</td></tr>
+            <tr><td>span 树</td><td><code>agent_run_spans</code></td><td>每个 span 相关事件</td><td>否（观测、评测）</td></tr>
+            <tr><td>助手消息</td><td><code>conversation_messages</code></td><td>只在终态写</td><td><b>是，唯一上下文来源</b></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p>
+        下一轮请求走 <code>_prepare_turn → build_history</code>，只读 <code>conversation_messages</code>。
+        <code>agent_runs</code> 的角色是在收尾时把现场补写进这张表，之后不再参与 prompt；
+        <code>agent_run_events</code> 和 <code>agent_run_spans</code> 都不进入模型上下文。
+      </p>
+
+      <h3>下一轮实际看到什么</h3>
+      <ul>
+        <li><b>用户消息：</b><code>status=completed</code> 才加入；</li>
+        <li><b>已完成助手消息：</b>正文 + <code>tool_trace</code> 展开成 <code>assistant(tool_calls)</code> + tool 结果 + 最终回答；</li>
+        <li><b>取消 / 失败的助手消息：</b>只展开 <code>tool_trace</code>，<b>不把半截回答当成助手答案</b>；</li>
+        <li><b>没有 tool_trace 的取消 / 失败消息：</b>整条跳过。</li>
+      </ul>
+
+      <div class="callout is-warn">
+        <p><strong>中断时生成的半截回答只展示给用户，不会进入下一轮 prompt。</strong>
+        恢复出来的上下文 = 用户消息 + 历史已完成回答 + 中断轮次里已经执行过的工具调用和结果。</p>
+      </div>
+
+      <p>
+        记忆是独立的上下文来源：<code>AgentMemoryRecall</code> 从工作区 Markdown / 索引注入，
+        不来自这些 run 表。
+      </p>
+
+      <h3>助手消息是“收尾进度”的代理信号</h3>
+      <p>
+        <code>_finalize</code> 先 <code>insert_assistant_message</code>，再 <code>repo.finish</code>，
+        两次写是独立事务。因此“消息是否存在”能反推崩溃发生在收尾的哪一步：
+      </p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>崩溃点</th><th>run 行</th><th>助手消息</th><th>恢复判断</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>执行中，或收尾还没写消息</td><td>running</td><td>不存在</td><td>按 interrupted 收尾</td></tr>
+            <tr><td>消息已写、run 尚未终态</td><td>running</td><td>存在</td><td>以消息里的状态为准</td></tr>
+            <tr><td><code>repo.finish</code> 之后</td><td>终态</td><td>存在或不存在</td><td>不再进入恢复</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout">
+        <p><strong>状态精度：</strong>interrupted 和 failed 在助手消息里都存成 <code>failed</code>。
+        如果要求精确恢复，应优先读消息 meta 里的 <code>run_status</code>，而不是只看 <code>status</code>。</p>
+      </div>
+
+      <h3>恢复时序</h3>
+      <div class="flow" aria-label="恢复与下一轮读取">
+        <div class="flow-row">
+          <div class="flow-node"><b>崩溃 / 关闭</b>run 可能停留在 running</div>
+          <span class="flow-arrow">→</span>
+          <div class="flow-node"><b>startup</b><code>list_running()</code></div>
+          <span class="flow-arrow">→</span>
+          <div class="flow-node"><b>_recover_run</b>settle span、补工具结果、写消息、finish</div>
+          <span class="flow-arrow">→</span>
+          <div class="flow-node"><b>publish done</b>订阅者看到终态</div>
+        </div>
+        <div class="flow-row">
+          <div class="flow-node"><b>下一轮</b><code>POST /agent</code></div>
+          <span class="flow-arrow">→</span>
+          <div class="flow-node"><b>build_history</b>只读 <code>conversation_messages</code></div>
+          <span class="flow-arrow">→</span>
+          <div class="flow-node"><b>prompt</b>用户消息 + 历史回答 + 工具 trace</div>
+        </div>
+      </div>
+
+      <h3>如果要“接着跑”</h3>
+      <p>
+        需要 checkpoint，记录 ReAct 的位置而不是只记录输出。最小设计：
+      </p>
+      <ul>
+        <li><b>存什么：</b>phase、iteration、<code>new_messages</code>、工具结果摘要、usage、ledger/guard 计数、子 Agent 会话；</li>
+        <li><b>放哪：</b>新增 <code>agent_run_checkpoints</code>，按 <code>(run_id, seq)</code> 唯一，大输出引用事件 seq；</li>
+        <li><b>何时写：</b>模型响应后、每个工具批次后、子 Agent 返回后；</li>
+        <li><b>怎么恢复：</b>校验消息协议与 harness 版本，从下一个安全边界继续；</li>
+        <li><b>一致性：</b>有副作用的工具默认 at-most-once；执行中的调用标 aborted，不盲目重放。</li>
+      </ul>
+    </section>
+
+    <section id="events">
+      <p class="kicker">Pipeline</p>
+      <h2>事件与落库</h2>
+      <p>
+        SDK 只发语义事件，不认识 span、SSE 或 Postgres。服务端 wrapper 把 SDK 的
+        <code>EventType</code> 翻译成 <code>AgentEvent</code>，runner 再决定写哪张表。
+      </p>
+
+      <div class="flow" aria-label="事件管道">
+        <div class="flow-row">
+          <div class="flow-node"><b>SDK</b><code>_emit(EventType.X)</code> → <code>on_event</code></div>
+          <span class="flow-arrow">→</span>
+          <div class="flow-node"><b>Wrapper</b><code>_bridge_event</code> → <code>AgentEvent</code></div>
+          <span class="flow-arrow">→</span>
+          <div class="flow-node"><b>Queue</b><code>call_soon_threadsafe</code> 跨线程</div>
+          <span class="flow-arrow">→</span>
+          <div class="flow-node"><b>Runner</b><code>_handle_event</code></div>
+        </div>
+        <div class="flow-row">
+          <div class="flow-node"><b>Span 分支</b><code>spans.handle</code> → <code>agent_run_spans</code></div>
+          <span class="flow-arrow">→</span>
+          <div class="flow-node"><b>事件分支</b><code>writer.write</code> → <code>agent_run_events</code> + run 行</div>
+          <span class="flow-arrow">→</span>
+          <div class="flow-node"><b>推送</b>订阅者队列 → SSE</div>
+        </div>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>事件</th><th>写 span</th><th>写事件表 / SSE</th><th>说明</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>AgentDelta</code></td><td>否</td><td>是（合并）</td><td>每个 token chunk，150ms / 4KB 合并</td></tr>
+            <tr><td><code>AgentToolCall</code></td><td>是</td><td>是</td><td>一次工具调用声明</td></tr>
+            <tr><td><code>AgentToolResult</code></td><td>是</td><td>是</td><td>工具结果终态</td></tr>
+            <tr><td><code>AgentModelRequest</code></td><td>是</td><td>否</td><td>仅 span</td></tr>
+            <tr><td><code>AgentModelResponse</code></td><td>是</td><td>否</td><td>仅 span</td></tr>
+            <tr><td><code>AgentSubagent*</code></td><td>是</td><td>否</td><td>子 Agent span 树</td></tr>
+            <tr><td><code>AgentMemoryRecall/Save</code></td><td>是</td><td>是</td><td>记忆观测</td></tr>
+            <tr><td><code>AgentUsageUpdate</code></td><td>否</td><td>否</td><td>只进用量计量器</td></tr>
+            <tr><td><code>AgentCompleted</code></td><td>否</td><td>否</td><td>只更新 completion metadata</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout is-warn">
+        <p><strong>同名不同物：</strong>SDK 的 <code>AgentEvent</code> 是带 <code>EventType</code> 的
+        Pydantic 模型；服务端的 <code>AgentEvent</code> 是 dataclass 的 union。两者从不共享对象，
+        <code>_bridge_event</code> 在回调里就完成了字段复制。</p>
+      </div>
+    </section>
+
+    <section id="invariants">
+      <p class="kicker">Guarantees</p>
+      <h2>不变量与失败模式</h2>
+
+      <h3>必须成立的不变量</h3>
+      <ul>
+        <li><b>每个会话最多一个活跃 run。</b>由部分唯一索引保证 <code>queued / running</code> 唯一。</li>
+        <li><b>事件序号单调。</b><code>append_event</code> 在 <code>last_seq &gt;= seq</code> 时返回 false，重复写不会生效。</li>
+        <li><b>工具调用与结果配对。</b>取消或异常时由 <code>_abort_pending_tool_calls</code> 补齐。</li>
+        <li><b>终态不可回退。</b>run 的 <code>finish</code> 只更新 <code>queued / running</code>；span 的终态不会被迟到事件重新打开。</li>
+        <li><b>助手消息只在终态写。</b>运行中只更新 <code>partial_content</code> 和事件表。</li>
+        <li><b>取消只在安全点生效。</b>不在流式 chunk 内部中断。</li>
+      </ul>
+
+      <h3>已知失败模式</h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>场景</th><th>表现</th><th>当前处理</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>工具长时间阻塞</td><td>取消延迟等于工具剩余时间</td><td>串行工具无法中断；并行批次 0.2s 轮询</td></tr>
+            <tr><td>进程被 SIGKILL</td><td>run 停留在 running</td><td>下次 startup 收敛为 interrupted；丢 ≤150ms delta</td></tr>
+            <tr><td>多副本同时启动</td><td>同一 run 被两个 worker 接管</td><td>无 lease 回收；当前假设单副本</td></tr>
+            <tr><td>span 采集关闭</td><td>eval 无法评分</td><td>eval 入队时检查 span 数量并拒绝</td></tr>
+            <tr><td>上游模型超时</td><td>run failed，部分内容保留</td><td><code>AgentLoopError</code> → finish(failed)</td></tr>
+            <tr><td>客户端断开 SSE</td><td>run 继续执行</td><td>后台任务与订阅解耦，用 <code>after_seq</code> 重连</td></tr>
+            <tr><td>助手消息写入失败</td><td>run 仍可能完成</td><td><code>insert_assistant_message</code> 幂等；会话被删则放弃</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="code-map">
+      <p class="kicker">Source map</p>
+      <h2>代码地图</h2>
+      <p>行号会随重构漂移，下表按文件与函数定位。</p>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>职责</th><th>文件</th><th>关键函数 / 类</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>run 调度、取消、恢复</td><td class="src">server/app/agent/runner.py</td><td><code>AgentRunManager</code>、<code>_run_worker</code>、<code>cancel</code>、<code>_recover_run</code></td></tr>
+            <tr><td>run / event / span 持久化</td><td class="src">server/app/agent/repo.py</td><td><code>RunRepository</code>、<code>append_event</code>、<code>finish</code>、<code>upsert_span</code></td></tr>
+            <tr><td>ReAct 循环</td><td class="src">agent-loop/src/bokaclaw_agent/agent/runtime.py</td><td><code>AgentRuntime._execute</code>、<code>_cancel_run</code>、<code>_handle_failure</code></td></tr>
+            <tr><td>工具批次</td><td class="src">agent-loop/src/bokaclaw_agent/tools/registry.py</td><td><code>invoke_many</code>、<code>_safe_batch</code>、<code>_invoke_parallel</code></td></tr>
+            <tr><td>子 Agent</td><td class="src">agent-loop/src/bokaclaw_agent/agent/subagent.py</td><td><code>SubagentTool._delegate</code>、<code>_normalize_result</code>、<code>_watch_parent_cancel</code></td></tr>
+            <tr><td>SDK 事件桥</td><td class="src">server/app/agent/runtime.py</td><td><code>stream_local_agent</code>、<code>_bridge_event</code></td></tr>
+            <tr><td>span 采集</td><td class="src">server/app/agent/spans.py</td><td><code>SpanRecorder</code>、<code>handle</code>、<code>finalize</code>、<code>settle_open_spans</code></td></tr>
+            <tr><td>事件类型</td><td class="src">server/app/agent/events.py</td><td><code>AgentEvent</code> union、<code>AgentLoopError</code></td></tr>
+            <tr><td>SDK 事件类型</td><td class="src">agent-loop/src/bokaclaw_agent/core/types.py</td><td><code>EventType</code>、<code>RunResult</code>、<code>ToolResult</code></td></tr>
+            <tr><td>取消路由</td><td class="src">server/app/routers/agent.py</td><td><code>cancel_agent_run</code>、<code>_legacy_invoke</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout">
+        <p><strong>读这套代码的顺序：</strong>先看 <code>AgentRunManager._run_worker</code> 理解
+        run 怎么被驱动，再看 <code>AgentRuntime._execute</code> 理解一轮怎么跑，
+        最后看 <code>_handle_event</code> 理解状态怎么落库。取消和恢复是横切关注点，
+        贯穿这三处。</p>
+      </div>
+    </section>
+
+    <footer>
+      <p>基于当前仓库代码整理。状态名称与代码中的字符串常量一致；行号未固定，按函数名定位。</p>
+    </footer>
+  </main>
+</div>
+
+<script>
+  (function () {
+    var root = document.documentElement;
+    var btn = document.getElementById("themeBtn");
+
+    try {
+      var saved = localStorage.getItem("agent-loop-theme");
+      if (saved === "dark" || saved === "light") root.dataset.theme = saved;
+    } catch (e) {}
+
+    function label() {
+      var dark = root.dataset.theme === "dark" ||
+        (!root.dataset.theme && window.matchMedia &&
+          window.matchMedia("(prefers-color-scheme: dark)").matches);
+      btn.textContent = dark ? "◑ 浅色" : "◐ 深色";
+    }
+
+    if (btn) {
+      label();
+      btn.addEventListener("click", function () {
+        var dark = root.dataset.theme === "dark" ||
+          (!root.dataset.theme && window.matchMedia &&
+            window.matchMedia("(prefers-color-scheme: dark)").matches);
+        var next = dark ? "light" : "dark";
+        root.dataset.theme = next;
+        try { localStorage.setItem("agent-loop-theme", next); } catch (e) {}
+        label();
+      });
+    }
+
+    var links = Array.prototype.slice.call(document.querySelectorAll(".toc a"));
+    var sections = links.map(function (a) {
+      return document.querySelector(a.getAttribute("href"));
+    }).filter(Boolean);
+
+    function setActive(id) {
+      links.forEach(function (a) {
+        a.classList.toggle("active", a.getAttribute("href") === "#" + id);
+      });
+    }
+
+    if ("IntersectionObserver" in window && sections.length) {
+      var observer = new IntersectionObserver(function (entries) {
+        var visible = entries
+          .filter(function (entry) { return entry.isIntersecting; })
+          .sort(function (a, b) { return a.boundingClientRect.top - b.boundingClientRect.top; });
+        if (visible.length) setActive(visible[0].target.id);
+      }, { rootMargin: "-15% 0px -65% 0px", threshold: [0, 1] });
+      sections.forEach(function (section) { observer.observe(section); });
+    }
+  })();
+</script>
+</body>
+</html>

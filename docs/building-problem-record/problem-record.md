@@ -344,6 +344,7 @@
     - B（同会话追问，要求不使用工具、原样列出上一轮搜索结果）：0 次工具调用，6.2s，逐条列出 5 个搜索结果的标题与 URL，以及抓取请求 URL、重定向后的最终 URL、`cached: false` 与重定向提示——这些只存在于上一轮的 `tool` 消息里，证明历史已按 `assistant.tool_calls` + `tool` 的 wire format 回灌。
     - 对照（新会话问同一问题）：0 次工具调用，1.3s，仅回答「上下文里没有原始记录」，没有编造。
   - 复测暴露回灌上限：B 看到的抓取正文在 2,000 字符处被 `AGENT_LOOP_HISTORY_TOOL_RESULT_MAX_CHARS` 截断，价格表恰好落在截断之后，模型主动声明「上一轮价格表在当前上下文中没有原始依据」。默认 2,000 字符对表格/数据页偏小，需要时可调大。
+  - 中断 run 回灌验证（数据 2026-11-09，分析 2026-11-10，会话 `908df338`）：首问 `run 555eef8f` 被取消，`agent_run_events` 12 条、取消 assistant 消息 `metadata.tool_trace` 5 条（3 次 `WebSearch` completed、1 次 `WebFetch` failed、1 次 `WebFetch` aborted）；追问 `run 14144417` 的 `agent_runs.request.history` 共 7 条 / 6,443 字符，包含 `assistant(5 tool_calls)` + 5 条 `tool` 结果。终答提到的「澳门餐厅」（`antoniomacau.com`）只存在于被中断 run 的结果里，本 run 事件中 0 命中，证明模型确实读到了上一轮工具记录。终答称「这一轮几乎没拿到可用证据」是 Bing 返回无关结果 + 模型选择重新检索，不是历史丢失。
   - 第一次复测时 P-07 注入仍开着，结论记忆直接污染了对照（模型声称抓取过 `example.com`），正式对照因此关闭了 `AGENT_RESEARCH_MEMORY`；两项特性的评估必须分开做。
 - **可复用结论**：持久化工具调用只是第一步；下一轮必须在历史里以**配对的 `assistant.tool_calls` + `tool` 消息**回灌，模型才能真正复用结果。只存事件表而不重建 wire format，等于没有上下文。
 
@@ -945,3 +946,4 @@
 | 2026-11-09 | 追加并修复 P-30：MCP SDK 1.20+ 要求 pydantic>=2.11，与项目固定的 2.10.4 冲突；固定 `mcp==1.12.0` 并把 SDK 隔离在 `server/app/agent/mcp/client.py`，server 镜像构建与容器内导入验证通过（发现时间 2026-11-09，解决时间 2026-11-09） |
 | 2026-11-09 | 追加并修复 P-31：executor 镜像预装 `czsc==0.10.12` / `openpyxl` / `pyharmonics` / `smartmoneyconcepts`，用 `CZSC_USE_PYTHON=1` 兼容经典 `get_signals` API，设置 `HOME=/tmp` 解决只读根文件系统下的 `~/.czsc` 创建失败，并新增专用 `executor.Dockerfile` 与构建/冒烟流程（发现时间 2026-11-09，解决时间 2026-11-09） |
 | 2026-11-09 | 追加 P-26 并完成记忆架构迁移：工作区 Markdown（`USER.md` / `MEMORY.md` / `memory/YYYY-MM-DD.md`）成为唯一权威存储，Postgres 只保留可重建的 `memory_index_*` / `memory_history` 派生索引（迁移 014）；一次性导入旧 Mem0 行与 SQLite history；agent 暴露五个记忆工具，轮末无 LLM capture，召回以 user 角色 `<recalled-memories>` 注入；移除 `mem0ai` 依赖、CLI/integrations/旧测试与文档，dashboard 去除 Mem0 云版推广与品牌链接；真实栈验证 reconcile / search / capture / recall，512 + 194 tests 通过（发现时间 2026-11-09，解决时间 2026-11-09） |
+| 2026-11-10 | P-08 补充中断 run 回灌验证：会话 `908df338` 的取消 run `555eef8f` 的 5 条工具记录已进入下一轮 `run 14144417` 的 `request.history`（7 条 / 6,443 字符）；终答引用了仅存在于上一轮结果的「澳门餐厅」，确认回灌生效；「没有可用证据」归因于 Bing 结果质量与模型重复检索，非历史丢失（发现时间 2026-11-10，解决时间 —，非缺陷） |
