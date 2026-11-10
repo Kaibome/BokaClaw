@@ -189,7 +189,6 @@ class SpanRecorder:
         self.root_error: str | None = None
         self.root_started_at: datetime | None = None
         self.root_input: dict[str, Any] = {}
-        self.pending_compression: Any = None
         self.pending_llm: dict[int, deque[str]] = defaultdict(deque)
         self.llm_spans: dict[str, dict[str, Any]] = {}
         self.tool_spans: dict[str, dict[str, Any]] = {}
@@ -197,6 +196,7 @@ class SpanRecorder:
         self.subagent_child_spans: dict[str, dict[str, Any]] = {}
         self.pending_subagent_llm: dict[tuple[str, int], deque[str]] = defaultdict(deque)
         self.subagent_llm_counts: dict[str, int] = defaultdict(int)
+        self._compression_counts: dict[int, int] = defaultdict(int)
         self._llm_fallback = 0
 
     # ------------------------------------------------------------- lifecycle
@@ -313,10 +313,7 @@ class SpanRecorder:
         elif isinstance(event, AgentModelResponse):
             self._on_model_response(event)
         elif isinstance(event, AgentContextCompressed):
-            self.pending_compression = _bounded(
-                _redact(dict(event.stats or {})),
-                self.options.max_bytes,
-            )
+            self._on_context_compressed(event)
         elif isinstance(event, (AgentRunStarted, AgentRunEnded)):
             self._on_run_event(event)
         elif isinstance(event, AgentError):
@@ -344,6 +341,32 @@ class SpanRecorder:
         if isinstance(event, AgentRunEnded) and isinstance(event.stop_reason, str):
             self.root_attributes["stop_reason"] = event.stop_reason
 
+    def _on_context_compressed(self, event: AgentContextCompressed) -> None:
+        """Record compression as its own child of the agent span.
+
+        It has no start/end window of its own, so the span is emitted already
+        completed with a zero duration; ``attributes`` keeps the full stats.
+        """
+        now = utcnow()
+        self._compression_counts[event.iteration] += 1
+        occurrence = self._compression_counts[event.iteration]
+        self._write(
+            span_id=f"compression:{event.iteration}:{occurrence}",
+            span_type="compression",
+            name=f"context.compress.{event.iteration}",
+            status="completed",
+            started_at=now,
+            ended_at=now,
+            duration_ms=0,
+            iteration=event.iteration,
+            input={},
+            output={},
+            attributes=_bounded(
+                _redact(dict(event.stats or {})),
+                self.options.max_bytes,
+            ),
+        )
+
     def _on_model_request(self, event: AgentModelRequest) -> None:
         span_id = self._llm_span_id(event.seq, event.iteration)
         attributes: dict[str, Any] = {
@@ -354,9 +377,6 @@ class SpanRecorder:
             "last_message_hash": event.last_message_hash,
             "tool_names": _tool_names(event.tools),
         }
-        if self.pending_compression is not None:
-            attributes["context_compressed"] = self.pending_compression
-            self.pending_compression = None
         if event.prompt is not None:
             input_payload = {"messages": _bounded(_redact(event.prompt), self.options.max_bytes)}
         else:

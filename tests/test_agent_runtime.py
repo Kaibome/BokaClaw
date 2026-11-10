@@ -18,6 +18,7 @@ if _SERVER_DIR not in sys.path:
 import app.agent.runtime as agent_runtime  # noqa: E402
 from app.agent.events import (  # noqa: E402
     AgentCompleted,
+    AgentContextCompressed,
     AgentDelta,
     AgentLoopError,
     AgentMemoryRecall,
@@ -1404,8 +1405,11 @@ def test_context_debug_logs_the_resolved_budget(monkeypatch, caplog):
     assert "tool_result_max_chars=16000" in messages[0]
 
 
-def test_context_debug_logs_compression_events_and_forwards_span(monkeypatch, caplog):
+def test_context_debug_logs_compression_events_and_forwards_live_event(monkeypatch, caplog):
     monkeypatch.setenv("AGENT_CONTEXT_DEBUG", "1")
+    # The live event is part of the transcript, so it must not depend on span
+    # capture; the span recorder gates itself.
+    monkeypatch.setenv("AGENT_SPAN_CAPTURE", "0")
     forwarded = []
     event = types.SimpleNamespace(
         type=types.SimpleNamespace(value="context_compressed"),
@@ -1421,9 +1425,14 @@ def test_context_debug_logs_compression_events_and_forwards_span(monkeypatch, ca
     )
 
     with caplog.at_level("INFO", logger="app.agent.context"):
-        agent_runtime._bridge_event(event, lambda kind, value=None: forwarded.append(kind))
+        agent_runtime._bridge_event(event, lambda kind, value=None: forwarded.append((kind, value)))
 
-    assert forwarded == ["span_context_compressed"]
+    assert [kind for kind, _ in forwarded] == ["context_compressed"]
+    compressed = forwarded[0][1]
+    assert isinstance(compressed, AgentContextCompressed)
+    assert compressed.iteration == 6
+    assert compressed.stats["before_tokens"] == 34000
+    assert compressed.stats["after_tokens"] == 16000
     messages = [record.getMessage() for record in caplog.records]
     assert len(messages) == 1
     assert "context_compressed session=conv-1 iteration=6" in messages[0]

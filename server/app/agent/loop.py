@@ -9,6 +9,7 @@ import httpx
 
 from app.agent.events import (
     AgentCompleted,
+    AgentContextCompressed,
     AgentDelta,
     AgentEvent,
     AgentLoopError,
@@ -16,7 +17,7 @@ from app.agent.events import (
     AgentToolResult,
 )
 from app.agent.runtime import is_locally_configured, stream_local_agent
-from app.agent.usage import RunUsageMeter
+from app.agent.usage import RunUsageMeter, normalize_usage
 
 MOCK_RESPONSE = (
     "你好！我是 BokaClaw Agent 的联调假回复。\n\n"
@@ -186,6 +187,38 @@ def _handle_upstream_event(event_name: str, data: str) -> AgentEvent | None:
         if not isinstance(delta, str) or not delta:
             return None
         return AgentDelta(delta)
+
+    if event_name in {"context.compressed", "context_compressed"}:
+        try:
+            payload = json.loads(data)
+        except json.JSONDecodeError:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        stats = payload.get("stats")
+        if not isinstance(stats, dict):
+            stats = {
+                key: payload[key]
+                for key in (
+                    "before_tokens",
+                    "after_tokens",
+                    "dropped_messages",
+                    "summarized",
+                    "fallback",
+                    "usage",
+                    "model_calls",
+                    "usage_unknown_calls",
+                )
+                if key in payload
+            }
+        usage = normalize_usage(stats.get("usage"))
+        return AgentContextCompressed(
+            iteration=_as_int(payload.get("iteration"), 0) or 0,
+            stats=stats,
+            usage=usage or None,
+            model_calls=_as_int(stats.get("model_calls")) or 0,
+            usage_unknown_calls=_as_int(stats.get("usage_unknown_calls")) or 0,
+        )
 
     if event_name == "message.completed":
         try:

@@ -899,6 +899,26 @@
 
 ---
 
+## P-32 上下文压缩只有 trace/日志观测，前端对话不可见
+
+- **状态**：已解决
+- **发现时间**：2026-11-11
+- **解决时间**：2026-11-11
+- **场景**：用户询问上下文压缩触发时是否已有观测信息；检查 SDK 事件、SSE 契约与 Dashboard 消费端。
+- **现象**：压缩发生时只有服务端日志、`usage.sources.compression` 和落库 span 的 `attributes.context_compressed` 可查；SSE 不推送压缩事件，聊天界面没有提示，必须事后打开 Trace 页。
+- **证据**：`agent_run_spans` 已有 41 条带 `context_compressed` 的 llm span（如 `before_tokens=163035` → `after_tokens=29069`、`dropped_messages=69`、`summarized=true`），但同期对话流没有任何对应事件。
+- **根因**：`_bridge_event` 只在 `AGENT_SPAN_CAPTURE=true` 时发出内部 `span_context_compressed`；`runner._handle_event` 未把它写成 `agent_run_events`；Dashboard 也没有消费端。
+- **解决措施**：
+  1. SDK 的 `context_compressed` 恒定桥接为 `AgentContextCompressed`，不再依赖 span 采集；
+  2. 后台 runner 落库并推送 `context.compressed`（迁移 015 扩展 `agent_run_events` 的事件 CHECK），legacy 直连路径同步推 SSE，远程执行器解析同名事件；
+  3. Dashboard `use-agent-chat` 消费该事件，助手气泡下显示「上下文已压缩 ×N」徽标，tooltip 展示 iteration、before/after tokens、丢弃消息数、摘要/回退与摘要调用次数；
+  4. 更新 `docs/dashboard/agent-chat-design.md` 与 `docs/agent-loop/runtime-behavior.md`。
+- **解决后效果**：真实 run `7b57033a`（临时把预算降到 8000/2000）SSE 收到 `context.compressed` seq=2，`before_tokens=7346`、`after_tokens=2095`、`dropped_messages=2`、`summarized=true`；`agent_run_events` 与 `llm.turn.1` span 属性一致；恢复预算 128000/32000 后栈正常。相关 133 tests、ruff、`tsc`、Prettier 通过。
+- **修正（2026-11-11）**：按后续要求把压缩观测从 llm span 属性改为 `agent` 下的独立 `compression` span（迁移 016 扩展 `agent_run_spans.span_type` CHECK；`span_id=compression:<iteration>:<occurrence>` 以保留同轮多次压缩）；llm span 不再携带 `context_compressed` 属性，Trace 页新增「压缩」类型。
+- **可复用结论**：观测事件只写进 trace，就不会出现在用户当下看到的对话里；SDK 事件、持久化事件、SSE 事件要分三层分别确认，不能假设「有 span 就等于用户可见」。
+
+---
+
 ## 变更记录
 
 | 日期 | 变更 |
@@ -947,3 +967,5 @@
 | 2026-11-09 | 追加并修复 P-31：executor 镜像预装 `czsc==0.10.12` / `openpyxl` / `pyharmonics` / `smartmoneyconcepts`，用 `CZSC_USE_PYTHON=1` 兼容经典 `get_signals` API，设置 `HOME=/tmp` 解决只读根文件系统下的 `~/.czsc` 创建失败，并新增专用 `executor.Dockerfile` 与构建/冒烟流程（发现时间 2026-11-09，解决时间 2026-11-09） |
 | 2026-11-09 | 追加 P-26 并完成记忆架构迁移：工作区 Markdown（`USER.md` / `MEMORY.md` / `memory/YYYY-MM-DD.md`）成为唯一权威存储，Postgres 只保留可重建的 `memory_index_*` / `memory_history` 派生索引（迁移 014）；一次性导入旧 Mem0 行与 SQLite history；agent 暴露五个记忆工具，轮末无 LLM capture，召回以 user 角色 `<recalled-memories>` 注入；移除 `mem0ai` 依赖、CLI/integrations/旧测试与文档，dashboard 去除 Mem0 云版推广与品牌链接；真实栈验证 reconcile / search / capture / recall，512 + 194 tests 通过（发现时间 2026-11-09，解决时间 2026-11-09） |
 | 2026-11-10 | P-08 补充中断 run 回灌验证：会话 `908df338` 的取消 run `555eef8f` 的 5 条工具记录已进入下一轮 `run 14144417` 的 `request.history`（7 条 / 6,443 字符）；终答引用了仅存在于上一轮结果的「澳门餐厅」，确认回灌生效；「没有可用证据」归因于 Bing 结果质量与模型重复检索，非历史丢失（发现时间 2026-11-10，解决时间 —，非缺陷） |
+| 2026-11-11 | 追加并修复 P-32：上下文压缩新增可重放的 `context.compressed` SSE 事件与 Dashboard 徽标；迁移 015 扩展事件 CHECK；真实 run `7b57033a` 验证 before 7346 → after 2095，SSE / `agent_run_events` / span 三处一致（发现时间 2026-11-11，解决时间 2026-11-11） |
+| 2026-11-11 | P-32 修正：压缩观测改为 `agent` 下的独立 `compression` span（迁移 016 扩展 span 类型 CHECK），llm span 不再携带 `context_compressed`；Trace 页新增「压缩」类型与配色 |

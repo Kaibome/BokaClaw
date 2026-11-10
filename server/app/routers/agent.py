@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from app.agent.events import AgentToolCall, AgentToolResult
+from app.agent.events import AgentContextCompressed, AgentToolCall, AgentToolResult
 from app.agent.loop import (
     AgentCompleted,
     AgentDelta,
@@ -1040,6 +1040,16 @@ def _event_stream(
                         yield sse_event(
                             "tool.result",
                             tool_result_payload(conversation_id, assistant_id, entry),
+                        )
+                    elif isinstance(value, AgentContextCompressed):
+                        yield sse_event(
+                            "context.compressed",
+                            {
+                                "conversation_id": str(conversation_id),
+                                "message_id": str(assistant_id),
+                                "iteration": value.iteration,
+                                "stats": dict(value.stats or {}),
+                            },
                         )
                 elif kind == "error":
                     status = "failed"

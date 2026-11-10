@@ -11,7 +11,9 @@ import type {
   ActiveRun,
   AgentRun,
   ChatMessage,
+  CompressionInfo,
   ConnectionState,
+  ContextCompression,
   ContextUsage,
   Conversation,
   ConversationDetail,
@@ -32,6 +34,7 @@ export interface ChatMessageView extends ChatMessage {
   reconnecting?: boolean;
   cancelRequested?: boolean;
   context?: ContextUsage;
+  compression?: CompressionInfo;
 }
 
 export interface SendResult {
@@ -88,6 +91,12 @@ interface ToolResultPayload extends BasePayload {
   duration_ms?: number | null;
   finished_at?: string | null;
   truncated?: boolean;
+}
+
+interface CompressionPayload extends BasePayload {
+  message_id: string;
+  iteration?: number;
+  stats?: ContextCompression;
 }
 
 interface UserQuestionPayload extends BasePayload {
@@ -889,6 +898,25 @@ export function useAgentChat() {
         return;
       }
 
+      if (event.event === "context.compressed") {
+        const payload = parse<CompressionPayload>(event);
+        if (!payload || !acceptSeq(event, payload)) return;
+
+        ensureAssistantBubble(payload.message_id, payload.conversation_id);
+        patchAssistant(payload.message_id, (message) => ({
+          ...message,
+          streaming: true,
+          reconnecting: false,
+          cancelRequested: cancelRequestedRef.current,
+          compression: {
+            iteration: payload.iteration ?? 0,
+            stats: payload.stats ?? {},
+            count: (message.compression?.count ?? 0) + 1,
+          },
+        }));
+        return;
+      }
+
       if (event.event === "user.question") {
         const payload = parse<UserQuestionPayload>(event);
         if (!payload || !acceptSeq(event, payload)) return;
@@ -945,6 +973,8 @@ export function useAgentChat() {
           ...toView(finalMessage),
           toolTrace: serverTrace ?? message.toolTrace,
           questions: closePendingQuestions(message.questions),
+          // Compression is a live-only signal; keep what this reply showed.
+          compression: message.compression,
           streaming: false,
           reconnecting: false,
           runStatus: "completed",

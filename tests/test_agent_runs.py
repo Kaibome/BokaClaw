@@ -33,6 +33,7 @@ import app.agent.runner as agent_runner  # noqa: E402
 import app.routers.agent as agent_router  # noqa: E402
 from app.agent.events import (  # noqa: E402
     AgentCompleted,
+    AgentContextCompressed,
     AgentDelta,
     AgentLoopError,
     AgentMemoryRecall,
@@ -350,6 +351,25 @@ def _happy_executor(*_args, **_kwargs):
     return run
 
 
+def _compression_executor(*_args, **_kwargs):
+    async def run(_payload, _request_id, *, cancel_event=None, max_seconds=None):
+        yield AgentContextCompressed(
+            iteration=4,
+            stats={
+                "before_tokens": 163035,
+                "after_tokens": 29069,
+                "dropped_messages": 69,
+                "summarized": True,
+                "fallback": False,
+                "model_calls": 1,
+            },
+        )
+        yield AgentDelta("ok")
+        yield AgentCompleted(metadata={"finish_reason": "stop"})
+
+    return run
+
+
 async def _collect_until_done(subscription, timeout=2.0):
     items = []
     while True:
@@ -398,6 +418,33 @@ async def test_manager_persists_ordered_events_and_completes():
     assert message.meta["run_id"] == str(run.id)
     assert stored.partial_metadata["run_id"] == str(run.id)
     assert items[-1][1]["run_id"] == str(run.id)
+
+
+@pytest.mark.asyncio
+async def test_manager_persists_context_compression_as_a_live_event():
+    repo = FakeRepo()
+    run = repo.add_run(_run())
+    manager = AgentRunManager(_config(), repo=repo, executor=_compression_executor())
+
+    manager.submit(run.id)
+    subscription = await manager.open_subscription(run.id, 0)
+    assert subscription is not None
+    await manager.wait(run.id, timeout=2)
+    items = await _collect_until_done(subscription)
+    await manager.shutdown()
+
+    stored = next(
+        event for event in repo.events[run.id] if event.event_type == "context.compressed"
+    )
+    assert stored.payload["message_id"] == str(run.assistant_message_id)
+    assert stored.payload["iteration"] == 4
+    assert stored.payload["stats"]["before_tokens"] == 163035
+    assert stored.payload["stats"]["after_tokens"] == 29069
+    assert stored.payload["stats"]["summarized"] is True
+
+    # Subscribers receive it in transcript order, before the reply completes.
+    types = [event_type for event_type, _ in items]
+    assert types.index("context.compressed") < types.index("message.completed")
 
 
 @pytest.mark.asyncio

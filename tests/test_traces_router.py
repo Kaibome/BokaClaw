@@ -135,6 +135,10 @@ def test_memory_spans_are_a_valid_filter(client):
     assert client.get("/traces?span_type=memory").status_code == 200
 
 
+def test_compression_spans_are_a_valid_filter(client):
+    assert client.get("/traces?span_type=compression").status_code == 200
+
+
 def test_list_reports_cache_counters_from_the_root_span():
     span = _span(
         1,

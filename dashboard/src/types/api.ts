@@ -101,6 +101,24 @@ export interface ContextUsage {
   budget_tokens: number | null;
 }
 
+/** One `context.compressed` event: the model view was shrunk for this turn. */
+export interface ContextCompression {
+  before_tokens?: number;
+  after_tokens?: number;
+  dropped_messages?: number;
+  summarized?: boolean;
+  fallback?: boolean;
+  model_calls?: number;
+  usage_unknown_calls?: number;
+}
+
+export interface CompressionInfo {
+  iteration: number;
+  stats: ContextCompression;
+  /** How many times this reply compressed its context. */
+  count: number;
+}
+
 export interface AgentRun {
   id: string;
   conversation_id: string;
@@ -124,7 +142,7 @@ export interface AgentRun {
   context?: ContextUsage | null;
 }
 
-export type SpanType = "agent" | "llm" | "tool" | "memory";
+export type SpanType = "agent" | "llm" | "tool" | "memory" | "compression";
 
 export type SpanStatus =
   | "running"

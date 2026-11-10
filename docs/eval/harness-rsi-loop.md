@@ -129,7 +129,7 @@ Proposer 不得修改 golden、judge 配置或 gate 阈值。
 | `tool_error` | `tool` span `status=failed` 占比 ≥ 阈值 |
 | `no_progress` | `agent_runs.error_code = agent_no_progress` |
 | `timeout` | `agent_timeout` 或子 Agent `status=timeout` |
-| `context_pressure` | `llm` span 带 `context_compressed` 且 run 失败 |
+| `context_pressure` | 存在 `compression` span 且 run 失败 |
 | `protocol` | `agent_protocol_error` / `agent_upstream_error` |
 
 产出：`failure_snapshot`（JSON），包含样本 run_id、桶分布、每个桶的代表性 span_id。

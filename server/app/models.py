@@ -198,7 +198,7 @@ class AgentRunEvent(Base):
         CheckConstraint(
             "event_type IN ('message.delta', 'tool.call', 'tool.result', "
             "'memory.recall', 'memory.save', 'user.question', 'user.answer', "
-            "'message.completed', 'error')",
+            "'context.compressed', 'message.completed', 'error')",
             name="ck_agent_run_events_type",
         ),
         Index("ix_agent_run_events_run_seq", "run_id", "seq"),
@@ -212,7 +212,7 @@ class AgentRunEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
-SPAN_TYPES = ("agent", "llm", "tool", "memory")
+SPAN_TYPES = ("agent", "llm", "tool", "memory", "compression")
 SPAN_STATUSES = ("running", "completed", "failed", "aborted", "interrupted")
 
 
@@ -221,7 +221,7 @@ class AgentRunSpan(Base):
     __table_args__ = (
         UniqueConstraint("run_id", "span_id", name="uq_agent_run_spans_run_span"),
         CheckConstraint(
-            "span_type IN ('agent', 'llm', 'tool', 'memory')",
+            "span_type IN ('agent', 'llm', 'tool', 'memory', 'compression')",
             name="ck_agent_run_spans_type",
         ),
         CheckConstraint(

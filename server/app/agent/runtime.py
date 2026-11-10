@@ -668,9 +668,9 @@ def _model_request_event(
 def _bridge_event(event: Any, put: Callable[[str, Any], None], *, model: str | None = None) -> None:
     """Map one SDK event onto the executor's event stream.
 
-    Tool events keep their existing SSE-visible kinds. The remaining SDK events
-    are forwarded only when span capture is enabled; the runner turns them into
-    ``agent_run_spans`` rows without touching ``agent_run_events``.
+    Tool and compression events keep their SSE-visible kinds. The remaining SDK
+    events are forwarded only when span capture is enabled; the runner turns
+    them into ``agent_run_spans`` rows without touching ``agent_run_events``.
     """
     event_type = getattr(getattr(event, "type", None), "value", getattr(event, "type", None))
     data = getattr(event, "data", None) or {}
@@ -704,17 +704,19 @@ def _bridge_event(event: Any, put: Callable[[str, Any], None], *, model: str | N
                     unknown_calls=_as_int(for_debug.get("usage_unknown_calls")),
                 ),
             )
-        if _span_capture_enabled():
-            put(
-                "span_context_compressed",
-                AgentContextCompressed(
-                    iteration=_iteration(event, data),
-                    stats=dict(for_debug),
-                    usage=usage or None,
-                    model_calls=model_calls,
-                    usage_unknown_calls=_as_int(for_debug.get("usage_unknown_calls")),
-                ),
-            )
+        # Compression belongs to the live transcript, not only to traces: emit
+        # it even when span capture is off so the dashboard can show it. The
+        # span recorder ignores the event when capture is disabled.
+        put(
+            "context_compressed",
+            AgentContextCompressed(
+                iteration=_iteration(event, data),
+                stats=dict(for_debug),
+                usage=usage or None,
+                model_calls=model_calls,
+                usage_unknown_calls=_as_int(for_debug.get("usage_unknown_calls")),
+            ),
+        )
         return
 
     if event_type in {"subagent_started", "subagent_event", "subagent_finished"}:
@@ -1408,13 +1410,12 @@ async def stream_local_agent(
                         used_tokens=last_prompt_tokens["value"],
                     )
                 )
-            elif kind in {"tool_call", "tool_result"}:
+            elif kind in {"tool_call", "tool_result", "context_compressed"}:
                 yield value
             elif kind in {
                 "span_run_started",
                 "span_model_request",
                 "span_model_response",
-                "span_context_compressed",
                 "span_run_ended",
                 "span_error",
                 "span_subagent_started",

@@ -11,7 +11,7 @@ if _SERVER_DIR not in sys.path:
     sys.path.insert(0, _SERVER_DIR)
 
 import app.agent.loop as agent_loop  # noqa: E402
-from app.agent.events import AgentCompleted, AgentToolCall, AgentToolResult  # noqa: E402
+from app.agent.events import AgentCompleted, AgentContextCompressed, AgentToolCall, AgentToolResult  # noqa: E402
 
 
 def _parse(event_name, payload):
@@ -102,6 +102,49 @@ def test_tool_result_serializes_non_string_content_and_derives_status():
     assert json.loads(event.content) == {"value": 1}
     assert event.status == "failed"
     assert event.is_error is True
+
+
+def test_context_compression_is_parsed_from_nested_stats():
+    event = _parse(
+        "context.compressed",
+        {
+            "message_id": "m1",
+            "iteration": 4,
+            "stats": {
+                "before_tokens": 163035,
+                "after_tokens": 29069,
+                "dropped_messages": 69,
+                "summarized": True,
+                "fallback": False,
+                "model_calls": 1,
+            },
+        },
+    )
+
+    assert isinstance(event, AgentContextCompressed)
+    assert event.iteration == 4
+    assert event.stats["before_tokens"] == 163035
+    assert event.stats["after_tokens"] == 29069
+    assert event.model_calls == 1
+
+
+def test_context_compression_accepts_flat_and_snake_case_events():
+    event = _parse(
+        "context_compressed",
+        {
+            "iteration": 2,
+            "before_tokens": 40000,
+            "after_tokens": 20000,
+            "dropped_messages": 3,
+            "summarized": False,
+            "fallback": True,
+        },
+    )
+
+    assert isinstance(event, AgentContextCompressed)
+    assert event.iteration == 2
+    assert event.stats["before_tokens"] == 40000
+    assert event.stats["fallback"] is True
 
 
 def test_unknown_events_are_still_ignored():

@@ -28,6 +28,7 @@ from typing import Any, AsyncIterator, Callable
 
 from app.agent.events import (
     AgentCompleted,
+    AgentContextCompressed,
     AgentDelta,
     AgentEvent,
     AgentLoopError,
@@ -692,6 +693,15 @@ class AgentRunManager:
                 "tool.result",
                 tool_result_payload(writer.conversation_id, assistant_id, entry),
                 partial_metadata=partial,
+            )
+        elif isinstance(event, AgentContextCompressed):
+            await writer.write(
+                "context.compressed",
+                {
+                    "message_id": _str_or_none(assistant_id),
+                    "iteration": event.iteration,
+                    "stats": dict(event.stats or {}),
+                },
             )
 
     @staticmethod

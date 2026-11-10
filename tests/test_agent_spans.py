@@ -91,9 +91,48 @@ def test_model_request_and_response_form_one_llm_span():
     assert span["status"] == "completed"
     assert span["input"]["summary"]["message_count"] == 2
     assert span["output"]["content"] == "the answer"
-    assert span["attributes"]["context_compressed"] == {"before_tokens": 100}
+    assert "context_compressed" not in span["attributes"]
     assert span["attributes"]["usage"] == {"prompt_tokens": 12, "completion_tokens": 4, "total_tokens": 16}
     assert span["output"]["usage"]["total_tokens"] == 16
+
+
+def test_context_compression_creates_its_own_child_of_the_agent_span():
+    repo = RecordingRepo()
+    run = _run()
+    recorder = _recorder(repo, run)
+
+    recorder.handle(
+        agent_events.AgentContextCompressed(
+            iteration=3,
+            stats={"before_tokens": 9000, "after_tokens": 2000, "summarized": True},
+        )
+    )
+
+    span = repo.spans["compression:3:1"]
+    assert span["span_type"] == "compression"
+    assert span["parent_span_id"] == "agent"
+    assert span["name"] == "context.compress.3"
+    assert span["status"] == "completed"
+    assert span["duration_ms"] == 0
+    assert span["attributes"] == {"before_tokens": 9000, "after_tokens": 2000, "summarized": True}
+
+
+def test_twice_in_one_iteration_keeps_both_compression_spans():
+    repo = RecordingRepo()
+    run = _run()
+    recorder = _recorder(repo, run)
+
+    for after_tokens in (2000, 1500):
+        recorder.handle(
+            agent_events.AgentContextCompressed(
+                iteration=150,
+                stats={"before_tokens": 9000, "after_tokens": after_tokens},
+            )
+        )
+
+    assert repo.spans["compression:150:1"]["attributes"]["after_tokens"] == 2000
+    assert repo.spans["compression:150:2"]["attributes"]["after_tokens"] == 1500
+    assert repo.spans["compression:150:2"]["parent_span_id"] == "agent"
 
 
 def test_repeated_iterations_do_not_collide():

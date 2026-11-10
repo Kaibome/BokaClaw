@@ -34,13 +34,14 @@ run 起止这些评测所需的信息在运行结束后不可得，因此无法�
 | SDK `model_response` | 未转发 | 补对应 llm span 的 output / finish_reason |
 | SDK `tool_call` | `tool.call` 事件 + `ToolTrace` | 创建 `tool:{tool_call_id}` span |
 | SDK `tool_result` | `tool.result` 事件 + `ToolTrace` | 结束 tool span |
-| SDK `context_compressed` | 仅调试日志 | 缓存，附加到下一次 `model_request` 生成的 llm span |
+| SDK `context_compressed` | 调试日志 + `context.compressed` 事件 | 创建独立的 `compression:{iteration}` span（父 `agent`，零时长），stats 写入 `attributes` |
 | SDK `run_ended` | 未转发 | 补根 span 的 `stop_reason` |
 | `_finalize` | 消息 / 事件 / run 终态 | 结束根 span，结算所有 open span |
 | `_recover_run` | 崩溃恢复 | open span 结算为 `interrupted` |
 
-工具事件继续走现有 SSE 路径；其余事件只作为内部 span 事件进入 runner，不写
-`agent_run_events`（该表 `event_type` 有 CHECK 约束），因此 SSE 订阅端行为不变。
+工具事件与压缩事件继续走现有 SSE 路径（压缩额外落 `agent_run_events`，其
+`event_type` 由迁移 015 放行）；其余事件只作为内部 span 事件进入 runner，不写
+`agent_run_events`，因此 SSE 订阅端行为不变。
 
 **执行器差异**：内置 runtime（`stream_local_agent`）能拿到全部 SDK 事件；远程 agent executor
 （`AGENT_LOOP_URL`，`server/app/agent/loop.py`）的协议只有消息与工具事件，只能落

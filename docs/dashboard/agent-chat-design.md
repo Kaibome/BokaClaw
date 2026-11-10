@@ -168,10 +168,20 @@ X-Accel-Buffering: no
 
 事件分两类：
 
-- **持久化事件**：`message.delta`、`tool.call`、`tool.result`、`user.question`、`user.answer`、`memory.recall`、`memory.save`、`message.completed`、`error`。写入 `agent_run_events`，可重放；每帧带 `id: <seq>`，`seq` 在该 run 内单调递增，从 1 开始。
+- **持久化事件**：`message.delta`、`tool.call`、`tool.result`、`context.compressed`、`user.question`、`user.answer`、`memory.recall`、`memory.save`、`message.completed`、`error`。写入 `agent_run_events`，可重放；每帧带 `id: <seq>`，`seq` 在该 run 内单调递增，从 1 开始。
 - **合成事件**：`meta`（订阅建立时由服务端生成）、`done`（订阅收尾）。它们不落库，没有 `id`。
 
 `memory.recall` 在第一次模型请求之前发出，`memory.save` 在 `done` 之后发出（见 4.4）；两者都同时写入同名 `memory` span，供 Trace 页查看。
+
+`context.compressed` 在某轮请求因上下文预算被压缩或裁剪后、该轮 `model_request` 之前发出（每个发生压缩的迭代一条）：
+
+```text
+id: 2
+event: context.compressed
+data: {"run_id":"uuid","conversation_id":"uuid","seq":2,"message_id":"uuid","iteration":4,"stats":{"before_tokens":163035,"after_tokens":29069,"dropped_messages":69,"summarized":true,"fallback":false,"model_calls":1,"usage":{...}}}
+```
+
+服务端同时为每次压缩写一条独立 span：`span_type=compression`、`span_id=compression:<iteration>:<occurrence>`、`parent_span_id=agent`、`name=context.compress.<iteration>`，`stats` 放在该 span 的 `attributes` 中；压缩不再是 llm span 的属性。`occurrence` 处理同一轮可能出现两次压缩的情况（步数耗尽后的无工具终答会再压一次）。`summarized=true` 表示生成了滚动摘要，`fallback=true` 表示摘要失败或不需要摘要而直接截断。Dashboard 在助手气泡下方显示「上下文已压缩」标记，tooltip 展示前后 token、丢弃消息数与摘要调用次数。该事件与 `AGENT_SPAN_CAPTURE` 无关，关闭 span 采集后仍会推送。
 
 正常顺序示例：
 

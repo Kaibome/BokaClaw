@@ -62,6 +62,7 @@ const SPAN_TYPE_KEYS: Record<SpanType, MessageKey> = {
   llm: "enums.spanType.llm",
   tool: "enums.spanType.tool",
   memory: "enums.spanType.memory",
+  compression: "enums.spanType.compression",
 };
 
 const SPAN_STATUS_KEYS: Record<SpanStatus, MessageKey> = {
@@ -82,6 +83,8 @@ const getTypeClassName = (spanType: SpanType) => {
       return "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900/40 dark:bg-amber-950/40 dark:text-amber-300";
     case "memory":
       return "border-violet-200 bg-violet-50 text-violet-700 dark:border-violet-900/40 dark:bg-violet-950/40 dark:text-violet-300";
+    case "compression":
+      return "border-fuchsia-200 bg-fuchsia-50 text-fuchsia-700 dark:border-fuchsia-900/40 dark:bg-fuchsia-950/40 dark:text-fuchsia-300";
   }
 };
 

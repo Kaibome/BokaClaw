@@ -20,7 +20,7 @@ from app.models import AgentRunSpan
 
 router = APIRouter(prefix="/traces", tags=["traces"])
 
-SPAN_TYPE_PATTERN = "^(agent|llm|tool|memory)$"
+SPAN_TYPE_PATTERN = "^(agent|llm|tool|memory|compression)$"
 SPAN_STATUS_PATTERN = "^(running|completed|failed|aborted|interrupted)$"
 
 

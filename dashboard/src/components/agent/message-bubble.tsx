@@ -1,6 +1,6 @@
 "use client";
 
-import { AlertCircle, RotateCcw } from "lucide-react";
+import { AlertCircle, RotateCcw, Scissors } from "lucide-react";
 
 import { RunIdBadge } from "@/components/agent/run-id-badge";
 import { MarkdownContent } from "@/components/agent/markdown-content";
@@ -11,7 +11,7 @@ import { cn, formatTokens } from "@/lib/utils";
 import type { ChatMessageView } from "@/hooks/use-agent-chat";
 import type { MessageKey } from "@/i18n/messages/en";
 import { useI18n, type I18nContextValue } from "@/i18n/provider";
-import type { RunUsage } from "@/types/api";
+import type { CompressionInfo, RunUsage } from "@/types/api";
 
 type Translate = I18nContextValue["t"];
 
@@ -98,6 +98,42 @@ function UsageBadge({ usage }: { usage: RunUsage }) {
       title={usageTitle(usage, t)}
       className="inline-flex items-center rounded-md px-1.5 py-0.5 typo-caption-sm text-onSurface-default-tertiary"
     >
+      {label}
+    </span>
+  );
+}
+
+function compressionTitle(compression: CompressionInfo, t: Translate): string {
+  const { iteration, stats, count } = compression;
+  const lines = [
+    t("agent.compression.detail", {
+      iteration: iteration || "?",
+      before: formatTokens(stats.before_tokens ?? 0),
+      after: formatTokens(stats.after_tokens ?? 0),
+      dropped: stats.dropped_messages ?? 0,
+    }),
+  ];
+  if (stats.summarized) lines.push(t("agent.compression.summarized"));
+  if (stats.fallback) lines.push(t("agent.compression.fallback"));
+  if (stats.model_calls) {
+    lines.push(t("agent.compression.calls", { count: stats.model_calls }));
+  }
+  if (count > 1) lines.push(t("agent.compression.count", { count }));
+  return lines.join("\n");
+}
+
+function CompressionBadge({ compression }: { compression: CompressionInfo }) {
+  const { t } = useI18n();
+  const label =
+    compression.count > 1
+      ? t("agent.compression.badgeCount", { count: compression.count })
+      : t("agent.compression.badge");
+  return (
+    <span
+      title={compressionTitle(compression, t)}
+      className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 typo-caption-sm text-onSurface-default-tertiary"
+    >
+      <Scissors className="size-3" />
       {label}
     </span>
   );
@@ -201,10 +237,13 @@ export function MessageBubble({
         <ToolTrace entries={message.toolTrace} />
       ) : null}
 
-      {!isUser && (runId || usage) ? (
+      {!isUser && (runId || usage || message.compression) ? (
         <div className="flex flex-wrap items-center gap-0.5">
           {runId ? <RunIdBadge runId={runId} /> : null}
           {usage ? <UsageBadge usage={usage} /> : null}
+          {message.compression ? (
+            <CompressionBadge compression={message.compression} />
+          ) : null}
         </div>
       ) : null}
 
