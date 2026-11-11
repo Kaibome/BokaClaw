@@ -160,6 +160,7 @@ def main(argv: list[str] | None = None) -> int:
                 raise SystemExit(f"Golden {eval_case_id!r} not found.")
 
         snapshot = build_snapshot(golden) if golden is not None else None
+        config = load_eval_config()
         try:
             outcome = evaluate_run(
                 run=run,
@@ -167,7 +168,8 @@ def main(argv: list[str] | None = None) -> int:
                 golden_snapshot=snapshot,
                 golden_hash=snapshot_hash(snapshot) if snapshot is not None else None,
                 use_llm_judge=args.judge,
-                judge_max_chars=load_eval_config().judge_max_chars,
+                judge_max_chars=config.judge_max_chars,
+                judge_language=config.judge_language,
             )
         except EvalExecutionError as exc:
             print(f"eval {run_id} failed: {exc.code}: {exc.detail}", file=sys.stderr)

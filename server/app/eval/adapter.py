@@ -171,6 +171,64 @@ def to_llm_test_case(spans: Iterable[Any], *, run: Any = None, golden: Any = Non
     return case
 
 
+def to_conversational_test_case(
+    spans: Iterable[Any], *, run: Any = None, golden: Any = None
+) -> Any | None:
+    """Convert one run into a ``ConversationalTestCase`` for multi-turn metrics.
+
+    Returns ``None`` when the run has no usable user/assistant turn pair. Prior
+    turns come from ``request_payload.history``; the current user message and
+    the final assistant output are appended last, with the run's tool calls
+    attached to the assistant turn.
+    """
+    from deepeval.test_case import ConversationalTestCase, Turn
+
+    ordered = list(spans)
+    root = _root_span(ordered)
+    input_text = ""
+    output_text = ""
+    if root is not None:
+        root_input = _attr(root, "input") or {}
+        root_output = _attr(root, "output") or {}
+        input_text = _text(root_input.get("message") if isinstance(root_input, dict) else root_input)
+        output_text = _text(root_output.get("content") if isinstance(root_output, dict) else root_output)
+
+    payload = _attr(run, "request_payload") if run is not None else None
+    if isinstance(payload, dict):
+        input_text = input_text or _text(payload.get("message"))
+
+    turns: list[Any] = []
+    history = payload.get("history") if isinstance(payload, dict) else None
+    if isinstance(history, list):
+        for item in history:
+            if not isinstance(item, dict):
+                continue
+            role = item.get("role")
+            content = _text(item.get("content"))
+            if role in {"user", "assistant"} and content:
+                turns.append(Turn(role=role, content=content))
+
+    if not input_text or not output_text:
+        return None
+    if not turns or turns[-1].role != "user" or turns[-1].content != input_text:
+        turns.append(Turn(role="user", content=input_text))
+    turns.append(Turn(role="assistant", content=output_text, tools_called=_tool_calls(ordered) or None))
+
+    return ConversationalTestCase(
+        turns=turns,
+        expected_outcome=_attr(golden, "expected_output") if golden is not None else None,
+        metadata={
+            "run_id": str(_attr(run, "id")) if run is not None else None,
+            "status": _attr(run, "status") if run is not None else None,
+            "eval_case_id": (
+                ((_attr(run, "request_payload") or {}).get("metadata") or {}).get("eval_case_id")
+                if run is not None
+                else None
+            ),
+        },
+    )
+
+
 def load_run_spans(run_id: Any, repo: Any = None) -> list[Any]:
     if repo is None:
         from app.eval.repo import EvalRepository

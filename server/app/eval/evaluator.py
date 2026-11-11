@@ -19,7 +19,7 @@ from app.eval.goldens import (
     snapshot_hash,
     validate_snapshot,
 )
-from app.eval.metrics import build_metrics, metric_names
+from app.eval.metrics import build_conversational_metrics, build_metrics, metric_names
 
 
 class EvalExecutionError(RuntimeError):
@@ -48,6 +48,7 @@ def evaluate_run(
     golden_hash: str | None = None,
     use_llm_judge: bool,
     judge_max_chars: int = 20000,
+    judge_language: str = "zh",
 ) -> EvalOutcome:
     started = time.perf_counter()
 
@@ -72,31 +73,46 @@ def evaluate_run(
     if use_llm_judge:
         warnings = _truncate_case(test_case, judge_max_chars)
 
-    metrics = build_metrics(test_case, use_llm_judge=use_llm_judge)
+    metrics = build_metrics(test_case, use_llm_judge=use_llm_judge, judge_language=judge_language)
+    conversational_case = adapter.to_conversational_test_case(spans, run=run, golden=golden)
+    conversational_metrics = build_conversational_metrics(
+        conversational_case, use_llm_judge=use_llm_judge, judge_language=judge_language
+    ) if conversational_case is not None else []
+    if use_llm_judge and conversational_case is not None:
+        warnings.extend(_truncate_conversational_case(conversational_case, judge_max_chars))
+
+    # deepeval's evaluate() requires all test cases to share one shape, so
+    # single-turn and conversational metrics run in separate passes.
+    groups = [(test_case, metrics)]
+    if conversational_metrics:
+        groups.append((conversational_case, conversational_metrics))
+
     # DisplayConfig does not silence deepeval's end-of-run banner, so capture
-    # its console output. The worker only needs the returned TestResult.
-    console = io.StringIO()
-    try:
-        with contextlib.redirect_stdout(console), contextlib.redirect_stderr(console):
-            result = evaluate(
-                test_cases=[test_case],
-                metrics=metrics,
-                display_config=DisplayConfig(
-                    show_indicator=False,
-                    print_results=False,
-                    inspect_after_run=False,
-                ),
-                error_config=ErrorConfig(ignore_errors=True, skip_on_missing_params=True),
-            )
-    except Exception as exc:
-        raise EvalExecutionError("eval_execution_failed", str(exc)) from exc
+    # its console output. The worker only needs the returned TestResults.
+    test_results: list[Any] = []
+    for case, case_metrics in groups:
+        console = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(console), contextlib.redirect_stderr(console):
+                result = evaluate(
+                    test_cases=[case],
+                    metrics=case_metrics,
+                    display_config=DisplayConfig(
+                        show_indicator=False,
+                        print_results=False,
+                        inspect_after_run=False,
+                    ),
+                    error_config=ErrorConfig(ignore_errors=True, skip_on_missing_params=True),
+                )
+        except Exception as exc:
+            raise EvalExecutionError("eval_execution_failed", str(exc)) from exc
+        if not result.test_results:
+            raise EvalExecutionError("eval_execution_failed", "deepeval returned no test results.")
+        test_results.append(result.test_results[0])
 
-    if not result.test_results:
-        raise EvalExecutionError("eval_execution_failed", "deepeval returned no test results.")
-    test_result = result.test_results[0]
-    metrics_data = list(test_result.metrics_data or [])
+    metrics_data = [data for test_result in test_results for data in (test_result.metrics_data or [])]
 
-    threshold_by_name = metric_names(metrics)
+    threshold_by_name = metric_names([*metrics, *conversational_metrics])
     metric_rows: list[dict[str, Any]] = []
     returned: set[str] = set()
     for data in metrics_data:
@@ -135,8 +151,8 @@ def evaluate_run(
         judge_model=judge_model,
         token_cost=float(sum(costs)) if costs else None,
         raw_result={
-            "name": test_result.name,
-            "success": test_result.success,
+            "name": test_results[0].name,
+            "success": all(bool(test_result.success) for test_result in test_results),
             "metrics": [
                 {
                     key: value
@@ -202,4 +218,18 @@ def _truncate_case(test_case: Any, limit: int) -> list[str]:
                     "preview": encoded[:limit],
                 }
                 warnings.append(f"tool {getattr(tool, 'name', '?')} parameters truncated for the judge.")
+    return warnings
+
+
+def _truncate_conversational_case(test_case: Any, limit: int) -> list[str]:
+    warnings: list[str] = []
+    for index, turn in enumerate(getattr(test_case, "turns", None) or []):
+        content = getattr(turn, "content", None)
+        if isinstance(content, str) and len(content) > limit:
+            turn.content = content[:limit] + "…"
+            warnings.append(f"turn {index} content truncated to {limit} characters for the judge.")
+        for tool in getattr(turn, "tools_called", None) or []:
+            if isinstance(getattr(tool, "output", None), str) and len(tool.output) > limit:
+                tool.output = tool.output[:limit] + "…"
+                warnings.append(f"tool {getattr(tool, 'name', '?')} output truncated for the judge.")
     return warnings

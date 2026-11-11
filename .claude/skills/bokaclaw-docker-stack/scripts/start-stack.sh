@@ -123,6 +123,8 @@ EVAL_JUDGE_PROVIDER=deepseek
 EVAL_JUDGE_MODEL=deepseek-chat
 EVAL_JUDGE_API_KEY=
 EVAL_JUDGE_MAX_CHARS=20000
+# Judge reasons and analysis are written in this language (zh or en).
+EVAL_JUDGE_LANGUAGE=zh
 EVAL_WORKER_ID=eval-1
 EVAL_LEASE_SECONDS=60
 EVAL_MAX_ATTEMPTS=3
@@ -384,6 +386,7 @@ else
     -e EVAL_JUDGE_PROVIDER="${EVAL_JUDGE_PROVIDER:-deepseek}" \
     -e EVAL_JUDGE_MODEL="${EVAL_JUDGE_MODEL:-deepseek-chat}" \
     -e EVAL_JUDGE_API_KEY="${EVAL_JUDGE_API_KEY:-}" \
+    -e EVAL_JUDGE_LANGUAGE="${EVAL_JUDGE_LANGUAGE:-zh}" \
     -e FASTEMBED_CACHE_PATH=/app/history/fastembed \
     -e MEMORY_BACKEND="$MEMORY_BACKEND" \
     -e AGENT_MEMORY_ROOT="$MEMORY_CONTAINER" \
@@ -437,6 +440,7 @@ else
     -e EVAL_JUDGE_MODEL="${EVAL_JUDGE_MODEL:-deepseek-chat}" \
     -e EVAL_JUDGE_API_KEY="${EVAL_JUDGE_API_KEY:-}" \
     -e EVAL_JUDGE_MAX_CHARS="${EVAL_JUDGE_MAX_CHARS:-20000}" \
+    -e EVAL_JUDGE_LANGUAGE="${EVAL_JUDGE_LANGUAGE:-zh}" \
     "$EVAL_IMAGE" >/dev/null
 fi
 

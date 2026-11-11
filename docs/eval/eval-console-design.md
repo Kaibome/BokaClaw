@@ -643,7 +643,10 @@ Eval 页右上角的 **Case management** 进入 `/dashboard/eval/cases`，提供
 | `EVAL_JUDGE_PROVIDER=openai` | — | — |
 | `EVAL_JUDGE_MODEL` | `DEEPSEEK_MODEL_NAME` | `OPENAI_MODEL_NAME` |
 | `EVAL_JUDGE_API_KEY` | `DEEPSEEK_API_KEY` | `OPENAI_API_KEY` |
+| `EVAL_JUDGE_LANGUAGE=zh` | — | — |
 
+- `EVAL_JUDGE_LANGUAGE` 控制 judge 生成的 `reason` / `analysis` 等说明文本语言，默认 `zh`（简体中文）；`en` 使用 deepeval 原始英文模板。实现方式是为 Answer Relevancy、Task Completion、Step Efficiency、Argument Correctness 和 Tool Correctness 的 reason 生成提示注入中文模板，JSON 字段名与 `yes/no/borderline` 等枚举值不受影响。
+- 该设置只影响 judge 生成的说明文本。Agent Loop Detection 与 Tool Correctness 中由代码拼接的确定性说明仍是英文。
 - `EVAL_JUDGE_ENABLED=false`（默认）时，`POST /evals` 拒绝 `use_llm_judge=true`。
 - `EVAL_JUDGE_API_KEY` 只用于服务端判断「是否配置」和 worker 实际调用；不写入日志、
   不下发前端、不写进 `raw_result`。
@@ -661,12 +664,16 @@ Eval 页右上角的 **Case management** 进入 `/dashboard/eval/cases`，提供
 | 任务完成度 | `TaskCompletionMetric` | 是 | 可选 | input + output + tools + trace | 0.5 |
 | 步骤效率 | `StepEfficiencyMetric` | 是 | 否 | `_trace_dict` | 0.5 |
 | 参数正确性 | `ArgumentCorrectnessMetric` | 是 | 否 | tool input_parameters | 0.5 |
+| 目标达成度 | `GoalAccuracyMetric` | 是 | 否 | `ConversationalTestCase` turns + tools_called | 0.5 |
 
 规则：
 
 - 未勾选 judge：只跑 `AgentLoopDetectionMetric`。不产生外部调用与费用。
 - 勾选 judge：追加 AnswerRelevancy、TaskCompletion、StepEfficiency、ArgumentCorrectness；
   如果当前 case 同时具备 `expected_tools` 与 `tools_called`，再加入 ToolCorrectness。
+- `GoalAccuracyMetric` 需要 `ConversationalTestCase`，因此单独跑第二轮 `evaluate()`，再把两轮
+  的 `metrics_data` 合并；对话 turns 由 `adapter.to_conversational_test_case()` 从
+  `request_payload.history`、当前用户消息和最终 assistant 输出构造。
 - \* deepeval 4.3.3 的 `ToolCorrectnessMetric.__init__` 会构造 judge 模型（即使只比较工具名），
   因此它必须和有 key 的 judge 一起启用；这与旧文档「确定性、无需 judge」的假设不同。
 - ToolCorrectness 只在**当前 case**具备两侧工具数据时加入，而不是按文件是否有 golden 决定。
@@ -1003,6 +1010,7 @@ docker run -d --name bokaclaw-eval --network bokaclaw-net --restart unless-stopp
   -e EVAL_JUDGE_MODEL="${EVAL_JUDGE_MODEL:-deepseek-chat}" \
   -e EVAL_JUDGE_API_KEY="${EVAL_JUDGE_API_KEY:-}" \
   -e EVAL_JUDGE_MAX_CHARS="${EVAL_JUDGE_MAX_CHARS:-20000}" \
+  -e EVAL_JUDGE_LANGUAGE="${EVAL_JUDGE_LANGUAGE:-zh}" \
   bokaclaw-eval:test
 ```
 
@@ -1052,6 +1060,8 @@ EVAL_JUDGE_PROVIDER=deepseek
 EVAL_JUDGE_MODEL=deepseek-chat
 EVAL_JUDGE_API_KEY=
 EVAL_JUDGE_MAX_CHARS=20000
+# zh (default) or en.
+EVAL_JUDGE_LANGUAGE=zh
 ```
 
 说明：

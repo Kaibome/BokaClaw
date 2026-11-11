@@ -35,6 +35,7 @@ def _config(**overrides):
         judge_model="deepseek-chat",
         judge_api_key="",
         judge_max_chars=20000,
+        judge_language="zh",
     )
     values.update(overrides)
     return EvalConfig(**values)

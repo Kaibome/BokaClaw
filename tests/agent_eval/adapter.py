@@ -20,5 +20,6 @@ from app.eval.adapter import (  # noqa: E402,F401
     load_run_spans,
     require_deepeval,
     span_to_trace_dict,
+    to_conversational_test_case,
     to_llm_test_case,
 )

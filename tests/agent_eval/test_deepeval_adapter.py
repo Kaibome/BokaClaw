@@ -174,5 +174,26 @@ def test_to_llm_test_case_maps_run_and_tools():
     assert case._trace_dict["type"] == "agent"
 
 
+def test_to_conversational_test_case_keeps_history_and_tool_calls():
+    run = _run()
+    run.request_payload["history"] = [
+        {"role": "user", "content": "Prior question"},
+        {"role": "assistant", "content": "Prior answer"},
+    ]
+    case = adapter.to_conversational_test_case(_span_rows(), run=run)
+
+    assert [turn.role for turn in case.turns] == ["user", "assistant", "user", "assistant"]
+    assert [turn.content for turn in case.turns][:2] == ["Prior question", "Prior answer"]
+    assert case.turns[-1].content == "the answer"
+    assert [tool.name for tool in case.turns[-1].tools_called] == ["search"]
+    assert case.metadata["eval_case_id"] == "case-1"
+
+
+def test_to_conversational_test_case_returns_none_without_an_assistant_turn():
+    spans = [_span("agent", "agent", "agent.turn", input={"message": "hello"})]
+
+    assert adapter.to_conversational_test_case(spans, run=_run()) is None
+
+
 def test_require_deepeval_accepts_the_pinned_version():
     assert adapter.require_deepeval().__version__ == adapter.DEEPEVAL_VERSION

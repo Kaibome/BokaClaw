@@ -160,6 +160,7 @@ class EvalWorker:
                     golden_hash=row.golden_hash,
                     use_llm_judge=row.use_llm_judge,
                     judge_max_chars=self.config.judge_max_chars,
+                    judge_language=self.config.judge_language,
                 )
             except EvalExecutionError as exc:
                 box["error"] = exc

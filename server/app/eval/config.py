@@ -51,6 +51,7 @@ class EvalConfig:
     judge_model: str
     judge_api_key: str
     judge_max_chars: int
+    judge_language: str
 
     @property
     def judge_available(self) -> bool:
@@ -71,6 +72,7 @@ def load_eval_config() -> EvalConfig:
         judge_model=os.environ.get("EVAL_JUDGE_MODEL", "deepseek-chat").strip(),
         judge_api_key=os.environ.get("EVAL_JUDGE_API_KEY", "").strip(),
         judge_max_chars=max(1000, _env_int("EVAL_JUDGE_MAX_CHARS", 20000)),
+        judge_language=os.environ.get("EVAL_JUDGE_LANGUAGE", "zh").strip().lower() or "zh",
     )
 
 
