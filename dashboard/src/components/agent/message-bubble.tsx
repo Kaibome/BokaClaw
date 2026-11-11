@@ -206,7 +206,7 @@ export function MessageBubble({
     >
       <div
         className={cn(
-          "max-w-[85%] break-words rounded-xl border border-memBorder-primary px-3 py-2 text-sm text-onSurface-default-primary",
+          "max-w-[85%] [overflow-wrap:anywhere] rounded-xl border border-memBorder-primary px-3 py-2 text-sm text-onSurface-default-primary",
           isUser
             ? "whitespace-pre-wrap bg-surface-default-secondary"
             : "bg-surface-default-primary",

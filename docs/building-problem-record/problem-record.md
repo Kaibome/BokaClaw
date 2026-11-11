@@ -919,6 +919,24 @@
 
 ---
 
+## P-33 Agent 对话发送超长内容后整页被撑宽，停止按钮移出视口
+
+- **状态**：已解决
+- **发现时间**：2026-11-11
+- **解决时间**：2026-11-11
+- **场景**：Agent 对话界面发送一条很长的内容后，页面横向抖动，整体无法完整显示，上下文使用量右侧的停止按钮被挪到浏览器视口外。
+- **现象**：发送长消息后布局宽度瞬间变大又回不来；底部输入行右侧的 `ContextMeter` / 停止按钮不可见，需要横向滚动（实际被 `overflow-hidden` 裁掉）。
+- **根因**：Dashboard 外壳与消息区都使用 Radix `ScrollArea`，其 Viewport 会把 children 包进一个 `min-width: 100%; display: table` 的内层 div。table 的宽度会取所有后代的最大 `min-content`；用户气泡原先用 `break-words`（`overflow-wrap: break-word`），它只改变换行、**不降低 `min-content`**，因此超长不可断行片段（长 URL、hash、或从文档粘贴的 NBSP 分隔文本）会把内层 table 撑到上万像素，整页（含 `shrink-0` 的输入区）随之变宽，`ScrollArea` 根节点的 `overflow-hidden` 再把右侧裁掉，停止按钮就落在可视区之外。
+- **证据**：Chrome headless 复现（900px 宽容器 + 与 Radix 相同的 `min-width:100%; display:table` 包裹层）：2000 字符连续 token 使 table 宽 18,454px、按钮 right=18,442px，而可视宽度只有 900px；11,273 字符带空格英文与 2,850 字符中文仍保持 900px，说明触发条件是**不可断行片段**而非单纯长度。
+- **解决措施**：
+  1. `dashboard/src/components/ui/scroll-area.tsx` 在 Root 上加 `[&>[data-radix-scroll-area-viewport]>div]:!block`，把 Radix 内部的 table 包裹层改为 block。项目内三处 `ScrollArea`（Dashboard 外壳、消息区、会话列表）都只有纵向滚动，不依赖横向测量；
+  2. `message-bubble.tsx` 气泡把 `break-words` 换成 `[overflow-wrap:anywhere]`，让超长 token 参与 `min-content` 计算并就地折行，作为第二道防线；
+  3. 同步 `docs/dashboard/agent-chat-design.md` 的布局与消息内容说明。
+- **解决后效果**：同一复现页面改后 table、页面与按钮均稳定在 900px，2000 字符 token 与 500 字符 URL 都在气泡内折行。`tsc --noEmit`、Prettier、`next build` 通过；构建产物 CSS 中确认生成 `...[data-radix-scroll-area-viewport]>div{display:block!important}` 与 `overflow-wrap:anywhere`。本地容器仍是旧镜像且没有登录凭据，未在运行页面做最终目测。
+- **可复用结论**：滚动容器里的 `display: table` 会把不可断行内容的 `min-content` 传播到整页；`break-words` 不解决这个问题，需要 `overflow-wrap: anywhere`（会进入 `min-content`）或在滚动容器层把 table 改为 block。带 `overflow-hidden` 的外壳不会报错，只会安静地把溢出控件裁掉。
+
+---
+
 ## 变更记录
 
 | 日期 | 变更 |
@@ -969,3 +987,4 @@
 | 2026-11-10 | P-08 补充中断 run 回灌验证：会话 `908df338` 的取消 run `555eef8f` 的 5 条工具记录已进入下一轮 `run 14144417` 的 `request.history`（7 条 / 6,443 字符）；终答引用了仅存在于上一轮结果的「澳门餐厅」，确认回灌生效；「没有可用证据」归因于 Bing 结果质量与模型重复检索，非历史丢失（发现时间 2026-11-10，解决时间 —，非缺陷） |
 | 2026-11-11 | 追加并修复 P-32：上下文压缩新增可重放的 `context.compressed` SSE 事件与 Dashboard 徽标；迁移 015 扩展事件 CHECK；真实 run `7b57033a` 验证 before 7346 → after 2095，SSE / `agent_run_events` / span 三处一致（发现时间 2026-11-11，解决时间 2026-11-11） |
 | 2026-11-11 | P-32 修正：压缩观测改为 `agent` 下的独立 `compression` span（迁移 016 扩展 span 类型 CHECK），llm span 不再携带 `context_compressed`；Trace 页新增「压缩」类型与配色 |
+| 2026-11-11 | 追加并修复 P-33：Radix `ScrollArea` 内部的 `display: table` 包裹层会被不可断行长内容撑宽，导致 Agent 对话页整页变宽、停止按钮被裁出视口；`ScrollArea` 强制内层为 `block`，消息气泡改用 `overflow-wrap: anywhere`，同步设计文档；`tsc`、Prettier、`next build` 通过（发现时间 2026-11-11，解决时间 2026-11-11） |

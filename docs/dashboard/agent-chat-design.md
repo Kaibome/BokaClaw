@@ -849,6 +849,7 @@ export class SseParser {
 - 消息区：`ScrollArea className="min-h-0 flex-1"`；
 - 输入区：`shrink-0 border-t border-memBorderPrimary p-3`；
 - `min-h-0` 必须保留，确保只有消息区内部滚动，不触发外层 dashboard `ScrollArea` 的第二个滚动条。
+- `ScrollArea` 组件把 Radix viewport 内部的 `display: table` 包裹层强制为 `block`（`[&>[data-radix-scroll-area-viewport]>div]:!block`）。Radix 用 `table` 测量横向溢出，但 table 会被最长的不可断行内容撑宽，进而把整页和吸底输入区的停止按钮推到视口外；本项目的 `ScrollArea` 都只做纵向滚动，不需要该行为。
 
 `calc(100vh-118px)` 的来源：Dashboard 外壳提供 48px 顶部偏移、`calc(100vh-56px)` 容器和 `px-6 py-6` 内边距，可用高度为 `100vh - 70px - 48px`。
 
@@ -856,7 +857,7 @@ export class SseParser {
 
 ### 7.5 交互细节
 
-- 消息内容：`whitespace-pre-wrap break-words text-sm text-onSurface-default-primary`，纯文本渲染，禁止 `dangerouslySetInnerHTML`；
+- 消息内容：`whitespace-pre-wrap [overflow-wrap:anywhere] text-sm text-onSurface-default-primary`，纯文本渲染，禁止 `dangerouslySetInnerHTML`。用 `anywhere` 而非 `break-words`，否则超长不可断行 token（URL、hash、非断行空格粘贴文本）仍会参与父级 `min-content` 计算并撑宽整页；
 - 用户气泡：`ml-auto max-w-[85%] rounded-xl border border-memBorderPrimary bg-surface-default-secondary px-3 py-2`；
 - 助手气泡：`mr-auto max-w-[85%] rounded-xl border border-memBorderPrimary bg-surface-default-primary px-3 py-2`；
 - 流式光标：现有 `animate-pulse`；等待首个 token：现有 `.dot` 动画或 `Spinner`；

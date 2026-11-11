@@ -17,7 +17,17 @@ const ScrollArea = React.forwardRef<
 >(({ className, children, viewportRef, ...props }, ref) => (
   <ScrollAreaPrimitive.Root
     ref={ref}
-    className={cn("relative overflow-hidden", className)}
+    className={cn(
+      // Radix wraps the viewport content in an internal `display: table` div so
+      // it can measure horizontal overflow. A table grows to the widest
+      // unbreakable descendant (long URLs, hashes, or pasted text whose spaces
+      // are non-breaking), which widens the whole page and pushes fixed controls
+      // — e.g. the composer's stop button — outside the viewport. These scroll
+      // areas only scroll vertically, so keep the wrapper a block and let long
+      // content wrap instead.
+      "relative overflow-hidden [&>[data-radix-scroll-area-viewport]>div]:!block",
+      className,
+    )}
     {...props}
   >
     <ScrollAreaPrimitive.Viewport
