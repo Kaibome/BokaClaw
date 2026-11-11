@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Tuple
 
+from app.agent.deferred_tools import collect_deferred, render_deferred_catalog, tool_search_result
 from app.agent.dev_tools import build_dev_tools, load_dev_tool_config
 from app.agent.events import (
     AgentCompleted,
@@ -1076,7 +1077,43 @@ def build_runtime(
                 default_timeout_seconds=default_timeout,
             )
         )
-    return sdk.AgentRuntime(
+
+    # Keep MCP and low-frequency Office schemas out of every request. They stay
+    # registered, so dispatch works once ToolSearch activates them for this run.
+    deferred = collect_deferred(tools)
+    registry_holder: Dict[str, Any] = {}
+    if deferred:
+
+        def ToolSearch(query: str = "", limit: int = 5) -> Dict[str, Any]:
+            """Load deferred tool schemas by name or keyword.
+
+            Use this when a needed tool appears in <deferred-tools> but is not in the current
+            tool list.
+
+            Args:
+                query: Tool name or task keywords, for example "github pull request" or
+                    "update slide". An empty query lists every deferred tool.
+                limit: Maximum number of tools to activate and return (1-10).
+            """
+
+            return tool_search_result(
+                deferred,
+                registry_holder.get("registry"),
+                query,
+                limit=limit,
+            )
+
+        tools = [
+            *tools,
+            sdk.tool(
+                ToolSearch,
+                name="ToolSearch",
+                effect="read",
+                concurrency_safe=False,
+            ),
+        ]
+
+    runtime = sdk.AgentRuntime(
         agent_config,
         tools=tools,
         on_event=on_event,
@@ -1084,6 +1121,13 @@ def build_runtime(
         subagent_options=subagent_options,
         subagent_task_validator=subagent_task_validator,
     )
+    if deferred:
+        registry = getattr(runtime, "tools", None)
+        registry_holder["registry"] = registry
+        if hasattr(registry, "deactivate"):
+            registry.deactivate(deferred)
+        runtime.deferred_tools = deferred
+    return runtime
 
 
 def _response_prompt_tokens(event: Any) -> Optional[int]:
@@ -1322,6 +1366,19 @@ async def stream_local_agent(
         max_seconds=max_seconds,
         extra_tools=[*mcp_tools, *skill_tools],
     )
+
+    deferred_tools = getattr(runtime, "deferred_tools", None)
+    if deferred_tools:
+        registry = getattr(runtime, "tools", None)
+        active_names = getattr(registry, "active_names", ())
+        deferred_block = render_deferred_catalog(deferred_tools, active_names=active_names)
+        if deferred_block:
+            messages.insert(len(messages) - 1, {"role": "user", "content": deferred_block})
+            _context_debug(
+                "deferred tools injected count=%d chars=%d",
+                len(deferred_tools),
+                len(deferred_block),
+            )
 
     def worker() -> None:
         # A raw ``threading.Thread`` does not inherit context variables, so the

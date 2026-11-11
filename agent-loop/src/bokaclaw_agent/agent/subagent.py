@@ -637,8 +637,10 @@ class SubagentTool:
 
     def _select_tools(self) -> list[Tool]:
         selected: list[Tool] = []
-        for tool in self._parent_tools.tools:
-            if tool.name in self._exclude_tool_names:
+        # Deferred tools stay hidden from children: the parent's ToolSearch
+        # closure activates tools in the parent registry, not the child's.
+        for tool in self._parent_tools.active_tools:
+            if tool.name == "ToolSearch" or tool.name in self._exclude_tool_names:
                 continue
             if self.spec.tool_policy == "read_only":
                 allowed = tool.name in READ_ONLY_TOOL_NAMES

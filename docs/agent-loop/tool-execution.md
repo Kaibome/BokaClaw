@@ -18,12 +18,12 @@
 
 ```text
 build_runtime
-  └─ _memory_tools + build_dev_tools + SubagentTool
-       └─ ToolRegistry（全量注册，run 内不变）
+  └─ _memory_tools + build_dev_tools + SubagentTool + ToolSearch
+       └─ ToolRegistry（全量注册；激活集随 ToolSearch 变化）
 
 每一轮迭代
   ├─ context.build()                全量消息 + 工具结果截断
-  ├─ tools.specs()                  全部工具 schema 下发
+  ├─ tools.specs()                  激活工具 schema 下发
   ├─ compress(...)                  视图压缩（工具 schema token 计入预算）
   ├─ 模型返回 tool_calls
   ├─ 逐个（串行）invoke
@@ -61,11 +61,11 @@ SubagentTool                  explore / research_agent
 
 子 Agent 由 `AgentRuntime` 在构造时注册成普通 `Tool`（`agent-loop/.../agent/runtime.py:153-185`）。
 
-### 1.2 下发是全量的
+### 1.2 下发的是激活集，不是全量
 
-每一轮模型请求都用 `self.tools.specs()` 把**全部**已注册工具的 schema 发给模型（`runtime.py:393`）。没有过滤、没有延迟注册、没有元工具。
+每一轮模型请求都用 `self.tools.specs()` 下发**激活工具**的 schema（`runtime.py:393`）。MCP 工具和低频 Office 工具注册为 deferred，默认不在激活集；模型通过 `ToolSearch` 按需加载（见 §9）。
 
-工具 schema 会被 JSON 序列化并估算 token，再从压缩预算里扣除（`runtime.py:394-399`）。工具越多，留给对话的预算越少。
+工具 schema 会被 JSON 序列化并估算 token，再从压缩预算里扣除（`runtime.py:394-399`）。因此减少激活工具数量会直接降低每轮 token 占用。
 
 ### 1.3 现有的三层静态裁剪
 
@@ -300,36 +300,41 @@ run 结束     → attach_trace(final_metadata) → conversation_messages.metada
 
 ## 9. 工具数量增长：检索与按需加载
 
-### 9.1 现状
+### 9.1 现状：deferred + ToolSearch
 
-**没有检索，也没有按需加载。** 所有注册工具每轮全量下发。当前默认规模约 13–15 个（基础 8 + 可选 shell 3 + office + 记忆 2 + 子 Agent 2），尚未到需要检索的程度；但接入业务工具或 MCP 后会立刻遇到两个问题：
+已实现“核心常驻 + 长尾按需加载”：
 
-1. schema 占上下文：工具定义参与 token 预算；
-2. 路由准确率：描述重叠时模型更容易选错。
+- `ToolRegistry` 区分注册集和激活集：`specs()` 只返回激活工具；`activate()` / `deactivate()` 改变激活集；调用未激活工具会返回 `Tool ... is deferred; load it with ToolSearch`。
+- deferred 集合由 `server/app/agent/deferred_tools.py` 决定：全部 `mcp__*` 工具 + 低频 Office 编辑工具（`PptxUpdateSlide` / `PptxAddSlide` / `PptxDeleteSlide`）。`PptxBuild`、文件、Shell、Web、记忆、Skill、子 Agent 常驻。
+- run 开始时把 `<deferred-tools>` 目录作为 user-role 参考块插在当前用户消息之前；每个 run 首次加载时列出所有 deferred 工具的 name + 一句话描述。
+- `ToolSearch(query, limit)`：
+  - 空 query：返回完整 catalog（不激活）；
+  - 非空 query：按名称/描述关键词排序，返回 top-k 的完整 schema，并把这些工具加入本 run 的激活集；下一次 `model_request` 就会带上它们。
+- 激活状态是 run 级的，不跨 run 复用；目录缓存与工具发现仍由 MCP/技能层负责。
 
-### 9.2 可选方案
+### 9.2 为什么只做这两类
 
-| 方案 | 做法 | 改动量 | 适用 |
-|---|---|---|---|
-| 配置分组 | 按 agent profile 选一套工具集 | 最小 | 几十个工具、场景边界清晰 |
-| 意图预路由 | 先分类，再构造对应工具集 | 小 | 场景少 |
-| `search_tools` 元工具 | 检索返回 schema，加入本 run 的激活集合；`specs()` 只发激活集 | 中 | 上百个工具、长尾明显 |
-| 命名空间/分组 | 先选组再展开 | 中 | 工具有天然领域 |
-| MCP / 远程工具 | 接外部工具服务 | 大 | 第三方维护 |
+| 工具 | 处理 | 原因 |
+|---|---|---|
+| MCP（GitHub / 12306） | deferred | 数量多、场景窄，最影响 schema 预算 |
+| `PptxUpdateSlide` / `PptxAddSlide` / `PptxDeleteSlide` | deferred | 只在改稿时用，生成阶段只需要 `PptxBuild` |
+| 文件 / Shell / Web / 记忆 / `Skill` / 子 Agent | 常驻 | 几乎每类任务都会用到，延迟加载的收益低于一次额外 ToolSearch |
 
-### 9.3 这个代码库实现动态加载的有利条件
+### 9.3 实现要点
 
-- `tools.specs()` 每轮调用（`runtime.py:393`），激活集合可以做成 run 状态，每轮过滤；
-- 压缩预算每轮按当时 `tools_tokens` 重算（`runtime.py:394-399`），中途加载工具会自动反映到预算；
-- `ToolRegistry.register` 运行中可调用，重名报错，天然防重复加载；
-- `MODEL_REQUEST` 事件带 `tool_names`，可观测每轮实际暴露了哪些工具。
+- `tools.specs()` 每轮调用，激活集合是 run 状态，因此 ToolSearch 激活后下一轮自动生效；
+- 压缩预算每轮按当时激活工具的 `tools_tokens` 重算；
+- `ToolRegistry.register` 保持重名报错，防止 ToolSearch 重复注册；
+- `MODEL_REQUEST` 事件的 `tool_names` 可观测每轮实际暴露了哪些工具；
+- 子 Agent 只从父级 `active_tools` 选工具，并跳过 `ToolSearch`，避免子 Agent 激活父级 registry 或绕过父级工具策略。
 
-### 9.4 坑
+### 9.4 坑与回退
 
-1. 子 Agent 读的是全量 `parent_tools.tools`，不是父级激活集，需要同步传入；
-2. `READ_ONLY_TOOL_NAMES` 等策略依赖硬编码名字，动态命名/命名空间会让策略失真；
-3. 动态加载必须复用 `allow_shell`、workspace 限制、office 开关等安全门禁，不能绕过；
-4. 检索本身要成本，失败要有回退到默认组的路径。
+1. ToolSearch 多一次模型往返；关键词搜不到时应调用 `ToolSearch("")` 或换更具体的词；
+2. 目录块可能被上下文压缩掉；ToolSearch 的空 query 可随时重新列出；
+3. `READ_ONLY_TOOL_NAMES` 等策略依赖硬编码名字，新增命名空间工具时要同步策略；
+4. deferred 工具仍受 `allow_shell`、workspace 限制、office 开关等原有安全门禁约束；
+5. 如果工具数量继续增长，下一步是 profile/意图路由或向量检索，而不是继续扩大 deferred 目录。
 
 ---
 
@@ -344,7 +349,7 @@ run 结束     → attach_trace(final_metadata) → conversation_messages.metada
 | 无自动重试 | 瞬时故障直接失败 | 模型自愈 |
 | 无幂等键 | 重试/重复调用产生重复副作用 | 见 P-23 |
 | 无 per-tool 熔断 | 坏工具拖垮整轮预算 | run 级刹车 |
-| 工具全量下发 | schema 挤压上下文、路由变差 | 静态裁剪 |
+| 工具全量下发 | schema 挤压上下文、路由变差 | 静态裁剪 + deferred/ToolSearch |
 | 多副本部署 | 取消信号只在本进程生效 | 见 `runtime-behavior.md` |
 
 ---
@@ -361,7 +366,8 @@ run 结束     → attach_trace(final_metadata) → conversation_messages.metada
 | 事实台账 | `agent-loop/src/bokaclaw_agent/agent/ledger.py` |
 | 无进展判定 | `agent-loop/src/bokaclaw_agent/agent/progress.py` |
 | 子 Agent | `agent-loop/src/bokaclaw_agent/agent/subagent.py` |
-| server 工具装配 | `server/app/agent/runtime.py:904-912`、`server/app/agent/dev_tools.py` |
+| server 工具装配 | `server/app/agent/runtime.py`、`server/app/agent/dev_tools.py` |
+| deferred 目录与 ToolSearch | `server/app/agent/deferred_tools.py`、`agent-loop/src/bokaclaw_agent/tools/registry.py` |
 | 工具 trace 与持久化 | `server/app/agent/trace.py`、`server/app/agent/payloads.py` |
 | 历史重建 | `server/app/agent/store.py:207-380` |
 | 执行器与沙箱 | `server/app/agent/executor.py`、`server/app/agent/executor_app.py` |

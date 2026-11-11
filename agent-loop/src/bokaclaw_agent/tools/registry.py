@@ -279,14 +279,17 @@ class ToolRegistry:
 
     def __init__(self, tools: Any = ()) -> None:
         self._tools: dict[str, Tool] = {}
+        self._active: set[str] = set()
         for item in tools:
             self.register(item)
 
-    def register(self, item: Tool | Callable[..., Any]) -> Tool:
+    def register(self, item: Tool | Callable[..., Any], *, active: bool = True) -> Tool:
         tool = item if isinstance(item, Tool) else Tool.from_callable(item, localns=_caller_locals(2))
         if tool.name in self._tools:
             raise ToolSchemaError(f"Tool {tool.name!r} is already registered")
         self._tools[tool.name] = tool
+        if active:
+            self._active.add(tool.name)
         return tool
 
     def get(self, name: str) -> Tool | None:
@@ -294,12 +297,42 @@ class ToolRegistry:
 
     @property
     def tools(self) -> tuple[Tool, ...]:
-        """Return the registered tools in registration order."""
+        """Return every registered tool in registration order."""
 
         return tuple(self._tools.values())
 
+    @property
+    def active_tools(self) -> tuple[Tool, ...]:
+        """Return only the tools currently exposed to the model."""
+
+        return tuple(tool for name, tool in self._tools.items() if name in self._active)
+
+    @property
+    def active_names(self) -> frozenset[str]:
+        return frozenset(self._active)
+
+    def activate(self, names: Any) -> list[str]:
+        """Expose registered tools to the model; returns the newly active names."""
+
+        activated: list[str] = []
+        for name in names:
+            if name in self._tools and name not in self._active:
+                self._active.add(name)
+                activated.append(name)
+        return activated
+
+    def deactivate(self, names: Any) -> list[str]:
+        """Hide registered tools from the model; dispatch also rejects them."""
+
+        deactivated: list[str] = []
+        for name in names:
+            if name in self._active:
+                self._active.discard(name)
+                deactivated.append(name)
+        return deactivated
+
     def specs(self) -> list[dict[str, Any]]:
-        return [tool.to_openai_spec() for tool in self._tools.values()]
+        return [tool.to_openai_spec() for tool in self.active_tools]
 
     def invoke(self, call: ToolCall, *, error_mode: str = "return") -> ToolResult:
         if call.arguments_error:
@@ -312,10 +345,17 @@ class ToolRegistry:
 
         tool = self._tools.get(call.name)
         if tool is None:
-            available = sorted(self._tools)
+            available = sorted(self._active)
             return self._error(
                 call,
                 f"Unknown tool {call.name!r}. Available tools: {available}",
+                error_mode,
+                ToolNotFoundError,
+            )
+        if call.name not in self._active:
+            return self._error(
+                call,
+                f"Tool {call.name!r} is deferred; load it with ToolSearch before calling it.",
                 error_mode,
                 ToolNotFoundError,
             )

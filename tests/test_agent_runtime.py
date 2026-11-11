@@ -622,6 +622,35 @@ def test_build_runtime_registers_ask_user_for_background_runs():
     assert "ask_user" in runtime.config.kwargs["system_prompt"]
 
 
+def test_build_runtime_defers_mcp_and_low_frequency_office_tools(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENT_DEV_TOOLS", "true")
+    monkeypatch.setenv("AGENT_OFFICE_TOOLS", "true")
+    monkeypatch.setenv("AGENT_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.delenv("AGENT_TOOLS_ALLOW_SHELL", raising=False)
+    monkeypatch.delenv("AGENT_EXECUTOR_URL", raising=False)
+    sdk = FakeSDK()
+    extra = types.SimpleNamespace(name="mcp__demo__get_item", description="Get one demo item.")
+
+    runtime = agent_runtime.build_runtime(
+        sdk,
+        _config(),
+        _payload(),
+        extra_tools=[extra],
+    )
+
+    names = [tool.name for tool in runtime.tools]
+    assert "ToolSearch" in names
+    # Registered so dispatch works after activation, but hidden by the real
+    # registry until ToolSearch loads it.
+    assert "mcp__demo__get_item" in names
+    assert set(runtime.deferred_tools) == {
+        "mcp__demo__get_item",
+        "PptxUpdateSlide",
+        "PptxAddSlide",
+        "PptxDeleteSlide",
+    }
+
+
 def test_build_runtime_registers_extra_tools():
     extra = types.SimpleNamespace(name="mcp__demo__get_item")
     runtime = agent_runtime.build_runtime(

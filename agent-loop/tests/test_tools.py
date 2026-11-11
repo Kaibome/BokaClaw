@@ -167,6 +167,47 @@ def test_registry_specs_and_dispatch():
     assert result.is_error is False
 
 
+def test_registry_deferred_tools_are_hidden_until_activated():
+    @tool
+    def visible() -> str:
+        """Always visible."""
+        return "visible"
+
+    @tool
+    def hidden() -> str:
+        """Load on demand."""
+        return "hidden"
+
+    registry = ToolRegistry([visible, hidden])
+
+    assert registry.deactivate(["hidden"]) == ["hidden"]
+    assert [spec["function"]["name"] for spec in registry.specs()] == ["visible"]
+    assert [item.name for item in registry.active_tools] == ["visible"]
+    assert registry.active_names == frozenset({"visible"})
+
+    deferred = registry.invoke(ToolCall(id="call_1", name="hidden", arguments={}))
+    assert deferred.is_error is True
+    assert "deferred" in json.loads(deferred.content)["error"]
+
+    assert registry.activate(["hidden"]) == ["hidden"]
+    assert {spec["function"]["name"] for spec in registry.specs()} == {"visible", "hidden"}
+    result = registry.invoke(ToolCall(id="call_2", name="hidden", arguments={}))
+    assert result.is_error is False
+    assert result.content == "hidden"
+
+
+def test_registry_deactivate_rejects_direct_dispatch_in_raise_mode():
+    @tool
+    def hidden() -> str:
+        """Load on demand."""
+        return "hidden"
+
+    registry = ToolRegistry([hidden])
+    registry.deactivate(["hidden"])
+    with pytest.raises(ToolNotFoundError):
+        registry.invoke(ToolCall(id="call_1", name="hidden", arguments={}), error_mode="raise")
+
+
 def test_registry_unknown_tool_returns_error_result():
     registry = ToolRegistry()
     result = registry.invoke(ToolCall(id="call_1", name="missing", arguments={}))
