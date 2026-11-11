@@ -36,6 +36,8 @@ def _config(**overrides):
         judge_api_key="",
         judge_max_chars=20000,
         judge_language="zh",
+        tool_allowlist=(),
+        tool_denylist=(),
     )
     values.update(overrides)
     return EvalConfig(**values)

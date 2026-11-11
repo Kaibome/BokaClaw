@@ -37,6 +37,11 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _env_list(name: str) -> tuple[str, ...]:
+    raw = os.environ.get(name, "")
+    return tuple(part.strip() for part in raw.split(",") if part.strip())
+
+
 @dataclass(frozen=True)
 class EvalConfig:
     enabled: bool
@@ -52,6 +57,8 @@ class EvalConfig:
     judge_api_key: str
     judge_max_chars: int
     judge_language: str
+    tool_allowlist: tuple[str, ...]
+    tool_denylist: tuple[str, ...]
 
     @property
     def judge_available(self) -> bool:
@@ -73,6 +80,8 @@ def load_eval_config() -> EvalConfig:
         judge_api_key=os.environ.get("EVAL_JUDGE_API_KEY", "").strip(),
         judge_max_chars=max(1000, _env_int("EVAL_JUDGE_MAX_CHARS", 20000)),
         judge_language=os.environ.get("EVAL_JUDGE_LANGUAGE", "zh").strip().lower() or "zh",
+        tool_allowlist=_env_list("EVAL_TOOL_ALLOWLIST"),
+        tool_denylist=_env_list("EVAL_TOOL_DENYLIST"),
     )
 
 

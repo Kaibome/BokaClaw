@@ -49,6 +49,8 @@ def evaluate_run(
     use_llm_judge: bool,
     judge_max_chars: int = 20000,
     judge_language: str = "zh",
+    tool_allowlist: tuple[str, ...] = (),
+    tool_denylist: tuple[str, ...] = (),
 ) -> EvalOutcome:
     started = time.perf_counter()
 
@@ -73,7 +75,13 @@ def evaluate_run(
     if use_llm_judge:
         warnings = _truncate_case(test_case, judge_max_chars)
 
-    metrics = build_metrics(test_case, use_llm_judge=use_llm_judge, judge_language=judge_language)
+    metrics = build_metrics(
+        test_case,
+        use_llm_judge=use_llm_judge,
+        judge_language=judge_language,
+        tool_allowlist=tool_allowlist,
+        tool_denylist=tool_denylist,
+    )
     conversational_case = adapter.to_conversational_test_case(spans, run=run, golden=golden)
     conversational_metrics = build_conversational_metrics(
         conversational_case, use_llm_judge=use_llm_judge, judge_language=judge_language

@@ -52,6 +52,17 @@ def _root_span(spans: Iterable[Any]) -> Any | None:
     return None
 
 
+def _available_tools(spans: Iterable[Any]) -> list[str]:
+    """Names the runtime advertised as available on any span (usually LLM spans)."""
+    found: set[str] = set()
+    for span in spans:
+        attributes = _attr(span, "attributes") or {}
+        names = attributes.get("tool_names") if isinstance(attributes, dict) else None
+        if isinstance(names, list):
+            found.update(name for name in names if isinstance(name, str))
+    return sorted(found)
+
+
 def _tool_calls(spans: Iterable[Any]) -> list[Any]:
     from deepeval.test_case import ToolCall
 
@@ -163,6 +174,7 @@ def to_llm_test_case(spans: Iterable[Any], *, run: Any = None, golden: Any = Non
                 if run is not None
                 else None
             ),
+            "available_tools": _available_tools(ordered),
         },
     )
     # deepeval 4.3.3 has no public trace-import API. This is the single private
@@ -225,6 +237,7 @@ def to_conversational_test_case(
                 if run is not None
                 else None
             ),
+            "available_tools": _available_tools(ordered),
         },
     )
 

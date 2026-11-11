@@ -34,6 +34,7 @@ def _localized_templates(language: str) -> dict[str, Any]:
     from deepeval.metrics.answer_relevancy import AnswerRelevancyTemplate
     from deepeval.metrics.argument_correctness import ArgumentCorrectnessTemplate
     from deepeval.metrics.goal_accuracy.goal_accuracy import GoalAccuracyTemplate
+    from deepeval.metrics.pii_leakage import PIILeakageTemplate
     from deepeval.metrics.step_efficiency import StepEfficiencyTemplate
     from deepeval.metrics.task_completion import TaskCompletionTemplate
     from deepeval.metrics.tool_correctness import ToolCorrectnessTemplate
@@ -54,13 +55,50 @@ def _localized_templates(language: str) -> dict[str, Any]:
         "goal_accuracy": build(
             GoalAccuracyTemplate, "get_accuracy_score", "get_plan_evaluation_score", "get_final_reason"
         ),
+        "pii_leakage": build(PIILeakageTemplate, "extract_pii", "generate_verdicts", "generate_reason"),
         "step_efficiency": build(StepEfficiencyTemplate, "get_execution_efficiency"),
         "task_completion": build(TaskCompletionTemplate, "generate_verdict"),
         "tool_correctness": build(ToolCorrectnessTemplate, "get_tool_selection_score"),
     }
 
 
-def build_metrics(test_case: Any, *, use_llm_judge: bool, judge_language: str = "zh") -> list[Any]:
+def _available_tools_from_trace(test_case: Any) -> set[str]:
+    """Collect the tool names the run recorded as available.
+
+    The adapter stores the union in ``metadata["available_tools"]`` because the
+    runtime records ``tool_names`` on LLM spans, while deepeval's trace schema
+    only exposes ``available_tools`` on agent spans. Walking the trace as well
+    keeps older cases working.
+    """
+    found: set[str] = set()
+    metadata = getattr(test_case, "metadata", None)
+    names = metadata.get("available_tools") if isinstance(metadata, dict) else None
+    if isinstance(names, list):
+        found.update(name for name in names if isinstance(name, str))
+
+    trace = getattr(test_case, "_trace_dict", None)
+
+    def walk(node: Any) -> None:
+        if not isinstance(node, dict):
+            return
+        available = node.get("available_tools")
+        if isinstance(available, list):
+            found.update(name for name in available if isinstance(name, str))
+        for child in node.get("children") or []:
+            walk(child)
+
+    walk(trace)
+    return found
+
+
+def build_metrics(
+    test_case: Any,
+    *,
+    use_llm_judge: bool,
+    judge_language: str = "zh",
+    tool_allowlist: tuple[str, ...] = (),
+    tool_denylist: tuple[str, ...] = (),
+) -> list[Any]:
     from deepeval.metrics import AgentLoopDetectionMetric
 
     metrics: list[Any] = [AgentLoopDetectionMetric(threshold=1.0, async_mode=False)]
@@ -69,10 +107,26 @@ def build_metrics(test_case: Any, *, use_llm_judge: bool, judge_language: str = 
     def template_args(key: str) -> dict[str, Any]:
         return {"evaluation_template": templates[key]} if key in templates else {}
 
+    tools_called = getattr(test_case, "tools_called", None)
+    if tools_called:
+        allowed = set(tool_allowlist) | _available_tools_from_trace(test_case)
+        denied = set(tool_denylist)
+        if allowed or denied:
+            from deepeval.metrics import ToolPermissionMetric
+
+            metrics.append(
+                ToolPermissionMetric(
+                    allowed_tools=sorted(allowed) or None,
+                    denied_tools=sorted(denied) or None,
+                    threshold=1.0,
+                )
+            )
+
     if use_llm_judge:
         from deepeval.metrics import (
             AnswerRelevancyMetric,
             ArgumentCorrectnessMetric,
+            PIILeakageMetric,
             StepEfficiencyMetric,
             TaskCompletionMetric,
         )
@@ -83,6 +137,7 @@ def build_metrics(test_case: Any, *, use_llm_judge: bool, judge_language: str = 
                 TaskCompletionMetric(threshold=0.5, **template_args("task_completion")),
                 StepEfficiencyMetric(threshold=0.5, **template_args("step_efficiency")),
                 ArgumentCorrectnessMetric(threshold=0.5, **template_args("argument_correctness")),
+                PIILeakageMetric(threshold=0.9, **template_args("pii_leakage")),
             ]
         )
 

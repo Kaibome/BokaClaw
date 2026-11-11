@@ -161,6 +161,8 @@ class EvalWorker:
                     use_llm_judge=row.use_llm_judge,
                     judge_max_chars=self.config.judge_max_chars,
                     judge_language=self.config.judge_language,
+                    tool_allowlist=self.config.tool_allowlist,
+                    tool_denylist=self.config.tool_denylist,
                 )
             except EvalExecutionError as exc:
                 box["error"] = exc

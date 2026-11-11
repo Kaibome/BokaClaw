@@ -170,6 +170,8 @@ def main(argv: list[str] | None = None) -> int:
                 use_llm_judge=args.judge,
                 judge_max_chars=config.judge_max_chars,
                 judge_language=config.judge_language,
+                tool_allowlist=config.tool_allowlist,
+                tool_denylist=config.tool_denylist,
             )
         except EvalExecutionError as exc:
             print(f"eval {run_id} failed: {exc.code}: {exc.detail}", file=sys.stderr)
