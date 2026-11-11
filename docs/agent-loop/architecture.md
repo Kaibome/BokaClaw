@@ -606,7 +606,7 @@ CREATE TABLE IF NOT EXISTS bokaclaw_agent_messages (
 | `model_response` | 每次模型返回后 | `content`、`tool_calls`、`finish_reason` |
 | `tool_call` | 执行工具前 | `tool_call_id`、`name`、`arguments`、`raw_arguments`、`arguments_error`、`status="running"` |
 | `tool_result` | 工具返回/abort 后 | `tool_call_id`、`name`、`content`（已按 `tool_result_max_chars` 裁剪）、`truncated`、`original_chars`、`is_error`、`status`（`completed/failed/aborted`） |
-| `context_compressed` | 模型视图被压缩/裁剪后、对应 `model_request` 之前 | `before_tokens`、`after_tokens`、`dropped_messages`、`summarized`、`fallback` |
+| `context_compressed` | 模型视图被压缩/裁剪后、对应 `model_request` 之前 | `before_tokens`、`after_tokens`、`dropped_messages`、`summarized`、`fallback`、`input`（前后视图的 message_count/roles/chars/tokens 描述符）、`output`（含滚动摘要预览） |
 | `run_ended` | 正常结束、超轮数或取消 | `stop_reason`（含 `cancelled`） |
 | `error` | 非取消异常 | `error`、`type` |
 

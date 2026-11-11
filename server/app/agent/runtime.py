@@ -704,6 +704,15 @@ def _bridge_event(event: Any, put: Callable[[str, Any], None], *, model: str | N
                     unknown_calls=_as_int(for_debug.get("usage_unknown_calls")),
                 ),
             )
+        # The span input/output descriptors are not part of the public SSE
+        # stats; keep them on the event for the span recorder only.
+        span_input = for_debug.get("input")
+        span_output = for_debug.get("output")
+        stats = {
+            key: value
+            for key, value in for_debug.items()
+            if key not in {"input", "output"}
+        }
         # Compression belongs to the live transcript, not only to traces: emit
         # it even when span capture is off so the dashboard can show it. The
         # span recorder ignores the event when capture is disabled.
@@ -711,7 +720,9 @@ def _bridge_event(event: Any, put: Callable[[str, Any], None], *, model: str | N
             "context_compressed",
             AgentContextCompressed(
                 iteration=_iteration(event, data),
-                stats=dict(for_debug),
+                stats=stats,
+                input=span_input if isinstance(span_input, dict) else {},
+                output=span_output if isinstance(span_output, dict) else {},
                 usage=usage or None,
                 model_calls=model_calls,
                 usage_unknown_calls=_as_int(for_debug.get("usage_unknown_calls")),

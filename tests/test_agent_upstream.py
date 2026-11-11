@@ -117,6 +117,8 @@ def test_context_compression_is_parsed_from_nested_stats():
                 "summarized": True,
                 "fallback": False,
                 "model_calls": 1,
+                "input": {"message_count": 100, "tokens": 163035},
+                "output": {"message_count": 8, "tokens": 29069, "summary": "earlier facts"},
             },
         },
     )
@@ -125,6 +127,9 @@ def test_context_compression_is_parsed_from_nested_stats():
     assert event.iteration == 4
     assert event.stats["before_tokens"] == 163035
     assert event.stats["after_tokens"] == 29069
+    assert "input" not in event.stats and "output" not in event.stats
+    assert event.input["message_count"] == 100
+    assert event.output["summary"] == "earlier facts"
     assert event.model_calls == 1
 
 

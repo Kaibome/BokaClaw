@@ -85,6 +85,10 @@ class AgentModelResponse:
 class AgentContextCompressed:
     iteration: int = 0
     stats: dict[str, Any] = field(default_factory=dict)
+    # Descriptors for the compression span; the SDK sends them beside the
+    # numeric stats so they stay out of the SSE payload.
+    input: dict[str, Any] = field(default_factory=dict)
+    output: dict[str, Any] = field(default_factory=dict)
     usage: dict[str, int] | None = None
     model_calls: int = 0
     usage_unknown_calls: int = 0

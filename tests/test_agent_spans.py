@@ -105,6 +105,8 @@ def test_context_compression_creates_its_own_child_of_the_agent_span():
         agent_events.AgentContextCompressed(
             iteration=3,
             stats={"before_tokens": 9000, "after_tokens": 2000, "summarized": True},
+            input={"message_count": 12, "roles": {"user": 6, "tool": 6}, "tokens": 9000},
+            output={"message_count": 4, "tokens": 2000, "summary": "earlier facts"},
         )
     )
 
@@ -115,6 +117,8 @@ def test_context_compression_creates_its_own_child_of_the_agent_span():
     assert span["status"] == "completed"
     assert span["duration_ms"] == 0
     assert span["attributes"] == {"before_tokens": 9000, "after_tokens": 2000, "summarized": True}
+    assert span["input"] == {"message_count": 12, "roles": {"user": 6, "tool": 6}, "tokens": 9000}
+    assert span["output"] == {"message_count": 4, "tokens": 2000, "summary": "earlier facts"}
 
 
 def test_twice_in_one_iteration_keeps_both_compression_spans():

@@ -542,7 +542,7 @@ SDK TOOL_CALL / TOOL_RESULT 事件
   → runner.py:738-746  repo.insert_assistant_message(metadata=final_metadata)
 ```
 
-压缩产生 `CONTEXT_COMPRESSED` 事件：转成 `agent` 下的独立 `compression` span（`compression:<iteration>:<occurrence>`，属性保存完整 stats）做观测，同时由 server 转成可重放的 `context.compressed` SSE 事件推给前端；它不参与 `tool_trace` 的构建。
+压缩产生 `CONTEXT_COMPRESSED` 事件：转成 `agent` 下的独立 `compression` span（`compression:<iteration>:<occurrence>`；`input`/`output` 保存压缩前后视图的消息数/角色/字符/token 描述符与滚动摘要预览，属性保存完整 stats）做观测，同时由 server 转成可重放的 `context.compressed` SSE 事件推给前端；它不参与 `tool_trace` 的构建。
 
 ### 10.2 但持久化另有 4 道上限
 

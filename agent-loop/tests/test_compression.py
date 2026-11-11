@@ -135,6 +135,11 @@ def test_truncate_mode_drops_old_messages_at_a_safe_boundary():
     assert result.stats["fallback"] is True
     assert result.stats["summarized"] is False
     assert result.stats["dropped_messages"] > 0
+    assert result.stats["input"]["tokens"] == result.stats["before_tokens"]
+    assert result.stats["output"]["tokens"] == result.stats["after_tokens"]
+    assert result.stats["output"]["dropped_messages"] == result.stats["dropped_messages"]
+    assert result.stats["output"]["message_count"] < result.stats["input"]["message_count"]
+    assert "summary" not in result.stats["output"]
     assert result.messages[0]["role"] == "system"
     assert result.messages[0]["content"].startswith("sys")
     assert "earlier messages were omitted" in result.messages[0]["content"]
@@ -155,6 +160,10 @@ def test_summary_mode_calls_the_provider_without_tools():
     assert result.stats["model_calls"] == 1
     assert result.stats["usage_unknown_calls"] == 0
     assert result.stats["usage"] == {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+    assert result.stats["input"]["tokens"] == result.stats["before_tokens"]
+    assert result.stats["output"]["tokens"] == result.stats["after_tokens"]
+    assert result.stats["output"]["summary"]
+    assert result.stats["output"]["summary_chars"] >= len(result.stats["output"]["summary"])
     assert usage["total_tokens"] == 15
     assert len(provider.calls) == 1
     call = provider.calls[0]
@@ -300,7 +309,12 @@ def test_context_compressed_event_precedes_the_model_request():
         "usage",
         "model_calls",
         "usage_unknown_calls",
+        "input",
+        "output",
     }
+    assert compressed[0].data["input"]["tokens"] == compressed[0].data["before_tokens"]
+    assert compressed[0].data["output"]["tokens"] == compressed[0].data["after_tokens"]
+    assert compressed[0].data["output"]["summary_chars"] > 0
     assert compressed[0].data["usage"] == {"total_tokens": 7}
     assert compressed[0].data["model_calls"] == 1
     assert compressed[0].data["usage_unknown_calls"] == 0

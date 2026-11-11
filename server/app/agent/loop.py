@@ -211,10 +211,26 @@ def _handle_upstream_event(event_name: str, data: str) -> AgentEvent | None:
                 )
                 if key in payload
             }
+        span_input = payload.get("input")
+        if not isinstance(span_input, dict):
+            span_input = stats.pop("input", {})
+        else:
+            stats.pop("input", None)
+        if not isinstance(span_input, dict):
+            span_input = {}
+        span_output = payload.get("output")
+        if not isinstance(span_output, dict):
+            span_output = stats.pop("output", {})
+        else:
+            stats.pop("output", None)
+        if not isinstance(span_output, dict):
+            span_output = {}
         usage = normalize_usage(stats.get("usage"))
         return AgentContextCompressed(
             iteration=_as_int(payload.get("iteration"), 0) or 0,
             stats=stats,
+            input=span_input,
+            output=span_output,
             usage=usage or None,
             model_calls=_as_int(stats.get("model_calls")) or 0,
             usage_unknown_calls=_as_int(stats.get("usage_unknown_calls")) or 0,

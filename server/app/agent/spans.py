@@ -359,8 +359,8 @@ class SpanRecorder:
             ended_at=now,
             duration_ms=0,
             iteration=event.iteration,
-            input={},
-            output={},
+            input=_bounded(_redact(dict(event.input or {})), self.options.max_bytes),
+            output=_bounded(_redact(dict(event.output or {})), self.options.max_bytes),
             attributes=_bounded(
                 _redact(dict(event.stats or {})),
                 self.options.max_bytes,

@@ -181,7 +181,7 @@ event: context.compressed
 data: {"run_id":"uuid","conversation_id":"uuid","seq":2,"message_id":"uuid","iteration":4,"stats":{"before_tokens":163035,"after_tokens":29069,"dropped_messages":69,"summarized":true,"fallback":false,"model_calls":1,"usage":{...}}}
 ```
 
-服务端同时为每次压缩写一条独立 span：`span_type=compression`、`span_id=compression:<iteration>:<occurrence>`、`parent_span_id=agent`、`name=context.compress.<iteration>`，`stats` 放在该 span 的 `attributes` 中；压缩不再是 llm span 的属性。`occurrence` 处理同一轮可能出现两次压缩的情况（步数耗尽后的无工具终答会再压一次）。`summarized=true` 表示生成了滚动摘要，`fallback=true` 表示摘要失败或不需要摘要而直接截断。Dashboard 在助手气泡下方显示「上下文已压缩」标记，tooltip 展示前后 token、丢弃消息数与摘要调用次数。该事件与 `AGENT_SPAN_CAPTURE` 无关，关闭 span 采集后仍会推送。
+服务端同时为每次压缩写一条独立 span：`span_type=compression`、`span_id=compression:<iteration>:<occurrence>`、`parent_span_id=agent`、`name=context.compress.<iteration>`，`stats` 放在该 span 的 `attributes` 中；压缩不再是 llm span 的属性。`occurrence` 处理同一轮可能出现两次压缩的情况（步数耗尽后的无工具终答会再压一次）。span 的 `input` 是压缩前视图的摘要（`message_count` / `roles` / `chars` / `tokens`），`output` 是压缩后视图的摘要并带滚动摘要预览（`summary` / `summary_chars`），两者都受 `AGENT_SPAN_MAX_BYTES` 截断；SSE 的 `stats` 仍只含数字字段。`summarized=true` 表示生成了滚动摘要，`fallback=true` 表示摘要失败或不需要摘要而直接截断。Dashboard 在助手气泡下方显示「上下文已压缩」标记，tooltip 展示前后 token、丢弃消息数与摘要调用次数。该事件与 `AGENT_SPAN_CAPTURE` 无关，关闭 span 采集后仍会推送。
 
 正常顺序示例：
 

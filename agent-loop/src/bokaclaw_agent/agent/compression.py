@@ -30,6 +30,7 @@ SUMMARY_MAX_CHARS = 8_000
 SUMMARY_INPUT_MAX_CHARS = 24_000
 SUMMARY_MESSAGE_MAX_CHARS = 2_000
 SUMMARY_MIN_FOLD_TOKENS = 256
+SUMMARY_PREVIEW_CHARS = 4_000
 
 SUMMARY_SYSTEM_PROMPT = (
     "You compress earlier conversation history for a tool-using AI agent so it can continue "
@@ -145,7 +146,30 @@ class ContextCompressor:
             "dropped_messages": dropped_count,
             "summarized": summarized,
             "fallback": fallback,
+            # Descriptors for observability spans. The message lists themselves
+            # are not attached: they can be very large and are exactly what
+            # compression removes. Only counts and a bounded summary preview
+            # leave the compressor.
+            "input": {
+                "message_count": len(messages),
+                "roles": _role_counts(messages),
+                "chars": _messages_chars(messages),
+                "tokens": before,
+            },
+            "output": {
+                "message_count": len(view),
+                "roles": _role_counts(view),
+                "chars": _messages_chars(view),
+                "tokens": after,
+                "dropped_messages": dropped_count,
+                "summarized": summarized,
+                "fallback": fallback,
+            },
         }
+        if self._summary:
+            preview, _ = truncate_text(self._summary, SUMMARY_PREVIEW_CHARS)
+            stats["output"]["summary"] = preview
+            stats["output"]["summary_chars"] = len(self._summary)
         if self._call_count:
             if self._call_usage:
                 stats["usage"] = dict(self._call_usage)
@@ -284,6 +308,25 @@ class ContextCompressor:
             messages[index] = {**messages[index], "content": capped}
 
         return messages
+
+
+def _role_counts(messages: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for message in messages:
+        role = str(message.get("role") or "unknown")
+        counts[role] = counts.get(role, 0) + 1
+    return counts
+
+
+def _messages_chars(messages: list[dict[str, Any]]) -> int:
+    total = 0
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, str):
+            total += len(content)
+        elif content is not None:
+            total += len(json.dumps(content, ensure_ascii=False, default=str))
+    return total
 
 
 def _format_transcript(messages: list[dict[str, Any]]) -> str:

@@ -914,7 +914,7 @@
   3. Dashboard `use-agent-chat` 消费该事件，助手气泡下显示「上下文已压缩 ×N」徽标，tooltip 展示 iteration、before/after tokens、丢弃消息数、摘要/回退与摘要调用次数；
   4. 更新 `docs/dashboard/agent-chat-design.md` 与 `docs/agent-loop/runtime-behavior.md`。
 - **解决后效果**：真实 run `7b57033a`（临时把预算降到 8000/2000）SSE 收到 `context.compressed` seq=2，`before_tokens=7346`、`after_tokens=2095`、`dropped_messages=2`、`summarized=true`；`agent_run_events` 与 `llm.turn.1` span 属性一致；恢复预算 128000/32000 后栈正常。相关 133 tests、ruff、`tsc`、Prettier 通过。
-- **修正（2026-11-11）**：按后续要求把压缩观测从 llm span 属性改为 `agent` 下的独立 `compression` span（迁移 016 扩展 `agent_run_spans.span_type` CHECK；`span_id=compression:<iteration>:<occurrence>` 以保留同轮多次压缩）；llm span 不再携带 `context_compressed` 属性，Trace 页新增「压缩」类型。
+- **修正（2026-11-11）**：按后续要求把压缩观测从 llm span 属性改为 `agent` 下的独立 `compression` span（迁移 016 扩展 `agent_run_spans.span_type` CHECK；`span_id=compression:<iteration>:<occurrence>` 以保留同轮多次压缩；span 的 `input`/`output` 保存压缩前后视图的消息数/角色/字符/token 描述符与滚动摘要预览）；llm span 不再携带 `context_compressed` 属性，Trace 页新增「压缩」类型。
 - **可复用结论**：观测事件只写进 trace，就不会出现在用户当下看到的对话里；SDK 事件、持久化事件、SSE 事件要分三层分别确认，不能假设「有 span 就等于用户可见」。
 
 ---

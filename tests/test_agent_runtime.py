@@ -1421,6 +1421,18 @@ def test_context_debug_logs_compression_events_and_forwards_live_event(monkeypat
             "dropped_messages": 8,
             "summarized": True,
             "fallback": False,
+            "input": {"message_count": 40, "roles": {"user": 20, "tool": 20}, "chars": 90000, "tokens": 34000},
+            "output": {
+                "message_count": 6,
+                "roles": {"system": 1, "user": 3, "assistant": 2},
+                "chars": 20000,
+                "tokens": 16000,
+                "dropped_messages": 8,
+                "summarized": True,
+                "fallback": False,
+                "summary": "earlier facts",
+                "summary_chars": 13,
+            },
         },
     )
 
@@ -1433,6 +1445,10 @@ def test_context_debug_logs_compression_events_and_forwards_live_event(monkeypat
     assert compressed.iteration == 6
     assert compressed.stats["before_tokens"] == 34000
     assert compressed.stats["after_tokens"] == 16000
+    # The span descriptors stay off the SSE stats.
+    assert "input" not in compressed.stats and "output" not in compressed.stats
+    assert compressed.input["message_count"] == 40
+    assert compressed.output["summary"] == "earlier facts"
     messages = [record.getMessage() for record in caplog.records]
     assert len(messages) == 1
     assert "context_compressed session=conv-1 iteration=6" in messages[0]
