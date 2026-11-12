@@ -32,6 +32,8 @@
           "agent-loop/architecture",
           "agent-loop/runtime-behavior",
           "agent-loop/tool-execution",
+          "agent-loop/exception-handling",
+          "agent-loop/exception-handling-comparison",
           "agent-loop/subagent-orchestration-design-v2",
           "agent-loop/agent-execution-decoupling"
         ]
