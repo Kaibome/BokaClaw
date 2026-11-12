@@ -252,7 +252,7 @@ make prune-logs              # 清理 30 天前的请求日志
 | `AGENT_COMPRESSION_MODEL` | `AGENT_MODEL` | 压缩摘要专用模型，可指向更便宜的模型 |
 | `AGENT_FACT_LEDGER` | `true` | 保留 run 内事实账本，避免压缩后遗忘 |
 | `AGENT_PROGRESS_GUARD` | `true` | 检测无新证据的工具调用，nudge 后强制收尾 |
-| `AGENT_SUBAGENTS_ENABLED` | `false` | 注册 `explore` / `research_agent` 子代理 |
+| `AGENT_SUBAGENTS_ENABLED` | `false` | 注册 `explore` / `plan` / `research_agent` 子代理 |
 | `AGENT_DEV_TOOLS` | `true` | 注册文件、搜索、抓取、PPTX 等开发工具 |
 | `AGENT_TOOLS_ALLOW_SHELL` | `false` | 注册 `Bash` / `PowerShell` / `Monitor` |
 | `AGENT_EXECUTOR_URL` | — | 设置后 Shell 工具委派给沙箱 executor |

@@ -48,7 +48,7 @@ server 在每个 run 开始时构造一次工具列表（`server/app/agent/runti
 ```text
 _memory_tools(user_id)        2 个（有 user_id 时）
 build_dev_tools(dev_config)   8 个基础 + 可选 office + 可选 shell
-SubagentTool                  explore / research_agent
+SubagentTool                  explore / plan / research_agent
 ```
 
 `build_dev_tools`（`server/app/agent/dev_tools.py:801-1197`）返回的工具集：

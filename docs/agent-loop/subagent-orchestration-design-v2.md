@@ -65,7 +65,7 @@ v2 与初版最大的区别：**把子 Agent 调用的输入和输出都协议�
 
 已在 `server/` 落地，零 DB 迁移：
 
-- `app/agent/subagents.py` 注册 `explore` / `research_agent` 两个 spec，并实现 scope 校验：工作区外的绝对路径默认拒绝，`AGENT_SUBAGENT_ALLOW_ABSOLUTE_PATHS` 可放开；非 http/https URL 一律拒绝；
+- `app/agent/subagents.py` 注册 `explore` / `plan` / `research_agent` 三个 spec，并实现 scope 校验：工作区外的绝对路径默认拒绝，`AGENT_SUBAGENT_ALLOW_ABSOLUTE_PATHS` 可放开；非 http/https URL 一律拒绝；`plan` 与 `explore` 同为只读，但返回 `steps` / `files` / `tradeoffs` / `risks` 的结构化方案；
 - `LocalAgentConfig` 增加 10 个 `AGENT_SUBAGENT_*` 配置项，默认关闭，关闭时行为与之前完全一致；开启时把委派指引追加到系统提示；
 - `_bridge_event()` 映射三种 SDK 事件：`subagent_started` / `subagent_event` / `subagent_finished`；
 - `SpanRecorder` 生成 `tool:<parent_call>` → `subagent:<id>` → `sublm:*` / `subtool:*` 的嵌套 span，`subagent_finished` 收尾并回填 turns / usage / isolated_chars / result_chars；
@@ -637,7 +637,7 @@ SDK 新增三种事件：
 | `subagent_event` | `AgentSubagentEvent` | span：子工具/子 LLM span（P1 只记 start/end，子工具可省略） |
 | `subagent_finished` | `AgentSubagentFinished` | span 收尾；`AgentUsageUpdate(source="subagents")`；结果摘要 |
 
-`_bridge_event()`（`server/app/agent/runtime.py:498`）映射。**P1 不新增 `agent_run_events` 类型**：父 run 对前端仍然只产生 `tool.call` / `tool.result`；委派显示为一个名为 `explore` / `research_agent` 的工具调用。
+`_bridge_event()`（`server/app/agent/runtime.py:498`）映射。**P1 不新增 `agent_run_events` 类型**：父 run 对前端仍然只产生 `tool.call` / `tool.result`；委派显示为一个名为 `explore` / `plan` / `research_agent` 的工具调用。
 
 ### 7.3 Span 结构
 
@@ -701,7 +701,7 @@ agent (root)
 
 ### P1：不改前端也能用，但建议做一个小卡片
 
-- 委派显示为普通工具调用（`explore` / `research_agent`），`ToolTraceRow` 已能展示参数、输出、耗时、状态。
+- 委派显示为普通工具调用（`explore` / `plan` / `research_agent`），`ToolTraceRow` 已能展示参数、输出、耗时、状态。
 - `tool.result.content` 是 `SubagentResult` JSON；展开后可读。
 - Trace 页的 span 树自动出现嵌套 `agent` 节点。
 - 建议的小改动（`dashboard/src/components/agent/tool-trace.tsx`）：

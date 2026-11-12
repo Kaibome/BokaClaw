@@ -1609,7 +1609,7 @@ def test_build_runtime_wires_subagents_guidance_and_scope_confined_to_the_worksp
     agent_runtime.build_runtime(sdk, config, {"user_id": None, "message": "hi"})
 
     runtime = sdk.runtimes[0]
-    assert [spec.name for spec in runtime.subagents] == ["explore", "research_agent"]
+    assert [spec.name for spec in runtime.subagents] == ["explore", "plan", "research_agent"]
     assert runtime.subagent_options.kwargs["enabled"] is True
     assert runtime.subagent_options.kwargs["max_calls_per_run"] == 2
     assert runtime.subagent_options.kwargs["verification_policy"] == "spot_check"

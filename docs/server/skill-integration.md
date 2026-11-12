@@ -48,7 +48,7 @@ BokaClaw 的 Skill 是一组**按需加载的指令包**，不是新的工具协
 |---|---|---|
 | Skill | 本地静态的流程、规范、领域知识、可复用脚本 | 文件系统扫描 + `Skill` 元工具 |
 | MCP | 外部系统的动态工具 | 远程 Streamable HTTP + `mcp__*` 工具 |
-| 子 Agent | 隔离上下文、减少主上下文污染 | SDK 内置 `explore` / `research_agent` |
+| 子 Agent | 隔离上下文、减少主上下文污染 | SDK 内置 `explore` / `plan` / `research_agent` |
 
 三者可以同时使用：Skill 负责「怎么做」，MCP 提供「能调什么」，子 Agent 负责「在隔离上下文里做」。
 
