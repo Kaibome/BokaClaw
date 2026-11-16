@@ -12,7 +12,7 @@ from .grammar import MemoryEntry, stable_id
 
 logger = logging.getLogger(__name__)
 
-NON_INTERACTIVE_TRIGGERS = {"cron", "heartbeat", "automation", "schedule"}
+NON_INTERACTIVE_TRIGGERS = {"cron", "heartbeat", "automation", "schedule", "benchmark"}
 _TOOL_TRUST_NAMES = {"websearch", "webfetch", "bash", "powershell", "execute_command", "execute_monitor"}
 
 _NOISE_MESSAGE_PATTERNS = [
@@ -146,6 +146,9 @@ def capture_turn(
         return report
     if is_subagent:
         report.reason = "subagent"
+        return report
+    if (metadata or {}).get("benchmark"):
+        report.reason = "benchmark"
         return report
     if trigger and str(trigger).lower() in NON_INTERACTIVE_TRIGGERS:
         report.reason = "non_interactive"

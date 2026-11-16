@@ -99,6 +99,8 @@ class RunConfig:
     span_sample_rate: float = 1.0
     span_tool_content: bool = True
     span_retention_days: int = 30
+    # Applies only to runs whose request metadata carries `benchmark`.
+    benchmark_max_tokens: int = 0
 
 
 def load_run_config() -> RunConfig:
@@ -118,7 +120,18 @@ def load_run_config() -> RunConfig:
         span_sample_rate=min(1.0, max(0.0, _env_float("AGENT_SPAN_SAMPLE_RATE", 1.0))),
         span_tool_content=_env_bool("AGENT_SPAN_TOOL_CONTENT", True),
         span_retention_days=max(1, _env_int("AGENT_SPAN_RETENTION_DAYS", 30)),
+        benchmark_max_tokens=max(0, _env_int("AGENT_BENCHMARK_MAX_TOKENS", 0)),
     )
+
+
+def _benchmark_token_budget_exceeded(request_metadata: Any, total_tokens: Any, limit: int) -> bool:
+    """Return True when one benchmark run has spent more than its token cap."""
+
+    if not isinstance(request_metadata, dict) or not request_metadata.get("benchmark"):
+        return False
+    if limit <= 0:
+        return False
+    return int(total_tokens or 0) > limit
 
 
 class RunSubscription:
@@ -455,6 +468,7 @@ class AgentRunManager:
                 run = await asyncio.to_thread(self.repo.get_run, run_id)
                 if run is None:
                     return
+                request_metadata = (run.request_payload or {}).get("metadata") or {}
                 logger.info(
                     "agent run started run_id=%s worker_id=%s queued_seconds=%.1f",
                     run_id,
@@ -485,6 +499,16 @@ class AgentRunManager:
                         if isinstance(event, AgentMemoryRecall) and (event.chars or 0) > 0:
                             memory_injected = True
                         await self._handle_event(writer, spans, trace, metadata, event, usage_meter)
+                        live_tokens = (usage_meter.snapshot() or {}).get("total_tokens")
+                        if _benchmark_token_budget_exceeded(
+                            request_metadata,
+                            live_tokens,
+                            self.config.benchmark_max_tokens,
+                        ):
+                            raise AgentLoopError(
+                                "agent_token_budget_exceeded",
+                                f"Benchmark run exceeded {self.config.benchmark_max_tokens} tokens.",
+                            )
                     # Deltas are buffered; settle them before judging the reply,
                     # or a short answer with no tool events looks like no content.
                     await writer.flush()

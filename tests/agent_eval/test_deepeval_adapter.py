@@ -174,6 +174,15 @@ def test_to_llm_test_case_maps_run_and_tools():
     assert case._trace_dict["type"] == "agent"
 
 
+def test_to_llm_test_case_prefers_the_untruncated_run_output():
+    run = _run()
+    run.partial_content = "A complete answer that is longer than the span output.\nFinal answer: 42"
+
+    case = adapter.to_llm_test_case(_span_rows(), run=run)
+
+    assert case.actual_output == run.partial_content
+
+
 def test_to_conversational_test_case_keeps_history_and_tool_calls():
     run = _run()
     run.request_payload["history"] = [

@@ -9,6 +9,11 @@ server/history/
 server/workspace/
 server/.env
 
+# GAIA benchmark data and local results (never commit the gated dataset)
+/gaia_data/
+/gaia_results/
+/workspace/
+
 # C extensions
 *.so
 

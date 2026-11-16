@@ -427,6 +427,31 @@ class _CountingPageHandler(_PageHandler):
         super().do_GET()
 
 
+class _RateLimitThenOkHandler(_PageHandler):
+    hits = 0
+
+    def do_GET(self):
+        type(self).hits += 1
+        if type(self).hits == 1:
+            self.send_response(429)
+            self.send_header("Retry-After", "0")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        super().do_GET()
+
+
+class _AlwaysRateLimitedHandler(_PageHandler):
+    hits = 0
+
+    def do_GET(self):
+        type(self).hits += 1
+        self.send_response(429)
+        self.send_header("Retry-After", "0")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+
 class _HtmlWithoutContentTypeHandler(_PageHandler):
     def do_GET(self):
         body = b"<!doctype html><html><head><title>T</title></head><body><h1>Hello</h1><p>World</p></body></html>"
@@ -585,6 +610,29 @@ def test_webfetch_separates_table_cells(tmp_path):
 
     assert "Region | Price" in result["content"]
     assert "Beijing | 10" in result["content"]
+
+
+def test_webfetch_retries_after_http_429(tmp_path):
+    _RateLimitThenOkHandler.hits = 0
+    tools = _tools(tmp_path, web_allow_private=True)
+
+    with _serve(_RateLimitThenOkHandler) as url:
+        result = tools["WebFetch"](url)
+
+    assert _RateLimitThenOkHandler.hits == 2
+    assert result["status"] == 200
+    assert "Hello" in result["content"]
+
+
+def test_webfetch_gives_up_after_rate_limit_retries(tmp_path):
+    _AlwaysRateLimitedHandler.hits = 0
+    tools = _tools(tmp_path, web_allow_private=True)
+
+    with _serve(_AlwaysRateLimitedHandler) as url:
+        with pytest.raises(RuntimeError, match="rate limited"):
+            tools["WebFetch"](url)
+
+    assert _AlwaysRateLimitedHandler.hits == 4
 
 
 def test_webfetch_cache_is_scoped_to_one_run(tmp_path):

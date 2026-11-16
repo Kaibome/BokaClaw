@@ -38,6 +38,7 @@ class GoldenPayload(BaseModel):
     expected_output: str | None = None
     expected_tools: list[ToolCallPayload] = Field(default_factory=list)
     context: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
     notes: str | None = None
 
 
@@ -47,13 +48,18 @@ def utcnow() -> datetime:
 
 def build_snapshot(payload: GoldenPayload) -> dict[str, Any]:
     """Reference fields only; maintenance notes are not part of the hash."""
-    return {
+    snapshot: dict[str, Any] = {
         "eval_case_id": payload.eval_case_id,
         "input": payload.input,
         "expected_output": payload.expected_output,
         "expected_tools": [tool.model_dump(exclude_none=True) for tool in payload.expected_tools],
         "context": list(payload.context),
     }
+    # Keep existing non-benchmark hashes stable: only freeze metadata when it
+    # carries something the worker must see.
+    if payload.metadata:
+        snapshot["metadata"] = dict(payload.metadata)
+    return snapshot
 
 
 def normalize_snapshot(snapshot: dict[str, Any]) -> str:
@@ -105,11 +111,17 @@ def list_goldens(db: Session, limit: int = 500) -> list[EvalGolden]:
 def upsert_golden(db: Session, payload: GoldenPayload) -> EvalGolden:
     now = utcnow()
     row = db.get(EvalGolden, payload.eval_case_id)
+    metadata = dict(payload.metadata)
+    if row is not None and not metadata and row.case_metadata:
+        # The dashboard case editor does not send metadata yet. Do not wipe
+        # structured inputs just because the form omitted them.
+        metadata = dict(row.case_metadata)
     values = {
         "input": payload.input,
         "expected_output": payload.expected_output,
         "expected_tools": [tool.model_dump(exclude_none=True) for tool in payload.expected_tools],
         "context": list(payload.context),
+        "case_metadata": metadata,
         "notes": payload.notes,
     }
     if row is None:
@@ -132,8 +144,10 @@ def delete_golden(db: Session, eval_case_id: str) -> bool:
     return True
 
 
-def delete_missing_goldens(db: Session, keep: set[str]) -> int:
+def delete_missing_goldens(db: Session, keep: set[str], *, prefix: str | None = None) -> int:
     stmt = delete(EvalGolden)
+    if prefix:
+        stmt = stmt.where(EvalGolden.eval_case_id.like(f"{prefix}%"))
     if keep:
         stmt = stmt.where(EvalGolden.eval_case_id.not_in(keep))
     result = db.execute(stmt)

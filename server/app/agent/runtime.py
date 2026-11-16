@@ -411,6 +411,27 @@ def _memory_note(block: str) -> str:
     )
 
 
+BENCHMARK_SYSTEM_NOTE = (
+    "This is an automated benchmark run. Memory tools are unavailable.\n"
+    "Answer format is part of the task and is scored exactly:\n"
+    "1. End your reply with exactly one line: `Final answer: <answer>`.\n"
+    "2. Put only the answer value on that line: no variable names, labels, units, explanations, "
+    "parentheses, quotes, or Markdown (write `2`, not `n = 2`; write `6`, not "
+    "`6 more blocks (12 vs. 6)`). Use the shortest canonical form that matches the question.\n"
+    "3. Do not write anything after the `Final answer:` line.\n"
+    "4. If a WebFetch result says it is a shortened digest, call WebFetch again with `full=true`; "
+    "never repeat the same URL with default options. Prefer WebSearch for discovery and official "
+    "APIs for structured data, and batch requests when the API supports it.\n"
+    "5. If sources are incomplete or unavailable, give your single best-supported answer instead "
+    "of `Unverified` or `I could not find it`."
+)
+
+
+def _is_benchmark_payload(payload: Dict[str, Any]) -> bool:
+    metadata = payload.get("metadata")
+    return isinstance(metadata, dict) and bool(metadata.get("benchmark"))
+
+
 def _research_memory_note(block: str) -> str:
     """Frame saved research as reference data, not as an instruction."""
 
@@ -974,6 +995,7 @@ def build_runtime(
     max_seconds: Optional[float] = None,
     extra_tools: Optional[List[Any]] = None,
 ):
+    benchmark = _is_benchmark_payload(payload)
     model_config = sdk.ModelConfig(
         model=config.model,
         api_key=config.api_key,
@@ -1019,9 +1041,16 @@ def build_runtime(
             config.subagent_allow_absolute_paths,
             dev_config.workspace if dev_config is not None else None,
         )
-    user_input_enabled = interaction is not None and bool(payload.get("user_input")) and config.user_input_enabled
+    user_input_enabled = (
+        interaction is not None
+        and bool(payload.get("user_input"))
+        and config.user_input_enabled
+        and not benchmark
+    )
     if user_input_enabled:
         system_prompt = f"{system_prompt}\n\n{USER_INPUT_GUIDANCE}"
+    if benchmark:
+        system_prompt = f"{system_prompt}\n\n{BENCHMARK_SYSTEM_NOTE}"
     agent_config = sdk.AgentConfig(
         name="bokaclaw-agent",
         system_prompt=system_prompt,
@@ -1062,7 +1091,7 @@ def build_runtime(
         config.progress_stop_after,
     )
     tools = [
-        *_memory_tools(sdk, payload.get("user_id"), interaction=interaction),
+        *([] if benchmark else _memory_tools(sdk, payload.get("user_id"), interaction=interaction)),
         *build_dev_tools(sdk, dev_config),
         *(extra_tools or []),
     ]
@@ -1206,9 +1235,10 @@ async def stream_local_agent(
     sdk = _load_sdk()
     question = str(payload.get("message") or "")
     user_id = str(payload.get("user_id") or "")
+    benchmark = _is_benchmark_payload(payload)
     overall_started = time.monotonic()
     generic = None
-    if config.memory_recall and user_id:
+    if config.memory_recall and user_id and not benchmark:
         try:
             from app.core.server_state import get_memory_instance
             from app.memory.retrieval import recall_for_turn
@@ -1226,7 +1256,7 @@ async def stream_local_agent(
             generic = None
 
     research: Optional[ResearchRecall] = None
-    if config.research_memory:
+    if config.research_memory and not benchmark:
         try:
             with meter_context(usage_meter):
                 research = await asyncio.to_thread(

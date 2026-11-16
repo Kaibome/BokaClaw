@@ -155,6 +155,11 @@ def to_llm_test_case(spans: Iterable[Any], *, run: Any = None, golden: Any = Non
         root_output = _attr(root, "output") or {}
         input_text = _text(root_input.get("message") if isinstance(root_input, dict) else root_input)
         output_text = _text(root_output.get("content") if isinstance(root_output, dict) else root_output)
+    run_output = _text(_attr(run, "partial_content")) if run is not None else ""
+    if len(run_output) > len(output_text):
+        # Root span output is capped at AGENT_SPAN_MAX_BYTES; the run's final
+        # content is complete and is the better scoring source when longer.
+        output_text = run_output
     if not input_text and run is not None:
         payload = _attr(run, "request_payload") or {}
         input_text = _text(payload.get("message"))
@@ -204,6 +209,9 @@ def to_conversational_test_case(
         root_output = _attr(root, "output") or {}
         input_text = _text(root_input.get("message") if isinstance(root_input, dict) else root_input)
         output_text = _text(root_output.get("content") if isinstance(root_output, dict) else root_output)
+    run_output = _text(_attr(run, "partial_content")) if run is not None else ""
+    if len(run_output) > len(output_text):
+        output_text = run_output
 
     payload = _attr(run, "request_payload") if run is not None else None
     if isinstance(payload, dict):

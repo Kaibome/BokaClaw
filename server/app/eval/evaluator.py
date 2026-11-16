@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.eval import adapter
+from app.eval.gaia import gaia_metric_row, is_gaia_metadata
 from app.eval.goldens import (
     golden_fields_from_snapshot,
     snapshot_hash,
@@ -70,6 +71,8 @@ def evaluate_run(
 
     golden = _build_golden(golden_snapshot) if golden_snapshot is not None else None
     test_case = adapter.to_llm_test_case(spans, run=run, golden=golden)
+    raw_actual_output = getattr(test_case, "actual_output", None)
+    raw_expected_output = (golden_snapshot or {}).get("expected_output")
 
     warnings: list[str] = []
     if use_llm_judge:
@@ -145,8 +148,16 @@ def evaluate_run(
                 }
             )
 
-    scored = [row for row in metric_rows if not row["skipped"]]
-    overall_success = bool(scored) and all(row["success"] is not False and not row["error"] for row in scored)
+    gaia_row: dict[str, Any] | None = None
+    if is_gaia_metadata((golden_snapshot or {}).get("metadata")):
+        gaia_row = gaia_metric_row(raw_actual_output, raw_expected_output)
+        metric_rows.append(gaia_row)
+
+    if gaia_row is not None:
+        overall_success = bool(gaia_row["success"]) and not gaia_row["skipped"] and not gaia_row["error"]
+    else:
+        scored = [row for row in metric_rows if not row["skipped"]]
+        overall_success = bool(scored) and all(row["success"] is not False and not row["error"] for row in scored)
 
     costs = [data.evaluation_cost for data in metrics_data if data.evaluation_cost is not None]
     judge_model = next((data.evaluation_model for data in metrics_data if data.evaluation_model), None)
@@ -165,7 +176,7 @@ def evaluate_run(
                 {
                     key: value
                     for key, value in row.items()
-                    if key in {"name", "score", "threshold", "success", "evaluation_model", "error"}
+                    if key in {"name", "score", "threshold", "success", "details", "evaluation_model", "error"}
                 }
                 for row in metric_rows
             ],

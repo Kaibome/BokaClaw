@@ -54,6 +54,9 @@ def save_turn_memory(
     report = TurnMemorySave(question=str(payload.get("message") or "")[:200])
     trace = list(entries or [])
     metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    if metadata.get("benchmark"):
+        report.reason = "benchmark"
+        return report
     try:
         from app.core.server_state import get_memory_instance
 

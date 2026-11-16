@@ -1,0 +1,159 @@
+---
+title: "GAIA Benchmark"
+description: "Import GAIA validation cases, run them through BokaClaw's agent, and score final answers with deterministic exact match."
+icon: "globe"
+---
+
+GAIA is a benchmark for general AI assistants. Each validation question has one short, factual answer; some questions include a PDF, spreadsheet, or image. BokaClaw imports GAIA cases as eval goldens, runs the agent, and scores the final answer with a deterministic GAIA Exact Match metric.
+
+This guide covers the validation-set smoke workflow. Submitting to the official GAIA leaderboard is out of scope.
+
+## What is supported
+
+- GAIA **validation** split. Answers are public, so scoring happens locally.
+- Automatic agent runs through the public `POST /agent` API.
+- Attachments: PDF, text, Markdown, CSV, JSON. Image and xlsx questions are filtered by default because the current text-only runtime cannot read pixels and `Read` has no spreadsheet reader.
+- Per-level accuracy reporting from the runner's JSON output.
+
+## 1. Export the dataset
+
+GAIA is gated on Hugging Face. Accept the terms, then export JSONL on the host:
+
+```bash
+export HF_ENDPOINT=https://huggingface.co
+export HF_TOKEN=hf_...
+python - <<'PY'
+from datasets import load_dataset
+
+for level in (1, 2, 3):
+    ds = load_dataset("gaia-benchmark/GAIA", f"2023_level{level}", split="validation")
+    ds.to_json(f"gaia_validation_level{level}.jsonl", orient="records", lines=True)
+PY
+cat gaia_validation_level*.jsonl > gaia_validation.jsonl
+```
+
+Keep the downloaded attachment tree next to the JSONL, for example:
+
+```text
+gaia_data/
+├── gaia_validation.jsonl
+└── 2023/validation/<task-id>.pdf
+```
+
+Do not commit `gaia_data/`; it is gitignored.
+
+## 2. Import goldens
+
+Copy only the JSONL into the server container, then run the importer:
+
+```bash
+docker cp gaia_validation.jsonl bokaclaw-server:/tmp/gaia_validation.jsonl
+
+docker exec bokaclaw-server python scripts/import_gaia_goldens.py \
+  --file /tmp/gaia_validation.jsonl --limit 20 --dry-run
+
+docker exec bokaclaw-server python scripts/import_gaia_goldens.py \
+  --file /tmp/gaia_validation.jsonl --limit 20
+```
+
+The importer creates cases like `gaia-validation-<task_id>` and stores benchmark metadata in `eval_goldens.metadata`:
+
+```json
+{
+  "benchmark": "gaia",
+  "scorer": "gaia_exact_match_v1",
+  "split": "validation",
+  "task_id": "...",
+  "level": 1,
+  "attachments": [
+    {
+      "name": "chart.pdf",
+      "source_path": "2023/validation/chart.pdf",
+      "workspace_path": "gaia/<task_id>/chart.pdf",
+      "kind": "pdf"
+    }
+  ]
+}
+```
+
+## 3. Run the smoke benchmark
+
+The runner is a host-side, standard-library script. It reads goldens through the API, copies attachments into the workspace bind, starts an agent run per case, waits for completion, submits an evaluation, and writes a report.
+
+Create a dedicated benchmark key once (or use `ADMIN_API_KEY`):
+
+```bash
+docker exec bokaclaw-server python scripts/create_benchmark_identity.py \
+  --email gaia-benchmark@example.invalid --name "GAIA Benchmark"
+# prints GAIA_API_KEY once
+```
+
+```bash
+python server/scripts/run_gaia_benchmark.py \
+  --base-url http://127.0.0.1:8000 \
+  --api-key "$GAIA_API_KEY" \
+  --data-root ~/BokaClaw/gaia_data \
+  --workspace-host ~/BokaClaw/workspace \
+  --limit 20 --levels 1,2,3 --sample stratified \
+  --out ~/BokaClaw/gaia_results/smoke.json
+```
+
+Before running, confirm:
+
+- `AGENT_LOOP_MOCK=false`; otherwise the mock agent is measured.
+- `AGENT_SPAN_CAPTURE=true` and `AGENT_SPAN_SAMPLE_RATE=1.0`; evaluations need spans.
+- `AGENT_RUN_CONCURRENCY=1` for the serial smoke run.
+- The model provider/key is configured.
+
+Useful flags:
+
+| Flag | Meaning |
+| --- | --- |
+| `--judge` | Also run LLM judge metrics; off by default to keep benchmark cost low. |
+| `--include-unsupported` | Include image/xlsx cases and measure their failure rate. |
+| `--keep-files` | Keep per-task attachment directories. |
+| `--resume` | Skip cases already completed in `--out`. |
+| `--blocking` | Use `stream=false` and fall back to the 504 `run_id`. |
+| `--max-total-tokens` | Stop after the cumulative token budget. |
+
+## 4. Scoring
+
+Benchmark runs receive an extra system-prompt note: end with exactly one `Final answer:` line containing only the answer value (no variable names, units unless asked, explanations, or Markdown), and give a best-supported answer instead of `Unverified` when sources are incomplete.
+
+The eval worker appends a deterministic `GAIA Exact Match` metric for cases whose frozen metadata has `benchmark: "gaia"`:
+
+1. Extract the final answer: the last `Final answer:` / `答案：` marker, or the last non-empty line.
+2. Normalize: Unicode NFKC, casefold, strip articles/punctuation/whitespace, normalize numeric forms.
+3. Compare exactly, or numerically when both sides parse as numbers.
+
+For GAIA cases, `overall_success` is the GAIA Exact Match result. Loop detection and tool permission remain diagnostics and do not change the benchmark verdict.
+
+## 5. Isolation and limits
+
+- Benchmark runs send `metadata.benchmark = "gaia"` and do not recall, capture, or research memory.
+- Memory tools and `ask_user` are disabled for benchmark runs.
+- `AGENT_BENCHMARK_MAX_TOKENS` caps one benchmark run; when exceeded the run fails with `agent_token_budget_exceeded`. Set it to `0` to disable the cap.
+- Each task gets `workspace/gaia/<task_id>/`; the runner removes it after scoring unless `--keep-files` is set.
+- The workspace is shared and the smoke runner is sequential. Cross-task reads are possible; per-run workspace isolation is a later improvement.
+- Image questions cannot be solved by the current text-only runtime. xlsx requires shell plus the executor's `openpyxl`.
+- Exact match is strict. The metric reason and `details` keep the expected value, extracted value, and normalized forms for diagnosis.
+
+## 6. Report
+
+The runner writes:
+
+```json
+{
+  "counts": {"attempted": 20, "scored": 18, "agent_failed": 1, "eval_failed": 1},
+  "accuracy": {
+    "all_attempted": 0.4,
+    "scored_only": 0.444,
+    "by_level": {"1": {"n": 5, "correct": 3, "accuracy": 0.6}},
+    "by_attachment_kind": {"pdf": {"n": 8, "correct": 5}}
+  },
+  "failures": {"agent": 1, "eval": 1},
+  "results": []
+}
+```
+
+Read `accuracy.scored_only` for answer quality and `counts` for infrastructure health.

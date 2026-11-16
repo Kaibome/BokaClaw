@@ -307,6 +307,7 @@ export interface EvalMetricResult {
   threshold: number | null;
   success: boolean | null;
   reason: string | null;
+  details?: Record<string, unknown> | null;
   evaluation_model: string | null;
   evaluation_cost: number | null;
   skipped: boolean;
@@ -353,6 +354,7 @@ export interface EvalGolden {
   eval_case_id: string;
   input_preview: string;
   expected_tools: string[];
+  metadata?: Record<string, unknown>;
   updated_at: string;
 }
 
@@ -370,6 +372,7 @@ export interface EvalGoldenUpsert {
   expected_output: string | null;
   expected_tools: EvalToolCall[];
   context: string[];
+  metadata?: Record<string, unknown> | null;
   notes: string | null;
 }
 

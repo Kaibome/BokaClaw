@@ -48,6 +48,7 @@ class MetricResult(BaseModel):
     threshold: float | None = None
     success: bool | None = None
     reason: str | None = None
+    details: dict | None = None
     evaluation_model: str | None = None
     evaluation_cost: float | None = None
     skipped: bool = False
@@ -96,6 +97,7 @@ class EvalGoldenItem(BaseModel):
     eval_case_id: str
     input_preview: str
     expected_tools: list[str]
+    metadata: dict = Field(default_factory=dict)
     updated_at: datetime
 
 
@@ -104,6 +106,7 @@ class EvalGoldenUpsert(BaseModel):
     expected_output: str | None = None
     expected_tools: list[ToolCallPayload] = Field(default_factory=list)
     context: list[str] = Field(default_factory=list)
+    metadata: dict | None = None
     notes: str | None = None
 
 
@@ -156,19 +159,27 @@ def _golden_detail(row: EvalGolden) -> EvalGoldenDetail:
         expected_output=row.expected_output,
         expected_tools=[ToolCallPayload.model_validate(tool) for tool in row.expected_tools or []],
         context=list(row.context or []),
+        metadata=dict(row.case_metadata or {}),
         notes=row.notes,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
 
 
-def _golden_payload(eval_case_id: str, body: EvalGoldenUpsert) -> GoldenPayload:
+def _golden_payload(
+    eval_case_id: str,
+    body: EvalGoldenUpsert,
+    *,
+    existing_metadata: dict | None = None,
+) -> GoldenPayload:
+    metadata = body.metadata if body.metadata is not None else (existing_metadata or {})
     return GoldenPayload(
         eval_case_id=eval_case_id,
         input=body.input,
         expected_output=body.expected_output,
         expected_tools=body.expected_tools,
         context=body.context,
+        metadata=dict(metadata),
         notes=body.notes,
     )
 
@@ -220,6 +231,7 @@ def get_eval_goldens(
                 for tool in row.expected_tools or []
                 if isinstance(tool, dict) and tool.get("name")
             ],
+            metadata=dict(row.case_metadata or {}),
             updated_at=row.updated_at,
         )
         for row in list_goldens(db, limit=limit)
@@ -262,9 +274,13 @@ def update_eval_golden(
     _auth: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    if get_golden(db, eval_case_id) is None:
+    existing = get_golden(db, eval_case_id)
+    if existing is None:
         _error(404, "eval_golden_not_found", f"Golden {eval_case_id!r} does not exist.", eval_case_id=eval_case_id)
-    row = upsert_golden(db, _golden_payload(eval_case_id, body))
+    row = upsert_golden(
+        db,
+        _golden_payload(eval_case_id, body, existing_metadata=existing.case_metadata),
+    )
     return _golden_detail(row)
 
 
@@ -352,6 +368,7 @@ def create_eval(
                 "expected_output": golden.expected_output,
                 "expected_tools": golden.expected_tools,
                 "context": golden.context,
+                "metadata": golden.case_metadata,
             }
         )
     )

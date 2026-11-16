@@ -271,6 +271,7 @@ class EvalGolden(Base):
     __table_args__ = (
         CheckConstraint("jsonb_typeof(expected_tools) = 'array'", name="ck_eval_goldens_tools"),
         CheckConstraint("jsonb_typeof(context) = 'array'", name="ck_eval_goldens_context"),
+        CheckConstraint("jsonb_typeof(metadata) = 'object'", name="ck_eval_goldens_metadata"),
     )
 
     eval_case_id: Mapped[str] = mapped_column(String(255), primary_key=True)
@@ -285,6 +286,14 @@ class EvalGolden(Base):
         JSONB,
         default=list,
         server_default=text("'[]'::jsonb"),
+    )
+    # Column name is ``metadata``; the attribute avoids SQLAlchemy's reserved
+    # ``Base.metadata``.
+    case_metadata: Mapped[dict] = mapped_column(
+        "metadata",
+        JSONB,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
     )
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)

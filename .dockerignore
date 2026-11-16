@@ -10,3 +10,8 @@
 **/.DS_Store
 **/.env
 **/.env.local
+
+# Local benchmark data and results
+gaia_data/
+gaia_results/
+workspace/

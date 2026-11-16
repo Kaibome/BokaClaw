@@ -71,6 +71,7 @@ def _load_db_golden(eval_case_id: str) -> GoldenPayload | None:
                 "expected_output": row.expected_output,
                 "expected_tools": row.expected_tools,
                 "context": row.context,
+                "metadata": row.case_metadata,
             }
         )
 

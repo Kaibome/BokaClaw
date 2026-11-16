@@ -667,6 +667,7 @@ Eval 页右上角的 **Case management** 进入 `/dashboard/eval/cases`，提供
 | 目标达成度 | `GoalAccuracyMetric` | 是 | 否 | `ConversationalTestCase` turns + tools_called | 0.5 |
 | PII 泄露 | `PIILeakageMetric` | 是 | 否 | input + actual_output | 0.9 |
 | 工具权限 | `ToolPermissionMetric` | 否 | 否 | tools_called + 允许/禁止清单 | 1.0 |
+| GAIA 精确匹配 | `GAIA Exact Match`（evaluator 追加） | 否 | 是 | actual_output + expected_output | 1.0 |
 
 规则：
 
@@ -680,6 +681,9 @@ Eval 页右上角的 **Case management** 进入 `/dashboard/eval/cases`，提供
 - `ToolPermissionMetric` 是确定性指标，不需要 judge：允许清单 = `EVAL_TOOL_ALLOWLIST` ∪
   run 内各 agent span 记录的 `available_tools`，禁止清单 = `EVAL_TOOL_DENYLIST`；仅在
   `tools_called` 非空且策略非空时加入，阈值 1.0（任何越权调用都失败）。
+- 当 golden 的冻结 `metadata.benchmark == "gaia"` 时，evaluator 直接追加 `GAIA Exact Match`
+  行（不经过 deepeval），且该 case 的 `overall_success` 只取 exact-match 结果；
+  AgentLoopDetection / ToolPermission 等仍保留为诊断指标。
 - \* deepeval 4.3.3 的 `ToolCorrectnessMetric.__init__` 会构造 judge 模型（即使只比较工具名），
   因此它必须和有 key 的 judge 一起启用；这与旧文档「确定性、无需 judge」的假设不同。
 - ToolCorrectness 只在**当前 case**具备两侧工具数据时加入，而不是按文件是否有 golden 决定。

@@ -51,6 +51,10 @@ BING_RSS_ENDPOINT = "https://www.bing.com/search"
 MAX_READ_LINES = 5000
 MAX_MONITOR_LINES = 5000
 MAX_REDIRECTS = 5
+# Transient rate limits (HTTP 429) are retried with Retry-After/exponential backoff.
+MAX_RATE_LIMIT_RETRIES = 3
+RATE_LIMIT_DEFAULT_DELAY_SECONDS = 1.0
+RATE_LIMIT_MAX_DELAY_SECONDS = 10.0
 # A repeated WebFetch returns this much of the cached page unless full=True.
 CACHED_DIGEST_CHARS = 1_200
 
@@ -502,21 +506,50 @@ def _fetch_url(
     }
 
 
+def _retry_after_seconds(value: Optional[str], attempt: int) -> float:
+    """Honor Retry-After seconds when present, otherwise use exponential backoff."""
+
+    if value:
+        try:
+            return min(RATE_LIMIT_MAX_DELAY_SECONDS, max(0.0, float(value.strip())))
+        except ValueError:
+            pass
+    return min(
+        RATE_LIMIT_MAX_DELAY_SECONDS,
+        RATE_LIMIT_DEFAULT_DELAY_SECONDS * (2 ** max(0, attempt - 1)),
+    )
+
+
 def _fetch_url_uncached(config: DevToolConfig, url: str) -> Dict[str, Any]:
     current = url
     response: Optional[httpx.Response] = None
     body = b""
 
     with httpx.Client(timeout=config.web_timeout, follow_redirects=False) as client:
-        for _ in range(MAX_REDIRECTS + 1):
+        redirects = 0
+        rate_limited = 0
+        while True:
             _validate_public_url(current, config.web_allow_private)
             try:
                 with client.stream("GET", current, headers={"User-Agent": "BokaClaw-Agent/1.0"}) as streamed:
                     if streamed.status_code in {301, 302, 303, 307, 308}:
+                        redirects += 1
+                        if redirects > MAX_REDIRECTS:
+                            raise RuntimeError(f"too many redirects (more than {MAX_REDIRECTS})")
                         location = streamed.headers.get("location")
                         if not location:
                             raise RuntimeError(f"{current} returned {streamed.status_code} without a Location header")
                         current = urljoin(current, location)
+                        continue
+                    if streamed.status_code == 429:
+                        rate_limited += 1
+                        if rate_limited > MAX_RATE_LIMIT_RETRIES:
+                            raise RuntimeError(
+                                f"request to {current} was rate limited (HTTP 429) after "
+                                f"{MAX_RATE_LIMIT_RETRIES} retries; wait and retry later, or use WebSearch "
+                                "to find another source."
+                            )
+                        time.sleep(_retry_after_seconds(streamed.headers.get("retry-after"), rate_limited))
                         continue
                     if streamed.status_code >= 400:
                         raise RuntimeError(
@@ -537,8 +570,6 @@ def _fetch_url_uncached(config: DevToolConfig, url: str) -> Dict[str, Any]:
                     break
             except httpx.HTTPError as exc:
                 raise RuntimeError(f"could not fetch {current}: {exc}") from exc
-        else:
-            raise RuntimeError(f"too many redirects (more than {MAX_REDIRECTS})")
 
     if response is None:  # pragma: no cover - loop always breaks or raises
         raise RuntimeError("request produced no response")

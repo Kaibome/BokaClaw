@@ -937,6 +937,88 @@
 
 ---
 
+## P-34 GAIA runner 断点续跑把失败题重复统计
+
+- **状态**：已解决
+- **发现时间**：2026-11-13
+- **解决时间**：2026-11-13
+- **场景**：GAIA validation 20 题冒烟第一轮有 6 道 L3 因 `agent_upstream_error` 失败，使用 `--resume` 重试。
+- **现象**：重试报告中 `attempted` 会变成 26，同一道失败题同时保留旧的失败行和新的重试行。
+- **根因**：`run_gaia_benchmark.py` 的 resume 分支直接 `results = previous`，只从待跑列表里过滤已完成题；重试结果再 `append`，旧失败行没有被替换。
+- **解决措施**：重试前按 `eval_case_id` 丢弃待重试题的旧行，其余历史结果保持不变；新增 `server/tests/test_eval_gaia_runner.py` 覆盖“失败行被替换而不是重复计数”。
+- **解决后效果**：重试后 `attempted` 保持 20，`scored` 为 19；GAIA 相关 8 tests passed，ruff 通过。
+- **可复用结论**：断点续跑的结果合并必须以 case id 为键做替换，不能只过滤待跑列表再 append。
+
+## P-35 GAIA 冒烟暴露的上游连接不稳定与答案格式问题
+
+- **状态**：部分缓解
+- **发现时间**：2026-11-13
+- **解决时间**：—
+- **场景**：`deepseek-flash` 跑 GAIA validation 20 题，题目包含视频、PDF、网页检索和多步推理。
+- **现象**：第一轮最后 6 道 L3 连续 `agent_upstream_error`（`Model request failed: Connection error.`）；重试后 5 题恢复，1 题在 600 秒 `agent_timeout`。另有 2 题答案不符合 `Final answer:` 约定（输出 `n = 2`、`6 more blocks (12 vs. 6)`，期望 `2`、`6`）。
+- **根因**：上游 provider 连接短时不可用/长任务超时，不是容器网络问题（容器内 `api.deepseek.com` DNS 与 HTTPS 均可达）；agent 未严格把最后一行限制为答案本身。
+- **证据**：6 条 run 的 `error_detail` 均为 `Connection error`；容器内探测 `api.deepseek.com` 返回 401（网络正常）；单题 token 波动 6k–488k。
+- **解决措施**：runner 支持 `--resume` 逐题重试；benchmark 系统提示改为强制唯一 `Final answer:` 行、只输出答案值、来源不足时给最可信答案；超时题单独放宽到 1200 秒重跑。
+- **解决后效果**：最终 20/20 可评分、7 正确（35.0%），L1 3/7、L2 2/7、L3 2/6；无 agent/eval 失败。最后一道 L3 在 1200 秒内完成，输出已收敛为裸答案 `8103`（期望 `4192`，事实错误），但该题消耗 487,778 token，占全部 229 万 token 的 21%。
+- **可复用结论**：benchmark 结果必须把“答错”和“基础设施失败”分开统计；精确匹配类指标应在 prompt 层强制唯一答案行，否则格式差异会被误判为知识错误；高难度题的 token 成本可能由单题主导，需要按题设置预算或强制收敛。
+
+## P-36 GAIA 检索类题目失败主要来自容器出口网络不可达
+
+- **状态**：部分缓解
+- **发现时间**：2026-11-13
+- **解决时间**：—
+- **场景**：GAIA validation 20 题冒烟中 6 道纯检索题（BBC 视频、Audre Lorde 诗句、波兰语配音、Replit 博客、360 VR 视频、Wikipedia 引用统计）全部未答对。
+- **现象**：20 次 run 的 `WebFetch` 共失败约 122 次：89 次超时、11 次 403、11 次 404、3 次 400、1 次 502、2 次 202。超时集中在 `en.wikipedia.org`（23）、`pubchem.ncbi.nlm.nih.gov`（9）、`api.worldbank.org`（7）、`html/lite.duckduckgo.com`（11）、`mojeek.com`（5）、`archive.org` / `web.archive.org`（7）、`youtube.com`（4）以及 Brave/Startpage/Yahoo/SearX 等搜索站点。403 集中在 `blog.replit.com`、`macrotrends.net`、`query1.finance.yahoo.com`、`travelmath.com`、`bottlebill.org`、`royalsocietypublishing.org`；404/400 集中在 PubChem API、`nature.com` 和 `poetryfoundation.org`。
+- **根因**：server 容器出口网络无法访问被阻断站点。容器内直连 `en.wikipedia.org`、`html.duckduckgo.com`、`www.google.com` 均在 10 秒超时，而 `pubchem.ncbi.nlm.nih.gov`、`api.worldbank.org` 返回 200；宿主机未设置 `HTTP(S)_PROXY`，容器也没有代理配置。403 属于反爬/Cloudflare，404/400 属于 Agent 猜错 URL 或 API 路径。
+- **证据**：容器内 `urllib` 连接测试结果；上述失败域名与状态码统计；`WebSearch` 走的 Bing 能返回结果，但结果页抓取大量超时，说明“搜索”可用而“打开结果页”不可用。
+- **解决措施**：给 server 容器配置宿主代理 `http://host.docker.internal:7897`（`HTTP_PROXY`/`HTTPS_PROXY`，`NO_PROXY` 排除内部服务）；新增 `AGENT_BENCHMARK_MAX_TOKENS`，只对 benchmark run 生效，本次设为 60 万 token/题，超限以 `agent_token_budget_exceeded` 终止。
+- **解决后效果**：代理后重跑 6 道检索题，4 道完成评分、3 道正确（BBC 视频鸟类、波兰语配音、Replit 命令），Audre Lorde 题仍答错；剩余 2 道 L3 在 60 万 token 上限被终止（实际 60.2 万 / 67.8 万，检查粒度为每次模型调用）。合并回 20 题后：10/20 正确（50.0%），L1 5/7、L2 3/7、L3 2/6，2 道 L3 因预算未评分；代理后 6 题合计约 463 万 token，其中单题最高 220 万。
+- **可复用结论**：检索型 benchmark 开跑前必须先做 egress smoke test（Wikipedia、搜索引擎、目标站点各测一次）；网络打通后成本会迅速上升，必须同时加单题 token 上限，否则单题可能烧掉数百万 token。
+
+## P-37 GAIA 两道 L3 在单题预算内未收敛：工具选择与检索策略
+
+- **状态**：部分缓解
+- **发现时间**：2026-11-15
+- **解决时间**：—
+- **场景**：代理可用、单题上限 60 万 token 的情况下，GAIA L3 `0512426f`（360 VR 视频旁白数字）和 `50f58759`（Wikipedia 每日 Twitter 引用计数）均以 `agent_token_budget_exceeded` 终止。
+- **现象**：两题都没有产出最终答案，不是答错。`0512426f` 用 36 次 WebFetch、6 次 WebSearch、1 次 Bash，全部在抓取 Bing RSS、Invidious、DuckDuckGo lite、Brave、Mojeek、Yahoo、priv.au 等搜索页，只抓了 1 次 YouTube，`partial_content` 为空；`50f58759` 用 65 次 WebFetch（全部 `en.wikipedia.org` API）、3 次 Bash、2 次 `research_agent`，题目本身需要 8 月 31 个日期页，但实际只覆盖到 23 个（8 月 1–23 日），同一 `oldid` 的 parse 请求重复 3–5 次，遇到限流，`partial_content` 显示仍在计划“并行子 Agent 分担 31 个页面”。
+- **根因**：`0512426f` 是工具选择错误叠加能力缺口——把 WebFetch 当搜索用，逐个抓搜索引擎页面；而且题目要求视频/音频内容理解，当前 text-only runtime 即使拿到视频链接也无法直接观看或听旁白。`50f58759` 工具选对了（Wikipedia API），但策略低效：逐页逐 revision 抓取、未去重、未利用一次请求返回 externallinks 的能力，限流后继续重试并派生子 Agent，成本线性放大。同一 `oldid` 的重复调用主要来自 9 次 HTTP 429 重试，以及 WebFetch 的单 run dedup cache 在重复请求时只返回 1,000 字符摘要——模型未按提示改用 `full=true`（65 次调用中仅 4 次），于是反复重抓仍拿不到完整 externallinks；其余重复是 `prop=sections`、`section=8` 等不同查询。
+- **证据**：两题的 tool span 统计、重复 URL、`partial_content` 和 `error_detail`；`0512426f` 602k token / 316s，`50f58759` 678k token / 404s；均在 60 万上限被 runner 终止。
+- **解决措施**：WebFetch 对 HTTP 429 增加 `Retry-After`/指数退避重试（最多 3 次）；benchmark prompt 增加“摘要必须用 `full=true`、不要重复同一 URL、优先搜索与官方 API、能批量就批量”；用 60 万 token 上限重跑 `50f58759`。
+- **解决后效果**：`50f58759` 在 492,711 token / 497.7 秒内完成（上次 677,939 token 被截断），覆盖全部 31 个日期页；90 次 WebFetch（72 个唯一 URL、3 次 429、2 次 `full=true`），调用次数和重复率明显下降。答案仍错误：输出 `7`，期望 `3`——模型把“7 个含 Twitter/X 链接的页面”当成了“7 次引用”，且两个子 Agent 超时导致 8 月 11–31 的部分计数未复核。`0512426f` 仍未重跑，仍是工具选择/多模态能力问题。
+- **可复用结论**：token 上限只能止损，不能保证收敛；benchmark 需要同时约束“调用次数 + 策略（先搜索后抓取、去重、批量 API）”，并对当前 runtime 不具备的多模态题明确标注不可解，避免把能力缺口误算成推理失败。
+
+---
+
+## P-38 Bing RSS 长中文查询相关性差，本地 SearXNG 替换默认搜索后端
+
+- **状态**：已解决（本地开发环境）
+- **发现时间**：2026-11-15
+- **解决时间**：2026-11-15
+- **场景**：用 `WebSearch` 查询「2026年11月 Agent 领域 最新词汇」，对比 Bing RSS 与 SearXNG 的结果质量。
+- **现象**：
+  1. Bing RSS `https://www.bing.com/search?format=rss` 返回 10 条结果，全部是「2026 年日历 / 节假日 / 2026 年百科」，没有任何 Agent 领域词汇；
+  2. 换写法（去掉空格、改英文关键词）仍无改善；
+  3. 首次启动 SearXNG 后，默认引擎 google / duckduckgo / brave 全部 timeout，`results=[]`；
+  4. `keep_only` 后返回 0 条，且 `unresponsive_engines=[]`——原因是 Bing/Baidu/Sogou/360search 在 SearXNG 默认配置里都是 `disabled: true`；
+  5. 显式启用后，Baidu 返回 CAPTCHA、Sogou `unexpected crash`、Bing 0 条，只有 360search 返回 5 条相关结果。
+- **根因**：
+  1. Bing 的 RSS 搜索通道是简化检索接口，长中文查询会被首个强 token（「2026 年」）主导，相关性显著下降；
+  2. 当前网络环境下容器直连 Google / DuckDuckGo / Brave 超时，仅 Bing、Baidu、Sogou、360 可达；
+  3. SearXNG 默认配置把中文引擎置为 disabled，`keep_only` 只过滤不启用；
+  4. SearXNG 容器没有宿主代理，DuckDuckGo 等只能直连。
+- **解决措施**：
+  1. 本机运行 `searxng/searxng:latest`，加入 `bokaclaw-net`，配置目录 `~/.bokaclaw/searxng/settings.yml`，`search.formats` 增加 `json`；
+  2. 用 `use_default_settings.engines.keep_only` 保留 `duckduckgo` / `google` / `brave` / `360search`，并对四项显式 `disabled: false`；
+  3. 容器增加 `--add-host host.docker.internal:host-gateway` 与 `HTTP_PROXY`/`HTTPS_PROXY=http://host.docker.internal:7897`，DuckDuckGo 经代理可用（Google/Brave 仍返回 429，作为可降级引擎保留）；
+  4. `server/.env` 增加 `AGENT_WEB_SEARCH_URL=http://bokaclaw-searxng:8080`、`AGENT_WEB_FETCH_ALLOW_PRIVATE=true`（SearXNG 是私网地址），并把 `bokaclaw-searxng` 加入 `NO_PROXY`；
+  5. 重建 `bokaclaw-server` 容器使环境变量生效。
+- **解决后效果**：同一查询 `WebSearch` 返回 5 条高相关结果（「2024-2026 最新 AI 热词」「2026 年 AI 大模型高频术语」「2026 年 11 月 AI 模型发布追踪」等），SearXNG 合并 15 条，耗时约 1.6s，`provider=searxng`；对比此前 Bing RSS 全量无关结果明显改善。
+- **注意**：`AGENT_WEB_FETCH_ALLOW_PRIVATE=true` 同时放开了 `WebFetch` 对私网地址的访问，仅适用于本地开发；生产环境应保持 `false` 或改为按主机白名单放行 SearXNG。
+- **可复用结论**：搜索后端必须按实际出口网络选引擎；SearXNG 的 `keep_only` 不会自动启用引擎，必须同时写 `disabled: false`；长中文查询优先 DuckDuckGo + 360search，Bing RSS 只适合短查询或英文检索。
+
+---
+
 ## 变更记录
 
 | 日期 | 变更 |
@@ -988,3 +1070,11 @@
 | 2026-11-11 | 追加并修复 P-32：上下文压缩新增可重放的 `context.compressed` SSE 事件与 Dashboard 徽标；迁移 015 扩展事件 CHECK；真实 run `7b57033a` 验证 before 7346 → after 2095，SSE / `agent_run_events` / span 三处一致（发现时间 2026-11-11，解决时间 2026-11-11） |
 | 2026-11-11 | P-32 修正：压缩观测改为 `agent` 下的独立 `compression` span（迁移 016 扩展 span 类型 CHECK），llm span 不再携带 `context_compressed`；Trace 页新增「压缩」类型与配色 |
 | 2026-11-11 | 追加并修复 P-33：Radix `ScrollArea` 内部的 `display: table` 包裹层会被不可断行长内容撑宽，导致 Agent 对话页整页变宽、停止按钮被裁出视口；`ScrollArea` 强制内层为 `block`，消息气泡改用 `overflow-wrap: anywhere`，同步设计文档；`tsc`、Prettier、`next build` 通过（发现时间 2026-11-11，解决时间 2026-11-11） |
+| 2026-11-13 | 追加并修复 P-34：GAIA runner `--resume` 重试失败题时旧失败行未替换，导致 `attempted` 重复计数；改为按 `eval_case_id` 丢弃待重试行，新增 `test_eval_gaia_runner.py`；8 tests passed，ruff 通过（发现时间 2026-11-13，解决时间 2026-11-13） |
+| 2026-11-13 | 追加 P-35：GAIA validation 20 题冒烟（`deepseek-flash`）最终 20/20 评分、7 正确（35.0%），L1 3/7、L2 2/7、L3 2/6；6 道 L3 曾因上游 `Connection error` 失败，重试后 5 题恢复；最后 1 题在强化 `Final answer:` prompt 并把超时放宽到 1200 秒后完成，但答案错误且单题消耗 48.8 万 token；报告区分答错与基础设施失败（发现时间 2026-11-13，解决时间 —） |
+| 2026-11-13 | 追加 P-36：GAIA 6 道纯检索题全部失败，失败抓取中 89 次是超时，集中在 Wikipedia、DuckDuckGo、Google、YouTube、archive.org 等；容器内直连这些站点 10 秒超时，而 PubChem/World Bank 可达，确认是 server 容器出口网络而非工具逻辑（发现时间 2026-11-13，解决时间 —） |
+| 2026-11-15 | P-36 部分缓解：给 server 容器配置宿主代理 `host.docker.internal:7897`；代理后重跑 6 道检索题，4 道完成评分、3 道正确，剩余 2 道 L3 在 60 万 token 单题上限被终止；合并 20 题后 10/20 正确（50.0%），L1 5/7、L2 3/7、L3 2/6；新增 `AGENT_BENCHMARK_MAX_TOKENS` 与回归测试（发现时间 2026-11-13，解决时间 —） |
+| 2026-11-15 | 用强化 `Final answer:` prompt 重跑 L1 `11af4e1a`（BERT 层数差），输出从 `6 more blocks (12 vs. 6)` 收敛为 `6`，转为正确，消耗 6,447 token；合并后 20 题 11/20 正确（55.0%），L1 6/7、L2 3/7、L3 2/6 |
+| 2026-11-15 | 追加 P-37：分析两道被预算终止的 L3——`0512426f` 是工具选择错误（WebFetch 抓搜索页 + 缺视频/音频理解能力），`50f58759` 工具正确但逐页逐 revision 抓 Wikipedia API、重复请求且遇限流，60 万 token 内未收敛（发现时间 2026-11-15，解决时间 —） |
+| 2026-11-15 | P-37 部分缓解：WebFetch 增加 429 退避重试，benchmark prompt 增加 `full=true`/批量 API 指引；重跑 `50f58759` 在 492,711 token / 497.7s 内完成并覆盖 31 页（90 次 WebFetch、72 唯一 URL、3 次 429），但答案仍错（7 vs 3，把含链接的页面数当成引用次数）；`0512426f` 未重跑 |
+| 2026-11-15 | 追加并解决 P-38：Bing RSS 对长中文查询返回无关结果；本地启动 `searxng/searxng` 并接入 `bokaclaw-net`，保留 DuckDuckGo/Google/Brave/360search 且显式启用，SearXNG 经宿主代理访问 DDG；`server/.env` 配置 `AGENT_WEB_SEARCH_URL` 与 `AGENT_WEB_FETCH_ALLOW_PRIVATE`；同一查询 `WebSearch` 返回 5 条高相关结果（发现时间 2026-11-15，解决时间 2026-11-15） |
