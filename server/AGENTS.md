@@ -1,45 +1,50 @@
-# Self-hosted server (`server/`)
+# 自托管服务端（`server/`）
 
-FastAPI REST server for BokaClaw. Docker only; there is no local non-Docker path.
+BokaClaw 的 FastAPI REST 服务端。仅支持 Docker；不存在非 Docker 的本地运行方式。
 
-## Commands
+## 命令
 
 ```bash
-# Production image
+# 生产镜像
 make build        # docker build -t bokaclaw-server -f Dockerfile .. (repo-root context)
 make run_local    # docker run -p 8000:8000 with .env
 
-# Development stack (FastAPI + PostgreSQL/pgvector)
+# 开发环境（FastAPI + PostgreSQL/pgvector）
 docker-compose up
 ```
 
-| Service | Port |
+| 服务 | 端口 |
 |---------|------|
 | BokaClaw API | 8888 |
 | PostgreSQL (pgvector) | 8432 |
 | Dashboard | 3000 |
 
-## Memory backend
+## 记忆后端
 
-- **Markdown is authoritative.** Each user has a workspace under `AGENT_MEMORY_ROOT/users/<user_id>/`:
-  `USER.md`, `MEMORY.md`, and `memory/YYYY-MM-DD.md`. Only the memory tools may write these files.
-- **Postgres is a derived index.** The `memory_index_*` / `memory_history` tables are created by
-  Alembic migration `014`; they can be dropped and rebuilt from the files with
-  `python -m app.memory.cli reconcile --all`.
-- **`MEMORY_BACKEND`** defaults to `markdown`. The legacy `mem0` value is no longer supported.
-- **Recall** is a per-turn profile + query search; **capture** appends one filtered episode after a
-  completed turn and never calls an LLM. Consolidation is a P2 feature.
-- `AGENT_MEMORY_ROOT` must not be inside `AGENT_WORKSPACE_ROOT`, and it is never mounted into the
-  executor container.
+- **Markdown 是权威来源。** 每个用户在 `AGENT_MEMORY_ROOT/users/<user_id>/` 下有一个工作区：
+  `USER.md`、`MEMORY.md` 和 `memory/YYYY-MM-DD.md`。只有记忆工具可以写这些文件。
+- **Postgres 是派生索引。** `memory_index_*` / `memory_history` 表由 Alembic 迁移 `014` 创建；
+  可用 `python -m app.memory.cli reconcile --all` 丢弃并从文件重建。
+- **`MEMORY_BACKEND`** 默认为 `markdown`。旧的 `mem0` 取值已不再支持。
+- **回忆（Recall）** 是每轮一次的 profile + 查询检索；**捕获（Capture）** 在一轮对话完成后追加
+  一条经过过滤的 episode，且不会调用 LLM。整合（Consolidation）属于 P2 功能。
+- `AGENT_MEMORY_ROOT` 不得位于 `AGENT_WORKSPACE_ROOT` 内部，也永远不会挂载进 executor 容器。
 
-## Conventions
+## 约定
 
-- **Framework:** FastAPI on uvicorn, auto-reload in dev.
-- **Stores:** PostgreSQL with the `vector` and `pg_trgm` extensions.
-- **Hot reload:** the dev Dockerfile mounts `server/`, so edits take effect without a rebuild.
-- Use Docker Compose for local work. Do not add a "run it with uvicorn directly" path.
-- `POST /agent` runs [`../agent-loop/`](../agent-loop/AGENTS.md) (`bokaclaw-agent`) in-process. Every image installs it, so the production build context is the repository root; see [`../agent-loop/AGENTS.md`](../agent-loop/AGENTS.md) for its lint/test rules.
-- Developer tools live in `app/agent/dev_tools.py`. Any filesystem tool must resolve paths through `_resolve()` (workspace confinement); never read or write a path directly from model input. Shell tools stay behind `AGENT_TOOLS_ALLOW_SHELL`.
-- Shell commands are delegated to `app/agent/executor_app.py` when `AGENT_EXECUTOR_URL` is set; that service runs in a separate container with a read-only root filesystem, a non-root user, no external network, and only the workspace mounted read-write. Keep new shell entry points on `execute_command` / `execute_monitor` so they inherit that isolation, and never pass the server's environment to a child process.
+- **框架：** FastAPI + uvicorn，开发时自动重载。
+- **存储：** PostgreSQL，启用 `vector` 和 `pg_trgm` 扩展。
+- **热重载：** 开发版 Dockerfile 会挂载 `server/`，因此修改后无需重新构建即可生效。
+- 本地开发使用 Docker Compose。不要新增“直接用 uvicorn 运行”的路径。
+- `POST /agent` 在进程内运行 [`../agent-loop/`](../agent-loop/AGENTS.md)（`bokaclaw-agent`）。
+  所有镜像都会安装它，因此生产构建上下文是仓库根目录；其 lint/测试规则参见
+  [`../agent-loop/AGENTS.md`](../agent-loop/AGENTS.md)。
+- 开发者工具位于 `app/agent/dev_tools.py`。任何文件系统工具都必须通过 `_resolve()`（工作区限定）
+  解析路径；绝不能直接用模型输入的路径读写文件。Shell 工具始终受 `AGENT_TOOLS_ALLOW_SHELL`
+  控制。
+- 当设置了 `AGENT_EXECUTOR_URL` 时，Shell 命令会委托给 `app/agent/executor_app.py`；该服务运行在
+  独立容器中，根文件系统只读、以非 root 用户运行、无外部网络，且只以读写方式挂载工作区。新的
+  Shell 入口应继续走 `execute_command` / `execute_monitor`，以继承这套隔离；并且绝不把服务端的
+  环境变量传给子进程。
 
-Never commit `.env`. Credentials for the compose services belong in `.env.example` as placeholders only.
+绝不要提交 `.env`。compose 服务的凭据只能以占位符形式放在 `.env.example` 中。
