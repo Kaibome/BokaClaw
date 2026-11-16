@@ -77,6 +77,46 @@ class AgentConfig(BaseModel):
             "as batch barriers. 1 disables concurrency."
         ),
     )
+    tool_retry_enabled: bool = Field(
+        default=True,
+        description=(
+            "Retry transient tool failures (timeout, connection reset, HTTP 429/5xx). "
+            "Only tools that opt in are retried: read-only tools by default, external and "
+            "write tools only when they declare retry explicitly."
+        ),
+    )
+    tool_retry_max_attempts: int = Field(default=3, ge=1, description="Attempts per tool call, including the first.")
+    tool_retry_base_delay: float = Field(default=0.4, ge=0, description="Initial backoff delay in seconds.")
+    tool_retry_max_delay: float = Field(default=8.0, ge=0, description="Backoff cap in seconds.")
+    tool_retry_max_elapsed: float = Field(
+        default=15.0,
+        ge=0,
+        description="Maximum time one logical tool call may spend on retries, including waits.",
+    )
+    tool_retry_jitter: float = Field(default=0.3, ge=0, le=1, description="Random reduction applied to each backoff.")
+    tool_breaker_enabled: bool = Field(
+        default=True,
+        description=(
+            "Open a per-tool circuit breaker after repeated transient failures. The "
+            "breaker is process-wide and keyed by tool name; open tools fail fast until "
+            "the cooldown elapses and a half-open probe succeeds."
+        ),
+    )
+    tool_breaker_failure_threshold: int = Field(
+        default=5,
+        ge=1,
+        description="Consecutive transient failures before a tool's breaker opens.",
+    )
+    tool_breaker_cooldown_seconds: float = Field(
+        default=60.0,
+        ge=1,
+        description="How long an open breaker rejects calls before allowing one probe.",
+    )
+    tool_breaker_max_cooldown_seconds: float = Field(
+        default=600.0,
+        ge=1,
+        description="Cap for the exponential cooldown growth after failed probes.",
+    )
     fact_ledger: bool = Field(
         default=False,
         description=(
@@ -149,4 +189,8 @@ class AgentConfig(BaseModel):
     def _validate_progress_thresholds(self) -> "AgentConfig":
         if self.progress_stop_after < self.progress_nudge_after:
             raise ValueError("progress_stop_after must be greater than or equal to progress_nudge_after")
+        if self.tool_breaker_max_cooldown_seconds < self.tool_breaker_cooldown_seconds:
+            raise ValueError(
+                "tool_breaker_max_cooldown_seconds must be greater than or equal to tool_breaker_cooldown_seconds"
+            )
         return self

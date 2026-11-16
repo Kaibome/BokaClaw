@@ -150,7 +150,7 @@ class FakeSDK:
         self.runtimes = []
         self.events = []
 
-    def tool(self, fn, *, name=None, effect=None, concurrency_safe=None):
+    def tool(self, fn, *, name=None, effect=None, concurrency_safe=None, retry=None):
         wrapped = FakeTool(fn, name=name)
         self.tools.append(wrapped)
         return wrapped
@@ -453,6 +453,37 @@ def test_research_memory_defaults_and_can_be_tuned(monkeypatch):
     assert tuned.research_memory is False
     assert tuned.research_memory_ttl_days == 7
     assert tuned.research_memory_min_score == 0.75
+
+
+def test_tool_retry_and_breaker_settings(monkeypatch):
+    monkeypatch.setattr(agent_runtime, "_current_llm_config", lambda: {})
+    monkeypatch.setenv("AGENT_MODEL", "m")
+    monkeypatch.setenv("AGENT_API_KEY", "k")
+
+    config = agent_runtime.load_local_config()
+
+    assert config is not None
+    assert config.tool_retry_enabled is True
+    assert config.tool_retry_max_attempts == 3
+    assert config.tool_retry_base_delay == 0.4
+    assert config.tool_breaker_enabled is True
+    assert config.tool_breaker_failure_threshold == 5
+    assert config.tool_breaker_cooldown_seconds == 60.0
+
+    monkeypatch.setenv("AGENT_TOOL_RETRY_ENABLED", "false")
+    monkeypatch.setenv("AGENT_TOOL_RETRY_MAX_ATTEMPTS", "5")
+    monkeypatch.setenv("AGENT_TOOL_BREAKER_COOLDOWN_SECONDS", "120")
+    monkeypatch.setenv("AGENT_TOOL_BREAKER_MAX_COOLDOWN_SECONDS", "30")
+
+    tuned = agent_runtime.load_local_config()
+
+    assert tuned is not None
+    assert tuned.tool_retry_enabled is False
+    assert tuned.tool_retry_max_attempts == 5
+    assert tuned.tool_breaker_cooldown_seconds == 120.0
+    # A max below the base cooldown would make the SDK config invalid; the
+    # loader clamps it instead of failing the run.
+    assert tuned.tool_breaker_max_cooldown_seconds == 120.0
 
 
 def test_research_memory_settings_are_clamped(monkeypatch):

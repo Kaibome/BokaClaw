@@ -6,10 +6,12 @@ import inspect
 import json
 import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, wait
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal, get_type_hints
+from uuid import uuid4
 
 from pydantic import BaseModel, ValidationError, create_model
 
@@ -21,6 +23,9 @@ from ..core.exceptions import (
 )
 from ..core.types import ToolCall, ToolResult
 from ..core.utils import resolve_awaitable
+from .breaker import BreakerSettings, get_tool_breaker
+from .errors import classify_tool_error
+from .retry import RetryPolicy, backoff_delay
 
 # Names that Pydantic reserves on model classes. Function parameters with these
 # names cannot be turned into a generated argument model.
@@ -40,6 +45,11 @@ _GOOGLE_ARG_LINE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:\([^)]*\))?\s*
 # which parent tool call opened it. Context-local, so concurrent runs do not
 # leak into each other.
 CURRENT_TOOL_CALL_ID: ContextVar[str] = ContextVar("bokaclaw_tool_call_id", default="")
+
+# ``<run token>:<tool_call_id>`` while one logical call runs. Retries reuse the
+# same key so an idempotent remote executor can collapse them into one side
+# effect. Empty when the registry is used outside a runtime run.
+CURRENT_IDEMPOTENCY_KEY: ContextVar[str] = ContextVar("bokaclaw_idempotency_key", default="")
 
 
 def _parse_docstring(func: Callable[..., Any]) -> tuple[str | None, dict[str, str]]:
@@ -167,6 +177,10 @@ class Tool:
     args_model: type[BaseModel] | None = field(default=None, repr=False)
     effect: Literal["read", "write", "external"] = "write"
     concurrency_safe: bool = False
+    retry: RetryPolicy | bool | None = None
+    """Retry opt-in: ``None`` follows ``effect`` (reads retry, writes do not),
+    ``True`` uses the registry policy, ``False`` disables, and a ``RetryPolicy``
+    overrides it."""
 
     @classmethod
     def from_callable(
@@ -178,6 +192,7 @@ class Tool:
         localns: dict[str, Any] | None = None,
         effect: Literal["read", "write", "external"] = "write",
         concurrency_safe: bool | None = None,
+        retry: RetryPolicy | bool | None = None,
     ) -> "Tool":
         if not callable(func):
             raise ToolSchemaError("Tool must be callable")
@@ -215,6 +230,7 @@ class Tool:
             args_model=args_model,
             effect=effect,
             concurrency_safe=safe,
+            retry=retry,
         )
 
     def to_openai_spec(self) -> dict[str, Any]:
@@ -252,7 +268,15 @@ class Tool:
         try:
             value = resolve_awaitable(self.func(**kwargs))
         except Exception as exc:  # noqa: BLE001 - all tool failures are normalized
-            raise ToolExecutionError(f"Tool {self.name!r} failed: {exc}") from exc
+            # Classify here, at the boundary where the original exception type
+            # is still visible. Dispatch uses ``kind`` to decide on retries.
+            classified = classify_tool_error(exc)
+            raise ToolExecutionError(
+                f"Tool {self.name!r} failed: {exc}",
+                kind=classified.kind,
+                cause_type=classified.cause_type,
+                retry_after=classified.retry_after,
+            ) from exc
         finally:
             CURRENT_TOOL_CALL_ID.reset(token)
 
@@ -277,11 +301,35 @@ class Tool:
 class ToolRegistry:
     """Name-indexed collection of tools."""
 
-    def __init__(self, tools: Any = ()) -> None:
+    def __init__(
+        self,
+        tools: Any = (),
+        *,
+        retry: RetryPolicy | None = None,
+        breaker: BreakerSettings | None = None,
+    ) -> None:
         self._tools: dict[str, Tool] = {}
         self._active: set[str] = set()
+        # ``None`` disables retries for every tool. A policy enables the
+        # auto-opt-in for read-only tools and the default for ``retry=True``.
+        self._retry = retry
+        # Breaker state is process-wide; the runtime only supplies tuning.
+        self._breaker = breaker
+        # Rotated per run so idempotency keys never collide across runs.
+        self._run_token = ""
         for item in tools:
             self.register(item)
+
+    def begin_run(self, token: str | None = None) -> str:
+        """Start a run scope and return its idempotency token."""
+
+        self._run_token = token or uuid4().hex
+        return self._run_token
+
+    def end_run(self) -> None:
+        """Clear the run scope; safe to call more than once."""
+
+        self._run_token = ""
 
     def register(self, item: Tool | Callable[..., Any], *, active: bool = True) -> Tool:
         tool = item if isinstance(item, Tool) else Tool.from_callable(item, localns=_caller_locals(2))
@@ -334,7 +382,13 @@ class ToolRegistry:
     def specs(self) -> list[dict[str, Any]]:
         return [tool.to_openai_spec() for tool in self.active_tools]
 
-    def invoke(self, call: ToolCall, *, error_mode: str = "return") -> ToolResult:
+    def invoke(
+        self,
+        call: ToolCall,
+        *,
+        error_mode: str = "return",
+        cancel_event: threading.Event | None = None,
+    ) -> ToolResult:
         if call.arguments_error:
             return self._error(
                 call,
@@ -360,17 +414,185 @@ class ToolRegistry:
                 ToolNotFoundError,
             )
 
+        idempotency_key = f"{self._run_token}:{call.id}" if self._run_token else ""
+        ctx_token = CURRENT_IDEMPOTENCY_KEY.set(idempotency_key)
         try:
-            return tool.invoke(call.arguments, tool_call_id=call.id)
-        except (ToolArgumentError, ToolExecutionError) as exc:
-            if error_mode == "raise":
-                raise
-            return ToolResult(
-                tool_call_id=call.id,
-                name=call.name,
-                content=json.dumps({"error": str(exc)}, ensure_ascii=False),
-                is_error=True,
+            return self._invoke_with_retry(
+                tool,
+                call,
+                policy=self._policy_for(tool),
+                error_mode=error_mode,
+                cancel_event=cancel_event,
             )
+        finally:
+            CURRENT_IDEMPOTENCY_KEY.reset(ctx_token)
+
+    def _policy_for(self, tool: Tool) -> RetryPolicy | None:
+        """Resolve the effective policy: explicit declaration first, then effect."""
+
+        if tool.retry is False:
+            return None
+        if isinstance(tool.retry, RetryPolicy):
+            return tool.retry
+        if self._retry is None:
+            return None
+        if tool.retry is True:
+            return self._retry
+        # Auto: only tools declared read-only are retried. ``external`` tools
+        # must opt in explicitly because a retry may repeat a side effect.
+        return self._retry if tool.effect == "read" else None
+
+    def _invoke_with_retry(
+        self,
+        tool: Tool,
+        call: ToolCall,
+        *,
+        policy: RetryPolicy | None,
+        error_mode: str,
+        cancel_event: threading.Event | None,
+    ) -> ToolResult:
+        """Run one logical call, retrying transient failures while budget remains.
+
+        Every attempt keeps the same ``tool_call_id``; the model and the event
+        stream see exactly one tool result. Attempt details go to
+        ``ToolResult.metadata``.
+        """
+
+        breaker = get_tool_breaker() if self._breaker is not None else None
+        if breaker is not None and self._breaker is not None:
+            allowed, wait = breaker.allow(tool.name, self._breaker)
+            if not allowed:
+                message = (
+                    f"Tool {tool.name!r} is temporarily unavailable after repeated transient failures; "
+                    f"retry in {wait:.0f}s"
+                )
+                if error_mode == "raise":
+                    raise ToolExecutionError(
+                        message,
+                        kind="transient",
+                        cause_type="CircuitOpen",
+                        retry_after=wait,
+                    )
+                return ToolResult(
+                    tool_call_id=call.id,
+                    name=call.name,
+                    content=json.dumps({"error": message}, ensure_ascii=False),
+                    is_error=True,
+                    metadata={"breaker": "open", "retry_after_s": round(wait, 1)},
+                )
+
+        started = time.monotonic()
+        retry_errors: list[dict[str, Any]] = []
+        retry_delays_ms: list[int] = []
+        attempt = 1
+
+        while True:
+            try:
+                result = tool.invoke(call.arguments, tool_call_id=call.id)
+            except ToolArgumentError as exc:
+                if error_mode == "raise":
+                    raise
+                return ToolResult(
+                    tool_call_id=call.id,
+                    name=call.name,
+                    content=json.dumps({"error": str(exc)}, ensure_ascii=False),
+                    is_error=True,
+                )
+            except ToolExecutionError as exc:
+                retryable = policy is not None and exc.kind == "transient"
+                delay = backoff_delay(attempt, policy, exc.retry_after) if retryable and policy else 0.0
+                elapsed = time.monotonic() - started
+                can_retry = (
+                    retryable
+                    and policy is not None
+                    and attempt < policy.max_attempts
+                    and elapsed + delay <= policy.max_elapsed
+                    and (cancel_event is None or not cancel_event.is_set())
+                )
+                if not can_retry:
+                    if breaker is not None and self._breaker is not None:
+                        if exc.kind == "transient":
+                            breaker.record_failure(tool.name, self._breaker)
+                        elif exc.kind == "permanent":
+                            breaker.record_ignored(tool.name)
+                    metadata = self._retry_metadata(
+                        attempt,
+                        retry_errors,
+                        retry_delays_ms,
+                        started,
+                        policy,
+                        exhausted=retryable,
+                    )
+                    if error_mode == "raise":
+                        raise
+                    return ToolResult(
+                        tool_call_id=call.id,
+                        name=call.name,
+                        content=json.dumps({"error": str(exc)}, ensure_ascii=False),
+                        is_error=True,
+                        metadata=metadata,
+                    )
+                retry_errors.append(
+                    {
+                        "type": exc.cause_type or "ToolExecutionError",
+                        "kind": exc.kind,
+                        "message": str(exc)[:300],
+                    }
+                )
+                if not self._wait(delay, cancel_event):
+                    # The run stopped, not the tool: release any half-open probe
+                    # without counting anything against the tool.
+                    if breaker is not None:
+                        breaker.record_ignored(tool.name)
+                    return self._aborted(call, "run aborted: cancelled")
+                retry_delays_ms.append(int(round(delay * 1_000)))
+                attempt += 1
+                continue
+
+            if breaker is not None:
+                breaker.record_success(tool.name)
+            metadata = self._retry_metadata(attempt, retry_errors, retry_delays_ms, started, policy)
+            if metadata:
+                merged = dict(result.metadata or {})
+                merged.update(metadata)
+                result = result.model_copy(update={"metadata": merged})
+            return result
+
+    @staticmethod
+    def _wait(delay: float, cancel_event: threading.Event | None) -> bool:
+        """Sleep between attempts; return ``False`` when the run was cancelled."""
+
+        if delay <= 0:
+            return cancel_event is None or not cancel_event.is_set()
+        if cancel_event is None:
+            time.sleep(delay)
+            return True
+        return not cancel_event.wait(delay)
+
+    @staticmethod
+    def _retry_metadata(
+        attempt: int,
+        retry_errors: list[dict[str, Any]],
+        retry_delays_ms: list[int],
+        started: float,
+        policy: RetryPolicy | None,
+        *,
+        exhausted: bool = False,
+    ) -> dict[str, Any]:
+        # Tools without a retry policy keep the historical empty metadata.
+        if policy is None:
+            return {}
+        metadata: dict[str, Any] = {
+            "attempts": attempt,
+            "duration_ms": int((time.monotonic() - started) * 1_000),
+        }
+        if retry_errors:
+            metadata["retry_errors"] = list(retry_errors)
+        if retry_delays_ms:
+            metadata["retry_delays_ms"] = list(retry_delays_ms)
+        if exhausted:
+            metadata["retry_exhausted"] = True
+        return metadata
 
     def plan_batches(self, calls: list[ToolCall]) -> list[list[int]]:
         """Split ``calls`` into execution batches, preserving declaration order.
@@ -412,7 +634,7 @@ class ToolRegistry:
             self._invoke_parallel(calls, batch, results, error_mode, max_workers, cancel_event)
         else:
             for index in batch:
-                results[index] = self.invoke(calls[index], error_mode=error_mode)
+                results[index] = self.invoke(calls[index], error_mode=error_mode, cancel_event=cancel_event)
 
         return [
             results[index] if index in results else self._aborted(calls[index], "run aborted: cancelled")
@@ -490,7 +712,10 @@ class ToolRegistry:
             max_workers=min(max_workers, len(batch)),
             thread_name_prefix="bokaclaw-tool",
         )
-        futures = {executor.submit(self.invoke, calls[position], error_mode=error_mode): position for position in batch}
+        futures = {
+            executor.submit(self.invoke, calls[position], error_mode=error_mode, cancel_event=cancel_event): position
+            for position in batch
+        }
         pending = set(futures)
         cancelled = False
         try:
@@ -547,12 +772,14 @@ def tool(
     description: str | None = None,
     effect: Literal["read", "write", "external"] = "write",
     concurrency_safe: bool | None = None,
+    retry: RetryPolicy | bool | None = None,
 ) -> Tool | Callable[[Callable[..., Any]], Tool]:
     """Decorate a function as a :class:`Tool`.
 
     Usable as ``@tool`` or ``@tool(name="...", description="...")``.
     Read-only tools (``effect="read"``) are concurrency-safe by default; pass
-    ``concurrency_safe=...`` to override.
+    ``concurrency_safe=...`` to override. ``retry`` opts a tool into retrying
+    transient failures; see :class:`RetryPolicy`.
     """
 
     def decorator(callable_obj: Callable[..., Any]) -> Tool:
@@ -563,6 +790,7 @@ def tool(
             localns=_caller_locals(2),
             effect=effect,
             concurrency_safe=concurrency_safe,
+            retry=retry,
         )
 
     if func is None:

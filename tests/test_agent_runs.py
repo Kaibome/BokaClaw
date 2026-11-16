@@ -998,3 +998,64 @@ def test_run_snapshot_exposes_status_and_cursor(background_client):
     assert payload["status"] == "running"
     assert payload["last_seq"] == 3
     assert payload["assistant_message_id"] == str(run.assistant_message_id)
+
+
+def test_replay_background_turn_returns_the_existing_run(monkeypatch):
+    run = _run(client_run_id="client-1")
+    message = SimpleNamespace(id=run.user_message_id)
+    conversation = SimpleNamespace(id=run.conversation_id)
+
+    class FakeSession:
+        def scalar(self, statement):
+            return run
+
+        def get(self, model, key):
+            assert key == run.user_message_id
+            return message
+
+    monkeypatch.setattr(agent_router, "get_owned_conversation", lambda db, cid, uid: conversation)
+    monkeypatch.setattr(agent_router, "serialize_conversation", lambda conv: "conversation-out")
+    monkeypatch.setattr(agent_router, "serialize_message", lambda msg: "message-out")
+    body = SimpleNamespace(client_run_id="client-1", run_id=None)
+
+    turn = agent_router._replay_background_turn(FakeSession(), body, TEST_USER)
+
+    assert turn is not None
+    assert turn.deduplicated is True
+    assert turn.run_id == run.id
+    assert turn.assistant_id == run.assistant_message_id
+    assert turn.conversation_uuid == run.conversation_id
+    assert turn.payload == run.request_payload
+
+
+def test_replay_background_turn_skips_requests_without_a_key():
+    class ExplodingSession:
+        def scalar(self, statement):
+            raise AssertionError("should not query without a client id")
+
+    body = SimpleNamespace(client_run_id=None, run_id=None)
+
+    assert agent_router._replay_background_turn(ExplodingSession(), body, TEST_USER) is None
+
+
+def test_replay_background_turn_falls_back_to_run_id(monkeypatch):
+    run = _run(client_run_id="legacy-run-id")
+    message = SimpleNamespace(id=run.user_message_id)
+    conversation = SimpleNamespace(id=run.conversation_id)
+
+    class FakeSession:
+        def scalar(self, statement):
+            return run
+
+        def get(self, model, key):
+            return message
+
+    monkeypatch.setattr(agent_router, "get_owned_conversation", lambda db, cid, uid: conversation)
+    monkeypatch.setattr(agent_router, "serialize_conversation", lambda conv: "conversation-out")
+    monkeypatch.setattr(agent_router, "serialize_message", lambda msg: "message-out")
+    body = SimpleNamespace(client_run_id=None, run_id="legacy-run-id")
+
+    turn = agent_router._replay_background_turn(FakeSession(), body, TEST_USER)
+
+    assert turn is not None
+    assert turn.deduplicated is True

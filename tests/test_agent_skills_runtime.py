@@ -55,7 +55,7 @@ class FakeSDK:
         self.runtimes = []
         self.tools = []
 
-    def tool(self, fn, *, name=None, effect=None, concurrency_safe=None):
+    def tool(self, fn, *, name=None, effect=None, concurrency_safe=None, retry=None):
         tool = FakeTool(fn, name=name, effect=effect)
         self.tools.append(tool)
         return tool

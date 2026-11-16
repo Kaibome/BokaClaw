@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from .types import RunResult
@@ -36,8 +36,44 @@ class ToolArgumentError(ToolError):
     """Raised in ``raise`` mode when tool arguments fail validation."""
 
 
+class TransientToolError(ToolError):
+    """Raised by a tool when the failure is likely to succeed on a retry.
+
+    Tools should raise this instead of a plain ``RuntimeError`` for timeouts,
+    connection failures, HTTP 429/5xx and similar transient conditions. The
+    runtime treats it as retryable only when the tool's retry policy allows it.
+
+    ``retry_after`` carries a server-provided delay (for example an HTTP
+    ``Retry-After`` header); the runtime uses it as a lower bound for backoff.
+    """
+
+    def __init__(self, message: str, *, retry_after: float | None = None) -> None:
+        self.retry_after = retry_after
+        super().__init__(message)
+
+
 class ToolExecutionError(ToolError):
-    """Raised in ``raise`` mode when a tool raises."""
+    """Raised in ``raise`` mode when a tool raises.
+
+    ``kind`` classifies the failure so dispatch can decide whether a retry can
+    help: ``transient`` may succeed on a retry, ``permanent`` will not, and
+    ``unknown`` (the default) is treated as non-retryable. ``cause_type`` names
+    the original exception class. ``retry_after`` is a tool-supplied minimum
+    delay in seconds.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        kind: Literal["transient", "permanent", "unknown"] = "unknown",
+        cause_type: str = "",
+        retry_after: float | None = None,
+    ) -> None:
+        self.kind = kind
+        self.cause_type = cause_type
+        self.retry_after = retry_after
+        super().__init__(message)
 
 
 class MaxIterationsExceeded(AgentError):

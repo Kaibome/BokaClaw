@@ -34,6 +34,8 @@ from ..providers.base import ModelProvider
 from ..providers.openai_compatible import OpenAICompatibleProvider
 from ..sessions.base import SessionRecord, SessionStore
 from ..tools import Tool, ToolRegistry
+from ..tools.breaker import BreakerSettings
+from ..tools.retry import RetryPolicy
 from .compression import ContextCompressor
 from .context import (
     ContextManager,
@@ -139,7 +141,27 @@ class AgentRuntime:
         self.compression_provider = compression_provider
         self.store = store
         self.on_event = on_event
-        self.tools = ToolRegistry(tools)
+        retry_policy = (
+            RetryPolicy(
+                max_attempts=config.tool_retry_max_attempts,
+                base_delay=config.tool_retry_base_delay,
+                max_delay=config.tool_retry_max_delay,
+                max_elapsed=config.tool_retry_max_elapsed,
+                jitter=config.tool_retry_jitter,
+            )
+            if config.tool_retry_enabled
+            else None
+        )
+        breaker_settings = (
+            BreakerSettings(
+                failure_threshold=config.tool_breaker_failure_threshold,
+                cooldown_seconds=config.tool_breaker_cooldown_seconds,
+                max_cooldown_seconds=config.tool_breaker_max_cooldown_seconds,
+            )
+            if config.tool_breaker_enabled
+            else None
+        )
+        self.tools = ToolRegistry(tools, retry=retry_policy, breaker=breaker_settings)
         self._event_seq = 0
         # Concurrent tool batches may emit events from worker threads.
         self._event_lock = threading.RLock()
@@ -377,6 +399,11 @@ class AgentRuntime:
                     content=content,
                     usage=usage,
                 )
+
+        # A per-run token scopes tool idempotency keys (``run:tool_call_id``) so
+        # a retry of the same logical call reuses the key. It is rotated for
+        # every run because one runtime may serve several.
+        self.tools.begin_run()
 
         try:
             history = self.store.load_messages(session_id) if self.store is not None else []
@@ -721,6 +748,7 @@ class AgentRuntime:
             )
             raise
         finally:
+            self.tools.end_run()
             self._active_session_id = ""
             self._active_iteration = 0
             self._active_cancel_event = None

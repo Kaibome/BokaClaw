@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 
+from bokaclaw_agent import TransientToolError
+
 _SERVER_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "server")
 if _SERVER_DIR not in sys.path:
     sys.path.insert(0, _SERVER_DIR)
@@ -31,7 +33,7 @@ class FakeTool:
 
 
 class FakeSDK:
-    def tool(self, fn, *, name=None, effect=None, concurrency_safe=None):
+    def tool(self, fn, *, name=None, effect=None, concurrency_safe=None, retry=None):
         return FakeTool(fn, name or fn.__name__)
 
 
@@ -612,27 +614,36 @@ def test_webfetch_separates_table_cells(tmp_path):
     assert "Beijing | 10" in result["content"]
 
 
-def test_webfetch_retries_after_http_429(tmp_path):
+def test_webfetch_reports_http_429_as_transient(tmp_path):
+    _AlwaysRateLimitedHandler.hits = 0
+    tools = _tools(tmp_path, web_allow_private=True)
+
+    with _serve(_AlwaysRateLimitedHandler) as url:
+        with pytest.raises(TransientToolError, match="rate limited") as info:
+            tools["WebFetch"](url)
+
+    # The SDK retry layer owns the backoff now; WebFetch performs one request
+    # and hands it the server's Retry-After delay.
+    assert _AlwaysRateLimitedHandler.hits == 1
+    assert info.value.retry_after == 0.0
+
+
+def test_webfetch_retries_are_handled_by_the_sdk_layer(tmp_path):
+    """The 429 path no longer retries inside the tool; the SDK policy does."""
+
     _RateLimitThenOkHandler.hits = 0
     tools = _tools(tmp_path, web_allow_private=True)
 
     with _serve(_RateLimitThenOkHandler) as url:
+        # First call surfaces the transient failure...
+        with pytest.raises(TransientToolError):
+            tools["WebFetch"](url)
+        # ...and the next call (what the SDK would do) succeeds.
         result = tools["WebFetch"](url)
 
     assert _RateLimitThenOkHandler.hits == 2
     assert result["status"] == 200
     assert "Hello" in result["content"]
-
-
-def test_webfetch_gives_up_after_rate_limit_retries(tmp_path):
-    _AlwaysRateLimitedHandler.hits = 0
-    tools = _tools(tmp_path, web_allow_private=True)
-
-    with _serve(_AlwaysRateLimitedHandler) as url:
-        with pytest.raises(RuntimeError, match="rate limited"):
-            tools["WebFetch"](url)
-
-    assert _AlwaysRateLimitedHandler.hits == 4
 
 
 def test_webfetch_cache_is_scoped_to_one_run(tmp_path):

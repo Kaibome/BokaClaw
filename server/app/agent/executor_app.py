@@ -24,9 +24,11 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import threading
 import time
+from collections import OrderedDict
 from pathlib import Path, PurePosixPath
-from typing import List, Literal, Optional
+from typing import Callable, List, Literal, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 from pydantic import BaseModel, Field
@@ -59,6 +61,7 @@ class ExecRequest(BaseModel):
     description: str = ""
     timeout_seconds: int = Field(default=120, ge=1, le=3600)
     shell: Literal["bash", "powershell"] = "bash"
+    idempotency_key: Optional[str] = Field(default=None, max_length=200)
 
 
 class MonitorRequest(BaseModel):
@@ -69,6 +72,7 @@ class MonitorRequest(BaseModel):
     monitor_id: str = ""
     wait_seconds: float = Field(default=1.0, ge=0, le=30)
     pattern: str = ""
+    idempotency_key: Optional[str] = Field(default=None, max_length=200)
 
 
 class SkillBundleFile(BaseModel):
@@ -253,6 +257,85 @@ def run_skill_bundle(config: DevToolConfig, payload: SkillRunRequest) -> dict:
         shutil.rmtree(root, ignore_errors=True)
 
 
+class IdempotencyCache:
+    """In-memory at-most-once guard for ``/exec`` and ``/monitor start``.
+
+    The server sends ``<run token>:<tool_call_id>``; every retry of that logical
+    call reuses it. A completed response (including a non-zero exit code or a
+    timeout) is cached, so a retry cannot run the command twice. Transport-level
+    failures are never cached, so a genuine retry may proceed.
+
+    The cache lives in this process: an executor restart forgets keys and
+    degrades to at-least-once. That is documented and acceptable for the retry
+    window this protects.
+    """
+
+    def __init__(self, ttl_seconds: float, max_entries: int) -> None:
+        self._ttl = max(0.0, ttl_seconds)
+        self._max_entries = max(1, max_entries)
+        self._lock = threading.Lock()
+        self._values: OrderedDict[str, tuple[float, dict]] = OrderedDict()
+        self._inflight: dict[str, threading.Event] = {}
+
+    def run(self, key: Optional[str], func: Callable[[], dict]) -> dict:
+        """Run ``func`` once per ``key``, or return the first completed response."""
+
+        if not key or self._ttl <= 0:
+            return func()
+
+        with self._lock:
+            entry = self._values.get(key)
+            if entry is not None and entry[0] > time.monotonic():
+                self._values.move_to_end(key)
+                return dict(entry[1])
+            if entry is not None:
+                self._values.pop(key, None)
+            wait_for = self._inflight.get(key)
+            if wait_for is None:
+                wait_for = threading.Event()
+                self._inflight[key] = wait_for
+                owner = True
+            else:
+                owner = False
+
+        if not owner:
+            # Another copy of this command is running; wait for its response
+            # rather than executing the side effect twice.
+            wait_for.wait()
+            with self._lock:
+                entry = self._values.get(key)
+            return dict(entry[1]) if entry is not None else func()
+
+        try:
+            value = func()
+        except BaseException:
+            with self._lock:
+                self._inflight.pop(key, None)
+                wait_for.set()
+            raise
+
+        with self._lock:
+            self._values[key] = (time.monotonic() + self._ttl, dict(value))
+            self._values.move_to_end(key)
+            while len(self._values) > self._max_entries:
+                self._values.popitem(last=False)
+            self._inflight.pop(key, None)
+            wait_for.set()
+        return value
+
+
+def _env_idempotency_settings() -> tuple[float, int]:
+    try:
+        ttl = float(os.environ.get("AGENT_EXECUTOR_IDEMPOTENCY_TTL_SECONDS", "600"))
+    except (TypeError, ValueError):
+        ttl = 600.0
+    try:
+        entries = int(os.environ.get("AGENT_EXECUTOR_IDEMPOTENCY_MAX_ENTRIES", "512"))
+    except (TypeError, ValueError):
+        entries = 512
+    return max(0.0, min(86_400.0, ttl)), max(1, min(10_000, entries))
+
+
 def create_app(config: Optional[DevToolConfig] = None, token: Optional[str] = None) -> FastAPI:
     """Build the executor app for ``config``, requiring ``token`` when set."""
     cfg = config if config is not None else load_dev_tool_config()
@@ -260,6 +343,8 @@ def create_app(config: Optional[DevToolConfig] = None, token: Optional[str] = No
         raise RuntimeError("AGENT_DEV_TOOLS must be enabled in the executor container")
 
     expected_token = (token if token is not None else os.environ.get("AGENT_EXECUTOR_TOKEN", "")).strip()
+    ttl, max_entries = _env_idempotency_settings()
+    idempotency = IdempotencyCache(ttl, max_entries)
 
     app = FastAPI(title="bokaclaw-executor", docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -275,7 +360,7 @@ def create_app(config: Optional[DevToolConfig] = None, token: Optional[str] = No
 
     @app.post("/exec", dependencies=[Depends(authorize)])
     def exec_command(payload: ExecRequest) -> dict:
-        try:
+        def call() -> dict:
             return run_command(
                 cfg,
                 payload.command,
@@ -283,12 +368,15 @@ def create_app(config: Optional[DevToolConfig] = None, token: Optional[str] = No
                 payload.timeout_seconds,
                 shell=payload.shell,
             )
+
+        try:
+            return idempotency.run(payload.idempotency_key, call)
         except (ValueError, RuntimeError, OSError) as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     @app.post("/monitor", dependencies=[Depends(authorize)])
     def monitor(payload: MonitorRequest) -> dict:
-        try:
+        def call() -> dict:
             return monitor_action(
                 cfg,
                 payload.action,
@@ -297,6 +385,12 @@ def create_app(config: Optional[DevToolConfig] = None, token: Optional[str] = No
                 payload.wait_seconds,
                 payload.pattern,
             )
+
+        # Only ``start`` has a side effect worth deduplicating; poll and stop
+        # are naturally replay-safe.
+        key = payload.idempotency_key if payload.action == "start" else None
+        try:
+            return idempotency.run(key, call)
         except (ValueError, RuntimeError, OSError) as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 

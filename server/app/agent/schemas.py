@@ -164,3 +164,5 @@ class AgentInvokeResponse(BaseModel):
     user_message: ConversationMessageOut
     message: ConversationMessageOut
     run_id: str | None = None
+    # True when the request reused an existing run via ``client_run_id``.
+    deduplicated: bool = False

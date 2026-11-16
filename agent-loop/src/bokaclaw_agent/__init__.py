@@ -27,6 +27,7 @@ from .core.exceptions import (
     ToolExecutionError,
     ToolNotFoundError,
     ToolSchemaError,
+    TransientToolError,
 )
 from .core.types import (
     AgentEvent,
@@ -43,7 +44,7 @@ from .providers.openai_compatible import OpenAICompatibleProvider
 from .sessions.base import SessionRecord, SessionStore
 from .sessions.memory import InMemorySessionStore
 from .sessions.postgres import PostgresConfig, PostgresSessionStore
-from .tools import Tool, ToolRegistry, tool
+from .tools import RetryPolicy, Tool, ToolRegistry, tool
 
 try:
     __version__ = version("bokaclaw-agent")
@@ -70,6 +71,7 @@ __all__ = [
     "PersistenceError",
     "PostgresConfig",
     "PostgresSessionStore",
+    "RetryPolicy",
     "RunCancelled",
     "RunResult",
     "SessionNotFoundError",
@@ -92,5 +94,6 @@ __all__ = [
     "ToolRegistry",
     "ToolResult",
     "ToolSchemaError",
+    "TransientToolError",
     "tool",
 ]

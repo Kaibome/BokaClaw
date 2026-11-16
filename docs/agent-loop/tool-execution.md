@@ -286,15 +286,20 @@ run 结束     → attach_trace(final_metadata) → conversation_messages.metada
 
 但 `client_run_id` 没有唯一约束，也没有“按它复用已有 run”的查询：客户端超时重发在 run 结束后会**真的再跑一遍**。
 
-### 8.4 加固顺序建议
+### 8.4 加固方案（已实现）
 
-1. 在 registry 层做错误分类（可重试：超时/连接/5xx/429；不可重试：参数/权限/4xx）；
-2. 有界重试 + 指数退避 + 抖动，只对声明为幂等的工具默认开启；
-3. `/exec` 与写类工具支持 `Idempotency-Key`（可用 `run_id + tool_call_id`），文件写入改为临时文件 + 原子替换；
-4. per-tool 失败计数与临时移除（半开试探），把失败率写进 span；
-5. `client_run_id` 加唯一索引，实现请求级幂等。
+> 实施记录：2026-11-16。设计细节见 `docs/agent-loop/tool-resilience-plan.md`。
 
-注意：自动重试会产生新的 `tool_call_id`，失败记录仍进历史；`ProgressGuard` 把错误当“无进展”，重试成功也可能已经消耗了 no-progress 计数，需要同步调整口径。
+1. **错误分类**：`bokaclaw_agent.tools.errors.classify_tool_error` 把失败分为 `transient / permanent / unknown`；工具抛 `TransientToolError(retry_after=...)` 声明可重试；`ToolExecutionError` 携带 `kind / cause_type / retry_after`。
+2. **有界重试**：`RetryPolicy`（`max_attempts / base_delay / max_delay / max_elapsed / jitter`），full jitter，可被 `cancel_event` 打断；默认只对 `effect="read"` 自动开启，`WebFetch` / `WebSearch` 显式声明，写类与 shell 默认关闭。
+3. **幂等**：
+   - 文件写入改为临时文件 + fsync + `os.replace`（保留权限位）；
+   - `/exec` 与 `/monitor start` 支持 `Idempotency-Key`（`<run token>:<tool_call_id>`），executor 内存 TTL + LRU 去重；
+   - `agent_runs (created_by, client_run_id)` 部分唯一索引；重复 `POST /agent` 返回原 run，响应带 `deduplicated: true`。
+4. **熔断**：进程级、按工具名的状态机（closed / open / half_open），只统计 transient 失败；一次逻辑调用最多计一次；失败探测使冷却时间翻倍（有上限）。
+5. **可观测**：`ToolResult.metadata` 与 tool span attributes 记录 `attempts`、`retry_errors`、`retry_exhausted`、`breaker_state`、`duration_ms`；不新增 `agent_run_events` 类型。
+
+自动重试**不会**产生新的 `tool_call_id`：重试在 `ToolRegistry.invoke` 内部完成，只产生一条 `TOOL_RESULT`，`ProgressGuard` 只记一次，因此原设计中「重试吃掉 no-progress 预算」的问题不存在。
 
 ---
 
@@ -346,9 +351,9 @@ run 结束     → attach_trace(final_metadata) → conversation_messages.metada
 | 工具结果过大 | 模型只看到头尾，`_fit_budget` 可能压到几十字符 | 五层截断，无分页协议 |
 | `tool_trace` 64 KB 预算方向 | 最新结果先被清空 | 见 P-24 |
 | 压缩摘要失败 | 被折叠段落只剩省略提示 | 水位仍推进 |
-| 无自动重试 | 瞬时故障直接失败 | 模型自愈 |
-| 无幂等键 | 重试/重复调用产生重复副作用 | 见 P-23 |
-| 无 per-tool 熔断 | 坏工具拖垮整轮预算 | run 级刹车 |
+| 瞬时故障 | 一次超时就让模型重新规划 | 分类 + 有界重试（仅幂等工具），见 §8.4 |
+| 重复副作用 | 重试/重复调用产生重复执行 | 原子写 + executor 幂等键 + `client_run_id` 唯一索引 |
+| 坏工具 | 连续失败拖垮整轮预算 | per-tool 熔断 + 半开探测 |
 | 工具全量下发 | schema 挤压上下文、路由变差 | 静态裁剪 + deferred/ToolSearch |
 | 多副本部署 | 取消信号只在本进程生效 | 见 `runtime-behavior.md` |
 

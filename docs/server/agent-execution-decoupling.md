@@ -99,6 +99,7 @@
 - 请求中的旧字段继续按原名接受，内部存为 `agent_runs.client_run_id`，并原样放进执行器 payload 的 `run_id`。
 - API、SSE、`agent_runs.id` 中的 `run_id` 一律指执行标识。
 - 新增可选请求字段 `client_run_id`；落库时 `client_run_id = body.client_run_id or body.run_id`，即两者同时出现时以 `client_run_id` 为准。旧字段标记为 deprecated，但本期不移除。
+- **重放语义（migration `018`）**：`agent_runs (created_by, client_run_id)` 上建有部分唯一索引（`client_run_id IS NOT NULL`）。同一用户重复提交相同 key 时，`POST /agent` 不再创建新的会话/用户消息/run，而是返回原 run 的 `conversation`、`user_message`、`run_id`，响应与外层 SSE `meta` 均带 `deduplicated: true`；客户端据此恢复对原 run 的订阅。并发重复请求由唯一索引裁决，落败方回滚后读回已有 run。历史重复数据在迁移时保留最早一行，其余行的 key 置 `NULL`。
 
 ### 3.2 Run 状态机
 
@@ -533,7 +534,7 @@ legacy 路径只用于回滚和兼容，不应与后台路径混跑（见第 12.
 | `user_message_id` | `UUID NULL FK conversation_messages ON DELETE SET NULL` | 本轮用户消息 |
 | `assistant_message_id` | `UUID NULL` | 预生成的助手消息 id；终态时按此 id 落库。**不建外键** |
 | `request` | `JSONB NOT NULL DEFAULT '{}'` | 执行器 payload 快照；ORM 属性名为 `request_payload` |
-| `client_run_id` | `VARCHAR(255) NULL` | 旧请求 `run_id`（mem0 scope）或显式 `client_run_id` |
+| `client_run_id` | `VARCHAR(255) NULL` | 旧请求 `run_id`（mem0 scope）或显式 `client_run_id`；`(created_by, client_run_id)` 部分唯一，作请求级幂等键 |
 | `agent_id` | `VARCHAR(255) NULL` | 会话/请求指定的 agent |
 | `status` | `VARCHAR(20) NOT NULL DEFAULT 'queued'` | CHECK 六态 |
 | `error_code` | `VARCHAR(64) NULL` | 终态错误码 |

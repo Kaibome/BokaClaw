@@ -89,6 +89,43 @@ class BackgroundTurn:
     assistant_id: uuid.UUID
     conversation_uuid: uuid.UUID
     payload: dict[str, Any]
+    deduplicated: bool = False
+
+
+def _replay_background_turn(db, body: AgentInvokeRequest, user: User) -> BackgroundTurn | None:
+    """Return the run already created for this client id, if any.
+
+    ``client_run_id`` (falling back to ``run_id``) is the client's idempotency
+    key. A replay must not append another user message or start a second run;
+    it returns the original turn so the caller can resubscribe instead.
+    """
+
+    key = body.client_run_id or body.run_id
+    if not key:
+        return None
+    run = db.scalar(
+        select(AgentRun)
+        .where(AgentRun.created_by == user.id, AgentRun.client_run_id == key)
+        .order_by(AgentRun.created_at.asc())
+        .limit(1)
+    )
+    if run is None:
+        return None
+    if run.user_message_id is None or run.assistant_message_id is None:
+        return None
+    user_message = db.get(ConversationMessage, run.user_message_id)
+    if user_message is None:
+        return None
+    conversation = get_owned_conversation(db, run.conversation_id, user.id)
+    return BackgroundTurn(
+        conversation=serialize_conversation(conversation),
+        user_message=serialize_message(user_message),
+        run_id=run.id,
+        assistant_id=run.assistant_message_id,
+        conversation_uuid=run.conversation_id,
+        payload=dict(run.request_payload or {}),
+        deduplicated=True,
+    )
 
 
 def _prepare_turn(body: AgentInvokeRequest, user: User, history_limit: int) -> PreparedTurn:
@@ -128,6 +165,15 @@ def _create_background_turn(body: AgentInvokeRequest, user: User, history_limit:
     pass that check at the same time.
     """
     with SessionLocal() as db:
+        replay = _replay_background_turn(db, body, user)
+        if replay is not None:
+            logger.info(
+                "agent run replayed run_id=%s client_run_id=%s",
+                replay.run_id,
+                body.client_run_id or body.run_id,
+            )
+            return replay
+
         if body.conversation_id is not None:
             conversation = get_owned_conversation(db, body.conversation_id, user.id)
             active = _active_run_for(db, conversation.id)
@@ -198,6 +244,16 @@ def _create_background_turn(body: AgentInvokeRequest, user: User, history_limit:
         except IntegrityError as exc:
             db.rollback()
             with SessionLocal() as probe:
+                # Two requests with the same client id can race past the lookup
+                # above; the unique index settles it. Return the winner.
+                replay = _replay_background_turn(probe, body, user)
+                if replay is not None:
+                    logger.info(
+                        "agent run replay won the race run_id=%s client_run_id=%s",
+                        replay.run_id,
+                        body.client_run_id or body.run_id,
+                    )
+                    return replay
                 active = _active_run_for(probe, conversation_id)
             if active is not None:
                 raise ActiveRunConflict(active.id, active.conversation_id) from exc
@@ -373,6 +429,7 @@ def _meta_for_turn(turn: BackgroundTurn, subscription: RunSubscription) -> dict[
         "assistant_message_id": str(turn.assistant_id),
         "status": subscription.initial_status,
         "last_seq": subscription.initial_last_seq,
+        "deduplicated": turn.deduplicated,
         "run": {
             "id": str(turn.run_id),
             "conversation_id": str(turn.conversation_uuid),
@@ -523,6 +580,7 @@ async def _complete_background_run(
             user_message=serialize_message(user_message) if user_message is not None else turn.user_message,
             message=serialize_message(message),
             run_id=str(run.id),
+            deduplicated=turn.deduplicated,
         )
 
     if run.status in ("queued", "running"):

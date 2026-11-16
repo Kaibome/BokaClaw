@@ -52,6 +52,8 @@ interface MetaPayload extends BasePayload {
   status?: RunStatus;
   last_seq?: number;
   assistant_message_id?: string | null;
+  /** The server reused an existing run for this client_run_id. */
+  deduplicated?: boolean;
   conversation?: Conversation;
   user_message?: ChatMessage;
   message?: ChatMessage | null;

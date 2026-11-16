@@ -316,6 +316,16 @@ The stream emits `meta`, `message.delta`, `message.completed`, and `done`, with 
 | `AGENT_COMPRESSION_MODEL` | `AGENT_MODEL` | Model used only for compression summaries. |
 | `AGENT_TOOL_RESULT_MAX_CHARS` | `16000` | Per-tool-result cap in the model view. |
 | `AGENT_TOOL_CONCURRENCY` | `1` | Parallel read-only tool calls (1 disables). |
+| `AGENT_TOOL_RETRY_ENABLED` | `true` | Retry transient tool failures (read-only tools opt in automatically). |
+| `AGENT_TOOL_RETRY_MAX_ATTEMPTS` | `3` | Attempts per logical tool call, including the first. |
+| `AGENT_TOOL_RETRY_BASE_DELAY_SECONDS` | `0.4` | Initial backoff delay. |
+| `AGENT_TOOL_RETRY_MAX_DELAY_SECONDS` | `8` | Backoff cap. |
+| `AGENT_TOOL_RETRY_MAX_ELAPSED_SECONDS` | `15` | Retry budget per logical call, including waits. |
+| `AGENT_TOOL_RETRY_JITTER` | `0.3` | Random reduction applied to each backoff (0–1). |
+| `AGENT_TOOL_BREAKER_ENABLED` | `true` | Fail a tool fast after repeated transient failures. |
+| `AGENT_TOOL_BREAKER_FAILURE_THRESHOLD` | `5` | Consecutive transient failures before the breaker opens. |
+| `AGENT_TOOL_BREAKER_COOLDOWN_SECONDS` | `60` | Open duration before one probe is allowed. |
+| `AGENT_TOOL_BREAKER_MAX_COOLDOWN_SECONDS` | `600` | Cap for cooldown growth after failed probes. |
 | `AGENT_USER_INPUT_ENABLED` | `true` | Register `ask_user`. |
 | `AGENT_USER_INPUT_TIMEOUT_SECONDS` | `240` | How long one question waits for an answer. |
 | `AGENT_FACT_LEDGER` | `true` | Keep a run-scoped fact ledger in the model view. |

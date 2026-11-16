@@ -149,6 +149,28 @@ def _tool_span_id(tool_call_id: str) -> str:
     return f"tool:{digest}"
 
 
+def _tool_resilience_attributes(event: AgentToolResult) -> dict[str, Any]:
+    """Retry and breaker details from ``ToolResult.metadata`` for the tool span."""
+
+    metadata = event.metadata or {}
+    attributes: dict[str, Any] = {}
+    attempts = metadata.get("attempts")
+    if isinstance(attempts, int) and not isinstance(attempts, bool):
+        attributes["attempts"] = attempts
+    retry_errors = metadata.get("retry_errors")
+    if isinstance(retry_errors, list):
+        attributes["retry_error_count"] = len(retry_errors)
+    if metadata.get("retry_exhausted") is True:
+        attributes["retry_exhausted"] = True
+    breaker = metadata.get("breaker")
+    if isinstance(breaker, str):
+        attributes["breaker_state"] = breaker
+    duration = metadata.get("duration_ms")
+    if isinstance(duration, int) and not isinstance(duration, bool):
+        attributes["tool_duration_ms"] = duration
+    return attributes
+
+
 # ``agent_run_spans.span_id`` is VARCHAR(128); child ids stay well below it.
 _MAX_SPAN_ID_CHARS = 120
 _SUBAGENT_SPAN_STATUS = {
@@ -502,8 +524,12 @@ class SpanRecorder:
             if event.status in {"completed", "failed", "aborted"}
             else ("failed" if event.is_error else "completed")
         )
+        resilience = _tool_resilience_attributes(event)
+        span["attributes"].update(resilience)
         if event.duration_ms is not None:
             span["duration_ms"] = event.duration_ms
+        elif "tool_duration_ms" in resilience:
+            span["duration_ms"] = resilience["tool_duration_ms"]
         self._close_span(span, span["status"], utcnow())
         if event.is_error:
             span["error"] = _bounded(event.content, self.options.max_bytes)

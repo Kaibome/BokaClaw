@@ -48,6 +48,9 @@ class AgentToolResult:
     iteration: int = 0
     status: str = "completed"
     duration_ms: int | None = None
+    # Retry / breaker details produced by the SDK; never sent to the model and
+    # not persisted as an event type (tool span attributes pick them up).
+    metadata: dict[str, Any] | None = None
 
 
 @dataclass

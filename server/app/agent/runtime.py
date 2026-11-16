@@ -184,6 +184,16 @@ class LocalAgentConfig:
     context_compression: str = "summary"
     tool_result_max_chars: Optional[int] = None
     tool_concurrency: int = 1
+    tool_retry_enabled: bool = True
+    tool_retry_max_attempts: int = 3
+    tool_retry_base_delay: float = 0.4
+    tool_retry_max_delay: float = 8.0
+    tool_retry_max_elapsed: float = 15.0
+    tool_retry_jitter: float = 0.3
+    tool_breaker_enabled: bool = True
+    tool_breaker_failure_threshold: int = 5
+    tool_breaker_cooldown_seconds: float = 60.0
+    tool_breaker_max_cooldown_seconds: float = 600.0
     user_input_enabled: bool = True
     user_input_timeout_seconds: int = 240
     fact_ledger: bool = True
@@ -293,6 +303,11 @@ def load_local_config() -> Optional[LocalAgentConfig]:
     subagent_verification = (os.getenv("AGENT_SUBAGENT_VERIFICATION") or "spot_check").strip().lower()
     if subagent_verification not in {"none", "spot_check", "strict"}:
         subagent_verification = "spot_check"
+    breaker_cooldown = max(1.0, min(3_600.0, _env_float("AGENT_TOOL_BREAKER_COOLDOWN_SECONDS", 60.0)))
+    breaker_max_cooldown = max(
+        breaker_cooldown,
+        min(86_400.0, _env_float("AGENT_TOOL_BREAKER_MAX_COOLDOWN_SECONDS", 600.0)),
+    )
     return LocalAgentConfig(
         model=str(model),
         api_key=str(api_key),
@@ -311,6 +326,16 @@ def load_local_config() -> Optional[LocalAgentConfig]:
         context_compression=_env_compression_mode("AGENT_CONTEXT_COMPRESSION"),
         tool_result_max_chars=_env_budget("AGENT_TOOL_RESULT_MAX_CHARS", 16_000),
         tool_concurrency=max(1, min(8, _env_int("AGENT_TOOL_CONCURRENCY", 1))),
+        tool_retry_enabled=_env_flag("AGENT_TOOL_RETRY_ENABLED", True),
+        tool_retry_max_attempts=max(1, min(10, _env_int("AGENT_TOOL_RETRY_MAX_ATTEMPTS", 3))),
+        tool_retry_base_delay=max(0.0, min(60.0, _env_float("AGENT_TOOL_RETRY_BASE_DELAY_SECONDS", 0.4))),
+        tool_retry_max_delay=max(0.0, min(120.0, _env_float("AGENT_TOOL_RETRY_MAX_DELAY_SECONDS", 8.0))),
+        tool_retry_max_elapsed=max(0.0, min(300.0, _env_float("AGENT_TOOL_RETRY_MAX_ELAPSED_SECONDS", 15.0))),
+        tool_retry_jitter=min(1.0, max(0.0, _env_float("AGENT_TOOL_RETRY_JITTER", 0.3))),
+        tool_breaker_enabled=_env_flag("AGENT_TOOL_BREAKER_ENABLED", True),
+        tool_breaker_failure_threshold=max(1, min(100, _env_int("AGENT_TOOL_BREAKER_FAILURE_THRESHOLD", 5))),
+        tool_breaker_cooldown_seconds=breaker_cooldown,
+        tool_breaker_max_cooldown_seconds=breaker_max_cooldown,
         user_input_enabled=_env_flag("AGENT_USER_INPUT_ENABLED", True),
         user_input_timeout_seconds=max(5, min(600, _env_int("AGENT_USER_INPUT_TIMEOUT_SECONDS", 240))),
         fact_ledger=_env_flag("AGENT_FACT_LEDGER", True),
@@ -970,6 +995,7 @@ def _bridge_event(event: Any, put: Callable[[str, Any], None], *, model: str | N
     except (TypeError, ValueError):
         duration_ms = None
 
+    metadata = data.get("metadata")
     put(
         "tool_result",
         AgentToolResult(
@@ -980,6 +1006,7 @@ def _bridge_event(event: Any, put: Callable[[str, Any], None], *, model: str | N
             iteration=iteration,
             status=status,
             duration_ms=duration_ms,
+            metadata=dict(metadata) if isinstance(metadata, dict) else None,
         ),
     )
 
@@ -1063,6 +1090,16 @@ def build_runtime(
         context_compression=config.context_compression,
         tool_result_max_chars=config.tool_result_max_chars,
         tool_concurrency=config.tool_concurrency,
+        tool_retry_enabled=config.tool_retry_enabled,
+        tool_retry_max_attempts=config.tool_retry_max_attempts,
+        tool_retry_base_delay=config.tool_retry_base_delay,
+        tool_retry_max_delay=config.tool_retry_max_delay,
+        tool_retry_max_elapsed=config.tool_retry_max_elapsed,
+        tool_retry_jitter=config.tool_retry_jitter,
+        tool_breaker_enabled=config.tool_breaker_enabled,
+        tool_breaker_failure_threshold=config.tool_breaker_failure_threshold,
+        tool_breaker_cooldown_seconds=config.tool_breaker_cooldown_seconds,
+        tool_breaker_max_cooldown_seconds=config.tool_breaker_max_cooldown_seconds,
         fact_ledger=config.fact_ledger,
         fact_ledger_max_chars=config.fact_ledger_max_chars,
         step_budget_notice=config.step_budget_notice,

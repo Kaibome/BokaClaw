@@ -16,6 +16,7 @@ import app.agent.dev_tools as agent_dev_tools  # noqa: E402
 import app.agent.executor as agent_executor  # noqa: E402
 import app.agent.executor_app as executor_app  # noqa: E402
 from app.agent.dev_tools import DevToolConfig, execute_command, load_dev_tool_config  # noqa: E402
+from bokaclaw_agent.tools import CURRENT_IDEMPOTENCY_KEY  # noqa: E402
 
 
 def _config(workspace: Path, **overrides) -> DevToolConfig:
@@ -136,17 +137,21 @@ def test_monitor_round_trip(tmp_path):
 def test_commands_are_delegated_when_executor_is_configured(tmp_path, monkeypatch):
     calls = []
 
-    def fake_run(config, command, description="", timeout_seconds=120, *, shell="bash"):
-        calls.append((config.url, command, description, timeout_seconds, shell))
+    def fake_run(config, command, description="", timeout_seconds=120, *, shell="bash", idempotency_key=None):
+        calls.append((config.url, command, description, timeout_seconds, shell, idempotency_key))
         return {"exit_code": 0, "stdout": "remote", "stderr": "", "timed_out": False, "truncated": False}
 
     monkeypatch.setattr(agent_executor, "run_command", fake_run)
     config = _config(tmp_path, executor=agent_executor.ExecutorConfig(url="http://executor:8099"))
 
-    result = execute_command(config, "echo hi", "desc", 30, shell="bash")
+    token = CURRENT_IDEMPOTENCY_KEY.set("run-token:call-1")
+    try:
+        result = execute_command(config, "echo hi", "desc", 30, shell="bash")
+    finally:
+        CURRENT_IDEMPOTENCY_KEY.reset(token)
 
     assert result["stdout"] == "remote"
-    assert calls == [("http://executor:8099", "echo hi", "desc", 30, "bash")]
+    assert calls == [("http://executor:8099", "echo hi", "desc", 30, "bash", "run-token:call-1")]
 
 
 def test_commands_stay_local_without_executor(tmp_path):

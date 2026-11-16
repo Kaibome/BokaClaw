@@ -12,6 +12,7 @@ run, and the workspace directory is created on first use.
 """
 
 import atexit
+import contextlib
 import fnmatch
 import ipaddress
 import json
@@ -23,6 +24,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -36,6 +38,8 @@ from xml.etree import ElementTree
 import httpx
 
 from app.agent import executor as agent_executor
+from bokaclaw_agent import TransientToolError
+from bokaclaw_agent.tools import CURRENT_IDEMPOTENCY_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -51,8 +55,8 @@ BING_RSS_ENDPOINT = "https://www.bing.com/search"
 MAX_READ_LINES = 5000
 MAX_MONITOR_LINES = 5000
 MAX_REDIRECTS = 5
-# Transient rate limits (HTTP 429) are retried with Retry-After/exponential backoff.
-MAX_RATE_LIMIT_RETRIES = 3
+# HTTP 429 handling: the SDK retry layer owns the backoff, so this module only
+# converts Retry-After into the delay it should respect.
 RATE_LIMIT_DEFAULT_DELAY_SECONDS = 1.0
 RATE_LIMIT_MAX_DELAY_SECONDS = 10.0
 # A repeated WebFetch returns this much of the cached page unless full=True.
@@ -212,6 +216,30 @@ def _truncate(text: str, max_bytes: int) -> tuple[str, bool]:
     head = encoded[: budget // 2].decode("utf-8", errors="ignore")
     tail = encoded[-(budget - budget // 2) :].decode("utf-8", errors="ignore")
     return f"{head}{marker}{tail}", True
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Write ``content`` so readers never see a half-written file.
+
+    The payload goes to a temporary file in the same directory, is fsynced, and
+    replaces the target atomically. A failure leaves the original untouched.
+    An overwrite keeps the target's permission bits; a new file gets 0644.
+    """
+
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        mode = (path.stat().st_mode & 0o7777) if path.exists() else 0o644
+        os.chmod(tmp_path, mode)
+        os.replace(tmp_path, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp_path.unlink()
+        raise
 
 
 def _read_text_file(path: Path, max_bytes: int) -> str:
@@ -527,7 +555,6 @@ def _fetch_url_uncached(config: DevToolConfig, url: str) -> Dict[str, Any]:
 
     with httpx.Client(timeout=config.web_timeout, follow_redirects=False) as client:
         redirects = 0
-        rate_limited = 0
         while True:
             _validate_public_url(current, config.web_allow_private)
             try:
@@ -542,15 +569,18 @@ def _fetch_url_uncached(config: DevToolConfig, url: str) -> Dict[str, Any]:
                         current = urljoin(current, location)
                         continue
                     if streamed.status_code == 429:
-                        rate_limited += 1
-                        if rate_limited > MAX_RATE_LIMIT_RETRIES:
-                            raise RuntimeError(
-                                f"request to {current} was rate limited (HTTP 429) after "
-                                f"{MAX_RATE_LIMIT_RETRIES} retries; wait and retry later, or use WebSearch "
-                                "to find another source."
-                            )
-                        time.sleep(_retry_after_seconds(streamed.headers.get("retry-after"), rate_limited))
-                        continue
+                        # The SDK retry layer owns the backoff; pass its delay
+                        # through instead of sleeping here.
+                        raise TransientToolError(
+                            f"request to {current} was rate limited (HTTP 429); retry later, "
+                            "or use WebSearch to find another source.",
+                            retry_after=_retry_after_seconds(streamed.headers.get("retry-after"), 1),
+                        )
+                    if streamed.status_code >= 500:
+                        raise TransientToolError(
+                            f"request to {current} failed with HTTP {streamed.status_code}; "
+                            "the server is temporarily unavailable."
+                        )
                     if streamed.status_code >= 400:
                         raise RuntimeError(
                             f"request to {current} failed with HTTP {streamed.status_code}; the page does "
@@ -569,7 +599,7 @@ def _fetch_url_uncached(config: DevToolConfig, url: str) -> Dict[str, Any]:
                     response = streamed
                     break
             except httpx.HTTPError as exc:
-                raise RuntimeError(f"could not fetch {current}: {exc}") from exc
+                raise TransientToolError(f"could not fetch {current}: {exc}") from exc
 
     if response is None:  # pragma: no cover - loop always breaks or raises
         raise RuntimeError("request produced no response")
@@ -665,6 +695,16 @@ def _request_search(
     with httpx.Client(timeout=config.web_timeout, follow_redirects=True) as client:
         try:
             with client.stream(method, url, params=params, headers=_SEARCH_HEADERS) as streamed:
+                if streamed.status_code == 429:
+                    raise TransientToolError(
+                        f"search request to {streamed.url} was rate limited (HTTP 429); retry later.",
+                        retry_after=_retry_after_seconds(streamed.headers.get("retry-after"), 1),
+                    )
+                if streamed.status_code >= 500:
+                    raise TransientToolError(
+                        f"search request to {streamed.url} failed with HTTP {streamed.status_code}; "
+                        "the search endpoint is temporarily unavailable."
+                    )
                 if streamed.status_code >= 400:
                     raise RuntimeError(f"search request to {streamed.url} failed with HTTP {streamed.status_code}")
                 chunks: List[bytes] = []
@@ -677,7 +717,7 @@ def _request_search(
                 body = b"".join(chunks)
                 return body.decode(streamed.encoding or "utf-8", errors="replace")
         except httpx.HTTPError as exc:
-            raise RuntimeError(f"could not reach the search endpoint {url}: {exc}") from exc
+            raise TransientToolError(f"could not reach the search endpoint {url}: {exc}") from exc
 
 
 def _search_web(config: DevToolConfig, query: str, max_results: int) -> Dict[str, Any]:
@@ -888,6 +928,7 @@ def execute_command(
             description,
             timeout_seconds,
             shell=shell,
+            idempotency_key=CURRENT_IDEMPOTENCY_KEY.get() or None,
         )
     return run_command(config, command, description, timeout_seconds, shell=shell)
 
@@ -909,6 +950,7 @@ def execute_monitor(
             monitor_id,
             wait_seconds,
             pattern,
+            idempotency_key=CURRENT_IDEMPOTENCY_KEY.get() or None,
         )
     return monitor_action(config, action, command, monitor_id, wait_seconds, pattern)
 
@@ -1009,7 +1051,7 @@ def build_dev_tools(sdk, config: Optional[DevToolConfig] = None):
             raise ValueError(f"content is too large to write (limit {cfg.max_file_bytes} bytes)")
         path.parent.mkdir(parents=True, exist_ok=True)
         existed = path.exists()
-        path.write_text(content, encoding="utf-8")
+        _atomic_write_text(path, content)
         return {
             "path": _relative(cfg, path),
             "bytes": len(content.encode("utf-8")),
@@ -1039,7 +1081,7 @@ def build_dev_tools(sdk, config: Optional[DevToolConfig] = None):
             raise ValueError(f"old_string occurs {occurrences} times; add more context or pass replace_all=true")
 
         updated = text.replace(old_string, new_string) if replace_all else text.replace(old_string, new_string, 1)
-        path.write_text(updated, encoding="utf-8")
+        _atomic_write_text(path, updated)
         return {
             "path": _relative(cfg, path),
             "replacements": occurrences if replace_all else 1,
@@ -1104,7 +1146,7 @@ def build_dev_tools(sdk, config: Optional[DevToolConfig] = None):
                     cell.pop("outputs", None)
                 position = index
 
-        path.write_text(json.dumps(document, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+        _atomic_write_text(path, json.dumps(document, ensure_ascii=False, indent=1) + "\n")
         return {
             "path": _relative(cfg, path),
             "edit_mode": edit_mode,
@@ -1297,8 +1339,10 @@ def build_dev_tools(sdk, config: Optional[DevToolConfig] = None):
         sdk.tool(NotebookEdit, name="NotebookEdit"),
         sdk.tool(Glob, name="Glob", effect="read"),
         sdk.tool(Grep, name="Grep", effect="read"),
-        sdk.tool(WebFetch, name="WebFetch", effect="external", concurrency_safe=True),
-        sdk.tool(WebSearch, name="WebSearch", effect="external", concurrency_safe=True),
+        # GET requests are idempotent; transient failures and 429s are retried
+        # by the SDK with the delay the server asked for.
+        sdk.tool(WebFetch, name="WebFetch", effect="external", concurrency_safe=True, retry=True),
+        sdk.tool(WebSearch, name="WebSearch", effect="external", concurrency_safe=True, retry=True),
     ]
 
     if cfg.office_tools:

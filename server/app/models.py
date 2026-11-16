@@ -136,6 +136,15 @@ class AgentRun(Base):
             unique=True,
             postgresql_where=text("status IN ('queued', 'running')"),
         ),
+        # Client idempotency: one run per (user, client_run_id). Partial so
+        # requests without a client id are unaffected.
+        Index(
+            "uq_agent_runs_client_run_id",
+            "created_by",
+            "client_run_id",
+            unique=True,
+            postgresql_where=text("client_run_id IS NOT NULL"),
+        ),
         Index("ix_agent_runs_created_by_created", "created_by", "created_at"),
         Index("ix_agent_runs_status_heartbeat", "status", "heartbeat_at"),
     )

@@ -159,6 +159,55 @@ Supported annotations include primitives, `Optional`, `Literal`, `Enum`, `list`,
 
 Tool failures are returned to the model as `{"error": ...}` tool messages by default, so the agent can recover. Set `AgentConfig(tool_error_mode="raise")` to surface them instead. Unknown tools, invalid JSON arguments, and validation failures are handled the same way.
 
+Failures are classified at the tool boundary. A tool that fails for a reason a
+retry could fix (timeout, connection reset, HTTP 429/5xx) should raise
+`TransientToolError`, optionally with `retry_after=...`; `Tool.invoke` then wraps
+it in a `ToolExecutionError` carrying `kind="transient"`, `cause_type`, and
+`retry_after`. Deterministic failures (`ValueError`, `TypeError`,
+`PermissionError`, ...) become `kind="permanent"`; everything else is
+`kind="unknown"`. Dispatch treats `unknown` as non-retryable.
+
+### Retries and circuit breakers
+
+Transient failures are retried only for tools that opt in. Read-only tools
+(`effect="read"`) opt in automatically; `write` and `external` tools must pass
+`retry=True` or a `RetryPolicy`:
+
+```python
+from bokaclaw_agent import RetryPolicy, TransientToolError
+
+@tool(effect="external", retry=RetryPolicy(max_attempts=2, base_delay=0.5))
+def fetch_price(sku: str) -> float:
+    """Fetch a price."""
+    raise TransientToolError("upstream timeout", retry_after=1.0)
+
+config = AgentConfig(
+    tool_retry_max_attempts=3,
+    tool_retry_base_delay=0.4,
+    tool_retry_max_elapsed=15.0,
+    tool_breaker_failure_threshold=5,
+    tool_breaker_cooldown_seconds=60,
+)
+```
+
+One logical call keeps one `tool_call_id` and produces one tool message: retries
+never look like extra calls to the model. Attempt details land in
+`ToolResult.metadata` (`attempts`, `retry_errors`, `retry_delays_ms`,
+`retry_exhausted`), and the backoff wait honours `cancel_event`.
+
+While a tool runs, `bokaclaw_agent.tools.CURRENT_IDEMPOTENCY_KEY` holds
+`<run token>:<tool_call_id>`, which stays the same across retries. A remote
+executor should key its own deduplication on it so a retried command cannot run
+twice.
+
+After `tool_breaker_failure_threshold` consecutive transient failures the
+process-wide breaker for that tool name opens: calls fail immediately with
+`metadata.breaker == "open"` until the cooldown elapses, then a single probe is
+admitted. A failed probe doubles the cooldown (capped by
+`tool_breaker_max_cooldown_seconds`). Argument and permission errors never open
+a breaker. Set `tool_breaker_enabled=False` to disable breakers;
+`retry=False` disables retries for a tool but not its breaker.
+
 Async tools are supported:
 
 ```python

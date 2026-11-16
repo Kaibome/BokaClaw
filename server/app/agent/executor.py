@@ -20,7 +20,13 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
+from bokaclaw_agent import TransientToolError
+
 DEFAULT_TIMEOUT_SECONDS = 120.0
+
+# A retried call may reach an executor that was restarting, so transport
+# failures and gateway errors are worth another attempt.
+_TRANSIENT_STATUS = frozenset({429, 500, 502, 503, 504})
 
 
 def _env_float(name: str, default: float) -> float:
@@ -68,10 +74,22 @@ def _post(config: ExecutorConfig, path: str, payload: Dict[str, Any], *, timeout
         with httpx.Client(timeout=timeout) as client:
             response = client.post(f"{config.url}{path}", json=payload, headers=headers)
     except httpx.TimeoutException as exc:
-        raise RuntimeError(f"Shell executor timed out after {timeout:.0f}s") from exc
+        raise TransientToolError(f"Shell executor timed out after {timeout:.0f}s") from exc
     except httpx.HTTPError as exc:
-        raise RuntimeError(f"Shell executor is unreachable: {exc}") from exc
+        raise TransientToolError(f"Shell executor is unreachable: {exc}") from exc
 
+    if response.status_code in _TRANSIENT_STATUS:
+        retry_after = None
+        header = response.headers.get("retry-after")
+        if header:
+            try:
+                retry_after = max(0.0, float(header.strip()))
+            except ValueError:
+                retry_after = None
+        raise TransientToolError(
+            f"Shell executor is temporarily unavailable ({response.status_code}): {_error_detail(response)}",
+            retry_after=retry_after,
+        )
     if response.status_code >= 400:
         raise RuntimeError(f"Shell executor rejected the request ({response.status_code}): {_error_detail(response)}")
     try:
@@ -87,8 +105,13 @@ def run_command(
     timeout_seconds: float = 120,
     *,
     shell: str = "bash",
+    idempotency_key: str | None = None,
 ) -> Dict[str, Any]:
-    """Run one command in the executor container and return its result."""
+    """Run one command in the executor container and return its result.
+
+    ``idempotency_key`` is stable across retries of one logical tool call, so
+    the executor can collapse a duplicate request into the first response.
+    """
     request_timeout = max(config.timeout, float(timeout_seconds) + 15.0)
     payload = {
         "command": command,
@@ -96,6 +119,8 @@ def run_command(
         "timeout_seconds": int(max(1.0, float(timeout_seconds))),
         "shell": shell,
     }
+    if idempotency_key:
+        payload["idempotency_key"] = idempotency_key
     return _post(config, "/exec", payload, timeout=request_timeout)
 
 
@@ -133,8 +158,14 @@ def monitor_action(
     monitor_id: str = "",
     wait_seconds: float = 1.0,
     pattern: str = "",
+    *,
+    idempotency_key: str | None = None,
 ) -> Dict[str, Any]:
-    """Start, poll, or stop a long-lived command in the executor container."""
+    """Start, poll, or stop a long-lived command in the executor container.
+
+    ``idempotency_key`` matters for ``action="start"``: without it a retried
+    start launches a second background command.
+    """
     request_timeout = max(config.timeout, float(wait_seconds) + 15.0)
     payload = {
         "action": action,
@@ -143,4 +174,6 @@ def monitor_action(
         "wait_seconds": float(wait_seconds),
         "pattern": pattern,
     }
+    if idempotency_key:
+        payload["idempotency_key"] = idempotency_key
     return _post(config, "/monitor", payload, timeout=request_timeout)

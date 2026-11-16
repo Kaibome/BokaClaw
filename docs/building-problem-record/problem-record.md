@@ -712,9 +712,9 @@
 
 ## P-23 工具调用缺少工程化重试、熔断与幂等
 
-- **状态**：未解决
+- **状态**：已解决
 - **发现时间**：2026-11-07
-- **解决时间**：—
+- **解决时间**：2026-11-16
 - **场景**：梳理 `bokaclaw-agent` 工具失败链路，确认工具失败后的重试、熔断与幂等保证。
 - **证据**：
   - `ToolRegistry.invoke` 只把异常转成 `ToolResult(is_error=True)`，没有任何重试逻辑（`agent-loop/src/bokaclaw_agent/tools/registry.py:293-322`）；server 使用 `tool_error_mode="return"`，run 不会因工具失败中断；
@@ -727,8 +727,22 @@
   1. 设计上把“失败后是否重试”交给模型自愈，框架只负责 run 级封顶；
   2. 错误结果不参与 `ProgressGuard` 的证据计算（`is_error` → 无证据），所以连续失败最终表现为 `no_progress`，而不是按工具熔断；
   3. 工具协议里的 `tool_call_id` 被当作消息配对 id，而不是可复用的幂等键。
-- **待办**：错误分类 + 有界重试（退避/抖动，只对幂等工具开启）+ `/exec` 幂等键 + per-tool 失败计数与半开试探 + `client_run_id` 唯一索引。详见 `docs/agent-loop/tool-execution.md` §8.4。
-- **可复用结论**：把重试交给模型等于放弃可控性；重试、熔断、幂等是三个独立机制，缺少任一环都会在长工具链上放大失败成本。
+- **解决措施**（方案见 `docs/agent-loop/tool-resilience-plan.md`，实现摘要见 `docs/agent-loop/tool-execution.md` §8.4）：
+  - **错误分类**：新增 `tools/errors.py` 的 `classify_tool_error`（transient / permanent / unknown，unknown 默认不重试）；工具抛 `TransientToolError(retry_after=...)` 声明可重试；`Tool.invoke` 在边界把 `kind` / `cause_type` / `retry_after` 填进 `ToolExecutionError`，不做字符串匹配。
+  - **有界重试**：`tools/retry.py` 的 `RetryPolicy`（attempts 3 / base 0.4s / max 8s / elapsed 15s / jitter 0.3）+ full jitter；在 `ToolRegistry.invoke` 内执行，`tool_call_id` 不变、只产出一条 `TOOL_RESULT`、`ProgressGuard` 只记一次；退避用 `cancel_event.wait()` 可中断。默认只对 `effect="read"` 自动开启，`WebFetch` / `WebSearch` 显式 `retry=True`，写类、shell、Monitor、子 Agent 默认关闭。
+  - **熔断**：`tools/breaker.py` 提供进程级、按工具名的 closed/open/half_open 状态机；只统计 transient 失败，一次逻辑调用最多计一次，失败探测使冷却翻倍（上限 600s）；open 时快速失败并返回剩余冷却时间。
+  - **幂等**：`Write` / `Edit` / `NotebookEdit` 改为临时文件 + fsync + `os.replace`（保留权限位）；`/exec` 与 `/monitor start` 支持 `Idempotency-Key`（`<run token>:<tool_call_id>`，run token 每 run 轮换），executor 进程内 TTL 600s / 512 条去重缓存，传输失败不入缓存；migration `018` 增加 `(created_by, client_run_id)` 部分唯一索引，`POST /agent` 重复请求返回原 run 并在响应与 SSE `meta` 标记 `deduplicated`。
+  - **可观测**：`ToolResult.metadata` 与 tool span attributes 记录 `attempts` / `retry_errors` / `retry_exhausted` / `breaker_state` / `duration_ms`，不新增 `agent_run_events` 类型。
+  - **配置**：SDK `AgentConfig` 新增 `tool_retry_*` / `tool_breaker_*`；server 新增 `AGENT_TOOL_RETRY_*` / `AGENT_TOOL_BREAKER_*` / `AGENT_EXECUTOR_IDEMPOTENCY_*`，同步 `.env.example` 与两个 README。
+- **解决后效果**：agent-loop **246 passed / 1 skipped**（新增错误分类、重试、熔断三组测试，含取消可打断、单条结果与 ProgressGuard 口径回归），`ruff check` / `format --check` 通过；server agent 相关 **221 passed**、`server/tests` **61 passed**、`ruff` 通过；dashboard `tsc --noEmit` 与 Prettier 通过；Alembic head 为 `018`。`test_server_auth.py` / `test_server_params.py` 在无 Postgres 的临时测试容器里会等待数据库，属环境限制，未纳入本次验证。
+
+真实环境复测（重建 `bokaclaw-server:test` / `bokaclaw-executor:test`，`RECREATE=1 start-stack.sh` 重启四容器）：
+
+- **迁移**：隔离 scratch 库完成 `upgrade → downgrade 017 → upgrade`；线上库由 `start-stack.sh` 执行 `017 -> 018`，`alembic_version=018`，索引 `uq_agent_runs_client_run_id` 存在；
+- **executor 幂等**：同 `Idempotency-Key` 连发两次 `/exec`，第二次返回缓存响应、命令只执行一次（计数文件 1 行）；换 key 后再次执行（2 行）；
+- **请求重放**：同一 `client_run_id` 两次 `POST /agent` 返回同一 run / conversation，第二次 `deduplicated=true`，库中仅 1 行；
+- **工具重试 / span 桥接**：`WebFetch` 命中假 429 服务器时 run 正常完成，tool span 记录 `attempts=2`、`retry_error_count=1`、`duration_ms=482`；普通 `Glob` 调用记录 `attempts=1`、`tool_duration_ms=21`，证明 `ToolResult.metadata → tool span attributes` 全链路生效。
+- **可复用结论**：把重试交给模型等于放弃可控性；重试、熔断、幂等是三个独立机制，缺少任一环都会在长工具链上放大失败成本。重试必须绑定「一次逻辑调用」而不是「一次尝试」，否则协议配对与 no-progress 预算都会被污染；`unknown` 类错误默认不重试是正确的失败闭合方向。
 
 ---
 
@@ -1096,3 +1110,4 @@
 | 2026-11-15 | P-37 部分缓解：WebFetch 增加 429 退避重试，benchmark prompt 增加 `full=true`/批量 API 指引；重跑 `50f58759` 在 492,711 token / 497.7s 内完成并覆盖 31 页（90 次 WebFetch、72 唯一 URL、3 次 429），但答案仍错（7 vs 3，把含链接的页面数当成引用次数）；`0512426f` 未重跑 |
 | 2026-11-15 | 追加并解决 P-38：Bing RSS 对长中文查询返回无关结果；本地启动 `searxng/searxng` 并接入 `bokaclaw-net`，保留 DuckDuckGo/Google/Brave/360search 且显式启用，SearXNG 经宿主代理访问 DDG；`server/.env` 配置 `AGENT_WEB_SEARCH_URL` 与 `AGENT_WEB_FETCH_ALLOW_PRIVATE`；同一查询 `WebSearch` 返回 5 条高相关结果（发现时间 2026-11-15，解决时间 2026-11-15） |
 | 2026-11-16 | 追加并解决 P-39：benchmark 预算检查轮询 `snapshot()` 会结算 pending 请求，导致 `model_calls` 重复计数；新增只读 `RunUsageMeter.total_tokens()` 并补回归测试；server 全量 `680 passed, 1 skipped`，agent-loop `196 passed, 1 skipped`（发现时间 2026-11-16，解决时间 2026-11-16） |
+| 2026-11-16 | 追加并解决 P-23：工具错误分类 + 有界重试 + per-tool 熔断 + 幂等（原子写 / executor `Idempotency-Key` / `client_run_id` 唯一索引与请求重放）；SDK 新增 `tools/errors.py`、`tools/retry.py`、`tools/breaker.py`，server 新增 `AGENT_TOOL_RETRY_*` / `AGENT_TOOL_BREAKER_*` / `AGENT_EXECUTOR_IDEMPOTENCY_*`，migration `018`；agent-loop 246 passed / 1 skipped，server agent 相关 221 passed、server/tests 61 passed，ruff / tsc / Prettier 通过（发现时间 2026-11-07，解决时间 2026-11-16） |
