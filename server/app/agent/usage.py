@@ -222,6 +222,12 @@ class RunUsageMeter:
         with self._lock:
             return self._buckets["agent_loop"].calls
 
+    def total_tokens(self) -> int:
+        """Known token total. Polling this never settles pending request markers."""
+
+        with self._lock:
+            return sum(bucket.total_tokens for bucket in self._buckets.values())
+
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             if self._pending_requests:

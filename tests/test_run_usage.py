@@ -111,6 +111,22 @@ def test_record_response_settles_a_pending_request():
     assert snapshot["unknown_calls"] == 0
 
 
+def test_polling_total_tokens_does_not_settle_pending_requests():
+    """Budget polling must not turn a pending request into an extra call."""
+
+    meter = RunUsageMeter()
+    meter.record_request("agent_loop")
+
+    assert meter.total_tokens() == 0
+
+    meter.record_response("agent_loop", {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3})
+    snapshot = meter.snapshot()
+
+    assert snapshot["model_calls"] == 1
+    assert snapshot["unknown_calls"] == 0
+    assert snapshot["total_tokens"] == 3
+
+
 def test_aggregate_is_ignored_when_per_call_usage_exists():
     meter = RunUsageMeter()
     meter.record("agent_loop", {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15})

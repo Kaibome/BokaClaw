@@ -1019,6 +1019,23 @@
 
 ---
 
+## P-39 benchmark 预算轮询把 pending 请求结算成额外模型调用
+
+- **状态**：已解决
+- **发现时间**：2026-11-16
+- **解决时间**：2026-11-16
+- **场景**：为 GAIA benchmark 提交跑 server 全量测试。
+- **现象**：`tests/test_agent_runs.py` 两个用例的 `model_calls` 比预期多 1（`3 != 2`、`2 != 1`）；token 总量和 coverage 也随之偏移。
+- **根因**：benchmark 的实时 token 预算检查在每次事件后调用 `RunUsageMeter.snapshot()`，而 `snapshot()` 会把 `_pending_requests` 结算进 `calls` / `unknown_calls` 并清零。随后真正的 response 事件调用 `record()` 时已经没有 pending 可抵扣，于是同一次模型调用被计数两次。
+- **解决措施**：
+  1. `RunUsageMeter` 新增只读方法 `total_tokens()`，只汇总各 bucket 的 `total_tokens`，不结算 pending 请求；
+  2. `AgentRunManager` 的 benchmark 预算检查改用 `usage_meter.total_tokens()`；
+  3. 新增回归测试 `test_polling_total_tokens_does_not_settle_pending_requests`，断言轮询后 `model_calls` 仍为 1。
+- **解决后效果**：`tests/test_run_usage.py` + `tests/test_agent_runs.py` 共 44 passed；server 全量 `680 passed, 1 skipped`；ruff 通过。
+- **可复用结论**：计数/快照 API 要区分「只读观测」与「结算」；高频轮询路径必须使用不改变内部状态的方法，否则会悄悄改变统计口径。
+
+---
+
 ## 变更记录
 
 | 日期 | 变更 |
@@ -1078,3 +1095,4 @@
 | 2026-11-15 | 追加 P-37：分析两道被预算终止的 L3——`0512426f` 是工具选择错误（WebFetch 抓搜索页 + 缺视频/音频理解能力），`50f58759` 工具正确但逐页逐 revision 抓 Wikipedia API、重复请求且遇限流，60 万 token 内未收敛（发现时间 2026-11-15，解决时间 —） |
 | 2026-11-15 | P-37 部分缓解：WebFetch 增加 429 退避重试，benchmark prompt 增加 `full=true`/批量 API 指引；重跑 `50f58759` 在 492,711 token / 497.7s 内完成并覆盖 31 页（90 次 WebFetch、72 唯一 URL、3 次 429），但答案仍错（7 vs 3，把含链接的页面数当成引用次数）；`0512426f` 未重跑 |
 | 2026-11-15 | 追加并解决 P-38：Bing RSS 对长中文查询返回无关结果；本地启动 `searxng/searxng` 并接入 `bokaclaw-net`，保留 DuckDuckGo/Google/Brave/360search 且显式启用，SearXNG 经宿主代理访问 DDG；`server/.env` 配置 `AGENT_WEB_SEARCH_URL` 与 `AGENT_WEB_FETCH_ALLOW_PRIVATE`；同一查询 `WebSearch` 返回 5 条高相关结果（发现时间 2026-11-15，解决时间 2026-11-15） |
+| 2026-11-16 | 追加并解决 P-39：benchmark 预算检查轮询 `snapshot()` 会结算 pending 请求，导致 `model_calls` 重复计数；新增只读 `RunUsageMeter.total_tokens()` 并补回归测试；server 全量 `680 passed, 1 skipped`，agent-loop `196 passed, 1 skipped`（发现时间 2026-11-16，解决时间 2026-11-16） |

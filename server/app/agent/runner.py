@@ -499,7 +499,7 @@ class AgentRunManager:
                         if isinstance(event, AgentMemoryRecall) and (event.chars or 0) > 0:
                             memory_injected = True
                         await self._handle_event(writer, spans, trace, metadata, event, usage_meter)
-                        live_tokens = (usage_meter.snapshot() or {}).get("total_tokens")
+                        live_tokens = usage_meter.total_tokens()
                         if _benchmark_token_budget_exceeded(
                             request_metadata,
                             live_tokens,
