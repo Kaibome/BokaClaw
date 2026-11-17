@@ -4,6 +4,7 @@ from typing import Any
 
 import pytest
 
+from bokaclaw_agent.agent.tokenization import HeuristicTokenCounter, token_counter_override
 from bokaclaw_agent.core.types import ModelResponse
 
 
@@ -41,3 +42,17 @@ class FakeProvider:
 @pytest.fixture
 def provider_factory():
     return FakeProvider
+
+
+@pytest.fixture(autouse=True)
+def deterministic_token_counter():
+    """Keep unit tests offline and their context budgets stable.
+
+    The production default is ``TiktokenTokenCounter``, which may need to
+    download encoding data on first use. Compression tests exercise view
+    rewriting, not tokenizer accuracy, so they use the character fallback whose
+    counts are fixed.
+    """
+
+    with token_counter_override(HeuristicTokenCounter()):
+        yield

@@ -6,8 +6,8 @@ from conftest import FakeProvider
 from bokaclaw_agent.agent.compression import ContextCompressor
 from bokaclaw_agent.agent.context import (
     TRUNCATION_MARKER,
-    estimate_message_tokens,
-    estimate_tokens,
+    count_message_tokens,
+    count_tokens,
     safe_start_index,
     truncate_text,
 )
@@ -19,21 +19,21 @@ from bokaclaw_agent.tools import tool
 # ---- pure helpers -------------------------------------------------------------
 
 
-def test_estimate_tokens_ascii_and_non_ascii():
-    assert estimate_tokens("") == 0
-    assert estimate_tokens("abcd") == 2
-    assert estimate_tokens("你好") == 2
-    assert estimate_tokens("abcd你好") == 4
+def test_count_tokens_uses_the_configured_counter():
+    assert count_tokens("") == 0
+    assert count_tokens("abcd") == 2
+    assert count_tokens("你好") == 2
+    assert count_tokens("abcd你好") == 4
 
 
-def test_estimate_message_tokens_includes_tool_calls():
+def test_count_message_tokens_includes_tool_calls():
     plain = {"role": "assistant", "content": "hello"}
     with_calls = {
         "role": "assistant",
         "content": "hello",
         "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "x", "arguments": "{}"}}],
     }
-    assert estimate_message_tokens(with_calls) > estimate_message_tokens(plain)
+    assert count_message_tokens(with_calls) > count_message_tokens(plain)
 
 
 def test_truncate_text_under_limit_is_unchanged():

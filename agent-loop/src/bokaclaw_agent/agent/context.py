@@ -3,44 +3,44 @@
 from __future__ import annotations
 
 import json
-import math
 from typing import Any
 
 from ..core.types import ModelResponse, ToolResult
+from .tokenization import TokenCounter, get_token_counter
 
 TRUNCATION_MARKER = "\n... [truncated] ...\n"
 
-
-def estimate_tokens(text: str | None) -> int:
-    """Conservatively estimate tokens without a tokenizer dependency.
-
-    ASCII text is roughly 0.4 tokens per character; non-ASCII (for example CJK)
-    is counted as one token per character.
-    """
-
-    if not text:
-        return 0
-    ascii_chars = sum(1 for char in text if ord(char) < 128)
-    return math.ceil(ascii_chars * 0.4 + (len(text) - ascii_chars))
+# Chat formats charge a few structural tokens per message (role markers and
+# separators). The exact count is model-specific; 4 is the OpenAI convention and
+# deliberately rounded up.
+MESSAGE_OVERHEAD_TOKENS = 4
 
 
-def estimate_message_tokens(message: dict[str, Any]) -> int:
-    """Estimate one wire-format message, including tool calls and role overhead."""
+def count_tokens(text: str | None, *, counter: TokenCounter | None = None) -> int:
+    """Return the token count of ``text`` using ``counter`` (the default tokenizer when omitted)."""
 
-    tokens = 4
+    return (counter or get_token_counter()).count(text)
+
+
+def count_message_tokens(message: dict[str, Any], *, counter: TokenCounter | None = None) -> int:
+    """Count one wire-format message, including tool calls and role overhead."""
+
+    counter = counter or get_token_counter()
+    tokens = MESSAGE_OVERHEAD_TOKENS
     content = message.get("content")
     if isinstance(content, str):
-        tokens += estimate_tokens(content)
+        tokens += counter.count(content)
     elif content is not None:
-        tokens += estimate_tokens(_json_text(content))
+        tokens += counter.count(_json_text(content))
     tool_calls = message.get("tool_calls")
     if tool_calls:
-        tokens += estimate_tokens(_json_text(tool_calls))
+        tokens += counter.count(_json_text(tool_calls))
     return tokens
 
 
-def estimate_messages_tokens(messages: list[dict[str, Any]]) -> int:
-    return sum(estimate_message_tokens(message) for message in messages)
+def count_messages_tokens(messages: list[dict[str, Any]], *, counter: TokenCounter | None = None) -> int:
+    counter = counter or get_token_counter()
+    return sum(count_message_tokens(message, counter=counter) for message in messages)
 
 
 def truncate_text(

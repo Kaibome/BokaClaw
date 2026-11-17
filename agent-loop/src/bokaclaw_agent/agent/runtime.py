@@ -40,7 +40,7 @@ from .compression import ContextCompressor
 from .context import (
     ContextManager,
     assistant_message,
-    estimate_tokens,
+    count_tokens,
     normalize_input,
     tool_message,
     truncate_text,
@@ -55,6 +55,7 @@ from .subagent import (
     SubagentTool,
     _DelegationState,
 )
+from .tokenization import TokenCounter, get_token_counter
 
 logger = logging.getLogger(__name__)
 
@@ -226,6 +227,20 @@ class AgentRuntime:
         if self._delegation_ledger is not None:
             self._delegation_ledger.clear()
 
+    def _token_counter(self) -> TokenCounter:
+        """Return the tokenizer used for this run's context budget.
+
+        The encoding is chosen from the agent's model so budgets track the model
+        that actually receives the request. An injected provider without a
+        ``ModelConfig`` falls back to the generic encoding.
+        """
+
+        model = self.config.model.model if self.config.model is not None else None
+        if model is None:
+            provider_config = getattr(self.provider, "config", None)
+            model = getattr(provider_config, "model", None)
+        return get_token_counter(model=model if isinstance(model, str) else None)
+
     def _resolve_compression_provider(self) -> ModelProvider:
         """Return the provider used for context summaries.
 
@@ -370,8 +385,14 @@ class AgentRuntime:
         tool_results: list[ToolResult] = []
         pending_calls: list[ToolCall] = []
         usage: dict[str, int] = {}
+        token_counter = self._token_counter() if self.config.context_max_tokens is not None else None
         if self.config.context_max_tokens is not None:
-            compressor = ContextCompressor(self.config, self._resolve_compression_provider(), usage)
+            compressor = ContextCompressor(
+                self.config,
+                self._resolve_compression_provider(),
+                usage,
+                token_counter=token_counter,
+            )
         iterations = 0
         stop_reason = "final"
         content: str | None = None
@@ -421,10 +442,12 @@ class AgentRuntime:
                 messages = context.build()
                 tool_specs = self.tools.specs()
                 if compressor is not None:
-                    # Tool schemas are part of the request; reserve their
-                    # estimated cost so compression applies to the messages
-                    # the model receives.
-                    tools_tokens = estimate_tokens(json.dumps(tool_specs, ensure_ascii=False, default=str))
+                    # Tool schemas are part of the request; reserve their cost
+                    # so compression applies to the messages the model receives.
+                    tools_tokens = count_tokens(
+                        json.dumps(tool_specs, ensure_ascii=False, default=str),
+                        counter=token_counter,
+                    )
                     compressed = compressor.compress(messages, tools_tokens=tools_tokens)
                     if compressed.changed or compressed.stats.get("model_calls"):
                         if compressed.changed:

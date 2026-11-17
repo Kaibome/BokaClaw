@@ -608,7 +608,7 @@ Every `AgentEvent` carries a `seq` that starts at `1` for each run and increases
 ## v1 limits
 
 - `stream()` forwards text from the final answer; tool-call rounds produce no text.
-- No tokenizer dependency: the context budget uses a conservative character-based estimate over messages only (tool schemas are deducted separately).
+- Context budgets count real model tokens with `tiktoken`: the agent model's encoding is used when tiktoken knows it, otherwise `o200k_base`. Tool schemas are deducted separately. If tiktoken or its encoding data cannot be loaded (for example an offline host on first use), counting falls back to a conservative character estimate instead of failing the run. `token_counter_override` lets hosts and tests supply their own `TokenCounter`.
 - Context compression, the fact ledger, the step notice, and the no-progress
   guard are opt-in in the SDK (off by default); `max_history_messages` still
   provides message-count truncation on resume.

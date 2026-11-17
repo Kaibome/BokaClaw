@@ -17,11 +17,12 @@ from ..core.types import ModelResponse
 from ..core.utils import resolve_awaitable
 from ..providers.base import ModelProvider
 from .context import (
-    estimate_message_tokens,
-    estimate_messages_tokens,
+    count_message_tokens,
+    count_messages_tokens,
     safe_start_index,
     truncate_text,
 )
+from .tokenization import TokenCounter, get_token_counter
 
 logger = logging.getLogger(__name__)
 
@@ -55,12 +56,20 @@ class ContextCompressor:
     Per-run state (the rolling summary) lives here; it is never persisted.
     """
 
-    def __init__(self, config: AgentConfig, provider: ModelProvider, usage: dict[str, int]) -> None:
+    def __init__(
+        self,
+        config: AgentConfig,
+        provider: ModelProvider,
+        usage: dict[str, int],
+        *,
+        token_counter: TokenCounter | None = None,
+    ) -> None:
         self.max_tokens = config.context_max_tokens
         self.keep_recent_tokens = config.context_keep_recent_tokens
         self.mode = config.context_compression
         self.provider = provider
         self.usage = usage
+        self.token_counter = token_counter or get_token_counter()
         self._summary: str | None = None
         self._folded_until = 0
         self._summary_error: str | None = None
@@ -76,7 +85,7 @@ class ContextCompressor:
             return CompressionResult(messages)
 
         budget = self.max_tokens - max(0, tools_tokens)
-        before = estimate_messages_tokens(messages)
+        before = count_messages_tokens(messages, counter=self.token_counter)
         if before <= budget:
             return CompressionResult(messages)
 
@@ -107,7 +116,7 @@ class ContextCompressor:
             if new_indices:
                 if self.mode == "summary":
                     folded = [messages[index] for index in new_indices]
-                    if estimate_messages_tokens(folded) >= SUMMARY_MIN_FOLD_TOKENS:
+                    if count_messages_tokens(folded, counter=self.token_counter) >= SUMMARY_MIN_FOLD_TOKENS:
                         summary = self._summarize(folded, self._summary)
                         if summary is not None:
                             self._summary = summary
@@ -139,7 +148,7 @@ class ContextCompressor:
                 view = [*messages[:system_end], *tail]
 
         view = self._fit_budget(view, budget)
-        after = estimate_messages_tokens(view)
+        after = count_messages_tokens(view, counter=self.token_counter)
         stats: dict[str, Any] = {
             "before_tokens": before,
             "after_tokens": after,
@@ -188,7 +197,7 @@ class ContextCompressor:
         total = 0
         start = len(messages)
         for index in range(len(messages) - 1, system_end - 1, -1):
-            total += estimate_message_tokens(messages[index])
+            total += count_message_tokens(messages[index], counter=self.token_counter)
             start = index
             if total >= keep_recent:
                 break
@@ -276,20 +285,19 @@ class ContextCompressor:
             if isinstance(value, int):
                 total[key] = total.get(key, 0) + value
 
-    @staticmethod
-    def _fit_budget(messages: list[dict[str, Any]], budget: int) -> list[dict[str, Any]]:
+    def _fit_budget(self, messages: list[dict[str, Any]], budget: int) -> list[dict[str, Any]]:
         """Shrink the largest message contents until the view fits.
 
         Structure is never changed here, so tool-call pairs stay intact.
         """
 
         for _ in range(64):
-            current = estimate_messages_tokens(messages)
+            current = count_messages_tokens(messages, counter=self.token_counter)
             if current <= budget:
                 break
 
             candidates = [
-                (estimate_message_tokens(message), index)
+                (count_message_tokens(message, counter=self.token_counter), index)
                 for index, message in enumerate(messages)
                 if message.get("role") != "system"
                 and isinstance(message.get("content"), str)

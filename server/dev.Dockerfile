@@ -11,6 +11,11 @@ RUN pip install -r requirements.txt
 COPY agent-loop /opt/agent-loop
 RUN pip install --no-cache-dir /opt/agent-loop
 
+# Pre-download the BPE encodings used for context-budget accounting so the
+# running container does not need outbound network on its first agent run.
+ENV TIKTOKEN_CACHE_DIR=/opt/tiktoken-cache
+RUN python -c "import tiktoken; tiktoken.get_encoding('o200k_base'); tiktoken.get_encoding('cl100k_base')"
+
 # Return to app directory and copy server code
 WORKDIR /app
 COPY server .

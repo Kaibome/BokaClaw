@@ -65,7 +65,7 @@ SubagentTool                  explore / plan / research_agent
 
 每一轮模型请求都用 `self.tools.specs()` 下发**激活工具**的 schema（`runtime.py:393`）。MCP 工具和低频 Office 工具注册为 deferred，默认不在激活集；模型通过 `ToolSearch` 按需加载（见 §9）。
 
-工具 schema 会被 JSON 序列化并估算 token，再从压缩预算里扣除（`runtime.py:394-399`）。因此减少激活工具数量会直接降低每轮 token 占用。
+工具 schema 会被 JSON 序列化并用分词器统计 token，再从压缩预算里扣除（`runtime.py`）。因此减少激活工具数量会直接降低每轮 token 占用。
 
 ### 1.3 现有的三层静态裁剪
 

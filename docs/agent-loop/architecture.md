@@ -95,7 +95,8 @@ agent-loop/
 │   ├── agent/
 │   │   ├── __init__.py
 │   │   ├── runtime.py              # AgentRuntime：ReAct 循环与持久化编排
-│   │   ├── context.py              # 消息规范化 + 上下文视图 + token 估算
+│   │   ├── context.py              # 消息规范化 + 上下文视图 + token 计数
+│   │   ├── tokenization.py         # tiktoken 分词器 + 字符估算回退
 │   │   └── compression.py          # ContextCompressor：预算压缩与滚动摘要
 │   ├── tools/
 │   │   ├── __init__.py             # 公开导出 Tool / ToolRegistry / tool
@@ -280,7 +281,7 @@ build() = [system?] + truncate(history) + current
 - **工具结果裁剪只改视图**：`tool_result_max_chars` 在 `build()` 内对 `role="tool"` 消息做头尾截断（返回拷贝，不改 `_history` / `_current`），所以恢复会话时加载的历史工具结果同样受控；`new_messages`、`RunResult.tool_results` 与 SessionStore 写入始终是完整原文。
 - `normalize_input()` 接受字符串或 OpenAI wire-format 消息列表；未知结构直接报错。
 
-token 估算不引入 tokenizer：`estimate_tokens()` 使用 `ceil(ascii_chars * 0.4 + non_ascii_chars)`，`estimate_message_tokens()` 再计入 `tool_calls` JSON 与 4 个结构开销。
+token 计数使用 `tiktoken` 分词器（`agent/tokenization.py`）：`TiktokenTokenCounter` 优先按模型名解析编码，未知模型（DeepSeek、Qwen、vLLM、Ollama 等 OpenAI 兼容服务）回退到 `o200k_base`；编码懒加载并按进程缓存。`count_message_tokens()` 在内容与 `tool_calls` JSON 之外再加 4 个结构开销。tiktoken 未安装或编码数据无法加载时（例如离线主机首次使用），退化为 `ceil(ascii_chars * 0.4 + non_ascii_chars)` 的字符估算，不中断 run；`token_counter_override` 供测试或自带分词器的宿主替换默认计数器。
 
 #### 预算压缩（`agent/compression.py`）
 
@@ -290,7 +291,7 @@ token 估算不引入 tokenizer：`estimate_tokens()` 使用 `ceil(ascii_chars *
 build() ──▶ compress(messages, tools_tokens) ──▶ model_request
 ```
 
-- 预算先扣除 tools schema 的估算；未超预算直接返回原文，不产生额外模型调用。
+- 预算先扣除 tools schema 的 token 数；未超预算直接返回原文，不产生额外模型调用。
 - 切点从尾部向前累积 `context_keep_recent_tokens`（默认预算一半），再前移到合法边界（`user`，或带 `tool_calls` 的 `assistant`，因为它的结果紧随其后）。最近一条 `user` 消息会被钉住保留，长工具循环不会丢失任务指令。
 - `summary` 模式把切点之前的消息连同上一次摘要折叠成滚动摘要，合并进唯一的 system 消息。摘要调用使用 `provider.complete(..., tools=None, tool_choice=None, temperature=0, max_tokens=1024)`，**不复用**会强制携带 tools 的 `_complete()`；usage 合并进本次 run。摘要失败（异常、空内容、内容过少）只记录 warning 并回退裁剪，不中断 run。
 - `truncate` 模式直接丢弃切点之前的消息，并在 system 末尾追加省略说明。
@@ -692,7 +693,7 @@ dashboard ── POST /agent ──▶ server（鉴权 / 创建 agent_runs / 订
 | 工具串行执行 | 每个调用都有确定的结果消息，失败路径易恢复；代价是并行工具场景变慢 |
 | system prompt 不持久化 | 支持跨 run 调整提示词、避免重复；代价是持久化历史不含 system |
 | 裁剪/压缩只改模型视图 | 数据库保留完整对话、恢复后仍可用全文；代价是原会话越长，压缩时的摘要调用越多 |
-| token 预算用字符近似估算 | 不引入 tokenizer 依赖、实现简单；代价是预算不是精确 token 数，需要留余量 |
+| token 预算用 tiktoken 计数 | 预算贴近真实 token 数，压缩触发更准确；代价是新增依赖、首次加载编码可能需要网络（离线时自动退回字符估算） |
 | SDK 自带幂等 DDL | 无需迁移框架、可与应用表共库；代价是 schema 演进能力有限 |
 | 失败时补齐 tool 消息 | 会话始终符合协议、可继续恢复；代价是数据库中出现合成的错误结果 |
 | Postgres 依赖放在 `postgres` extra | 纯内存场景无需安装数据库驱动；代价是用户需显式安装 |
@@ -729,6 +730,7 @@ dashboard ── POST /agent ──▶ server（鉴权 / 创建 agent_runs / 订
   - `test_cancel.py`：四个取消检查点、abort pending 工具、部分 `RunResult`、`cancelled` 持久化、最后事件为 `run_ended(stop_reason="cancelled")`、不发 `error`、`arun` 转发
   - `test_streaming.py`：文本增量顺序、tool_call 分片重组、无流式 Provider 的降级、无文本回合
   - `test_context.py`：system prompt、历史恢复、裁剪边界、持久化完整性、工具结果视图裁剪
-  - `test_compression.py`：token 估算、头尾截断、摘要/裁剪模式、滚动摘要、摘要失败回退、预算硬约束、`context_compressed` 事件顺序与 usage 合并
+  - `test_compression.py`：token 计数、头尾截断、摘要/裁剪模式、滚动摘要、摘要失败回退、预算硬约束、`context_compressed` 事件顺序与 usage 合并
+  - `test_tokenization.py`：模型编码解析、编码缓存、离线回退、计数器覆盖
   - `test_session_memory.py` / `test_session_postgres.py`：会话 CRUD、seq、metadata 合并、DDL 幂等；真实 Postgres 集成测试由 `BOKACLAW_AGENT_TEST_DSN` 开启
 - 本地命令见 [`agent-loop/AGENTS.md`](../../agent-loop/AGENTS.md)：`ruff check`、`ruff format --check`、`pytest`。
