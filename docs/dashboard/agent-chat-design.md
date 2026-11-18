@@ -406,6 +406,10 @@ X-Request-ID: <rid>
 | `WebFetch` | 抓取公网 URL 并提取文本，默认拒绝私网地址 | 同上 |
 | `PptxBuild` | 按结构化 slide spec 生成 `.pptx`；版式、换行、字号、页码由工具计算，返回 `warnings` | `AGENT_OFFICE_TOOLS=true` |
 | `PptxUpdateSlide` / `PptxAddSlide` / `PptxDeleteSlide` | 单页替换/插入/删除，自动重排页码与章节号 | 同上 |
+| `SheetInspect` | 列出工作表、维度、表头与样例行，不加载全表 | `AGENT_SHEET_TOOLS=true` |
+| `SheetQuery` | 只读筛选、分组聚合、排序、投影，最多返回 500 行 | 同上 |
+| `SheetTransform` | 去重/填空/类型转换/重命名等清洗，写入新的 `.xlsx` / `.csv` | 同上 |
+| `SheetPivot` | 按 index/columns/values 生成透视表，写入新文件 | 同上 |
 | `Bash` | 在 workspace 执行 `bash -lc` | `AGENT_TOOLS_ALLOW_SHELL=true` |
 | `PowerShell` | 执行 `pwsh -NoProfile -NonInteractive` | 同上 |
 | `Monitor` | 后台启动命令，按 start/poll/stop 读取增量输出 | 同上 |
@@ -415,6 +419,9 @@ X-Request-ID: <rid>
 - 文件工具只能访问 `AGENT_WORKSPACE_ROOT` 内的路径，`..` 与指向外部的 symlink 都会被拒绝；
 - `Bash` / `PowerShell` / `Monitor` 没有 OS 级沙箱，可访问 server 进程能访问的一切（包括 `.env` 与数据库凭据），必须显式开启；
 - 图片无法作为多模态输入，`Read` 只返回类型、尺寸和说明；PDF 依赖 `pypdf`；
+- Sheet 工具只读 `.xlsx` / `.xlsm` / `.csv`，只写 `.xlsx` / `.csv`；`SheetTransform` 与
+  `SheetPivot` 必须写入不同于输入的新文件，公式按缓存值读取、不重算，重写 `.xlsx` 不保留
+  图表、透视缓存或 VBA；
 - 所有命令有超时与输出大小上限，`Monitor` 的缓冲保留最近 5000 行。
 
 ## 5. 数据库设计
@@ -642,6 +649,9 @@ AGENT_DEV_TOOLS=true
 AGENT_WORKSPACE_ROOT=/app/workspace
 AGENT_TOOLS_ALLOW_SHELL=false   # 开启后才有 Bash/PowerShell/Monitor
 AGENT_OFFICE_TOOLS=true         # Pptx 工具；镜像内预装 python-pptx
+AGENT_SHEET_TOOLS=true          # Sheet 工具；镜像内预装 pandas + openpyxl
+AGENT_SHEET_MAX_BYTES=50000000
+AGENT_SHEET_MAX_ROWS=200000
 AGENT_TOOL_TIMEOUT_SECONDS=120
 AGENT_TOOL_MAX_OUTPUT_BYTES=200000
 AGENT_TOOL_MAX_FILE_BYTES=2000000

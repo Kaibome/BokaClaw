@@ -50,6 +50,10 @@ numpy>=1.26,<3
 pandas>=2.1,<3
 requests>=2.31,<3
 
+# Agent sheet tools: SheetInspect / SheetQuery / SheetTransform / SheetPivot.
+# Pure Python; pandas uses it to read and write .xlsx.
+openpyxl>=3.1,<4
+
 # MCP client (remote Streamable HTTP only). Pinned because 1.20+ raises the
 # pydantic floor above the version pinned above; bump both together.
 mcp==1.12.0

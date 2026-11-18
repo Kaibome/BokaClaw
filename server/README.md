@@ -205,9 +205,16 @@ another OpenAI-compatible endpoint. Compression summaries can run on a separate,
 `AGENT_COMPRESSION_MODEL`.
 
 The Claude Code-style developer tools are registered by default: `Read`, `Write`, `Edit`,
-`NotebookEdit`, `Glob`, `Grep`, `WebFetch`, `WebSearch`, and the presentation tools `PptxBuild`,
-`PptxUpdateSlide`, `PptxAddSlide`, and `PptxDeleteSlide`. `Bash`, `PowerShell`, and `Monitor` are
-added only when `AGENT_TOOLS_ALLOW_SHELL=true`. `AGENT_OFFICE_TOOLS=false` removes the Pptx tools.
+`NotebookEdit`, `Glob`, `Grep`, `WebFetch`, `WebSearch`, the presentation tools `PptxBuild`,
+`PptxUpdateSlide`, `PptxAddSlide`, and `PptxDeleteSlide`, and the spreadsheet tools `SheetInspect`,
+`SheetQuery`, `SheetTransform`, and `SheetPivot`. `Bash`, `PowerShell`, and `Monitor` are added only
+when `AGENT_TOOLS_ALLOW_SHELL=true`. `AGENT_OFFICE_TOOLS=false` removes the Pptx tools, and
+`AGENT_SHEET_TOOLS=false` removes the spreadsheet tools.
+
+The spreadsheet tools read `.xlsx`, `.xlsm`, and `.csv`. `SheetInspect` and `SheetQuery` are
+read-only; `SheetTransform` and `SheetPivot` always write a new file and refuse to overwrite the
+input. Formulas are read as their cached values and are never recalculated; rewriting an `.xlsx`
+does not preserve charts, pivot caches, or VBA. `.xls` and `.ods` are not supported.
 
 `WebFetch` caches every successful page for the duration of one run. Fetched page text is returned
 inside `<<<BEGIN UNTRUSTED WEB CONTENT source=<url>>>>` … `<<<END UNTRUSTED WEB CONTENT>>>` markers.
@@ -334,11 +341,14 @@ The stream emits `meta`, `message.delta`, `message.completed`, and `done`, with 
 | `AGENT_RESEARCH_MEMORY` | `true` | Save and reuse web-research conclusions. |
 | `AGENT_RESEARCH_MEMORY_TTL_DAYS` | `30` | Ignore saved conclusions older than this. |
 | `AGENT_RESEARCH_MEMORY_MIN_SCORE` | `0.5` | Minimum similarity for a saved conclusion. |
-| `AGENT_SUBAGENTS_ENABLED` | `false` | Register the `explore` and `research_agent` subagents. |
+| `AGENT_SUBAGENTS_ENABLED` | `false` | Register the `explore`, `plan`, `research_agent`, and `sheet-agent` subagents. |
 | `AGENT_SUBAGENT_TIMEOUT_SECONDS` | `120` | Wall-clock timeout for one child run. |
 | `AGENT_SUBAGENT_MAX_TURNS` | `8` | ReAct step budget for one child run. |
 | `AGENT_DEV_TOOLS` | `true` | Register the developer tool set. |
 | `AGENT_OFFICE_TOOLS` | `true` | Register the Pptx tools. |
+| `AGENT_SHEET_TOOLS` | `true` | Register the spreadsheet tools. |
+| `AGENT_SHEET_MAX_BYTES` | `50000000` | Largest spreadsheet read; an .xlsx archive may expand up to 8× this. |
+| `AGENT_SHEET_MAX_ROWS` | `200000` | Largest row count a spreadsheet tool will read or return. |
 | `AGENT_MCP_ENABLED` | `false` | Register tools from remote MCP servers. |
 | `AGENT_MCP_CONFIG_FILE` | — | JSON file with MCP server definitions. |
 | `AGENT_MCP_SERVERS_JSON` | — | Inline MCP server definitions (file wins). |

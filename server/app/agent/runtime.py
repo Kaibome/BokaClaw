@@ -45,7 +45,12 @@ from app.agent.events import (
 from app.agent.interactions import RunInteraction
 from app.agent.mcp import load_mcp_config, prepare_mcp_tools
 from app.agent.research_memory import ResearchRecall, recall_research
-from app.agent.subagents import SUBAGENT_GUIDANCE, build_scope_validator, build_subagent_specs
+from app.agent.subagents import (
+    SHEET_SUBAGENT_GUIDANCE,
+    SUBAGENT_GUIDANCE,
+    build_scope_validator,
+    build_subagent_specs,
+)
 from app.agent.usage import RunUsageMeter, meter_context, normalize_usage
 from app.agent.user_input import USER_INPUT_GUIDANCE, build_user_input_tool
 
@@ -1053,8 +1058,17 @@ def build_runtime(
     subagent_options = None
     subagent_task_validator = None
     if config.subagents_enabled:
+        # Do not register sheet-agent when its tools are off or pandas/openpyxl
+        # is missing: the child would otherwise start with no usable tools.
+        sheet_specs = bool(dev_config is not None and getattr(dev_config, "sheet_tools", False))
+        if sheet_specs:
+            from app.agent.sheet_tools import SHEET_TOOLS_AVAILABLE
+
+            sheet_specs = SHEET_TOOLS_AVAILABLE
         system_prompt = f"{system_prompt}\n\n{SUBAGENT_GUIDANCE}"
-        subagents = build_subagent_specs(sdk, config)
+        if sheet_specs:
+            system_prompt = f"{system_prompt}\n{SHEET_SUBAGENT_GUIDANCE}"
+        subagents = build_subagent_specs(sdk, config, sheet_tools=sheet_specs)
         subagent_options = sdk.SubagentOptions(
             enabled=True,
             max_depth=config.subagent_max_depth,

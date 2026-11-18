@@ -113,6 +113,9 @@ class DevToolConfig:
     web_search_url: str = ""
     executor: Optional[agent_executor.ExecutorConfig] = None
     office_tools: bool = True
+    sheet_tools: bool = True
+    sheet_max_bytes: int = 50_000_000
+    sheet_max_rows: int = 200_000
     # When workspace skills are enabled, write tools must not modify them.
     workspace_skills_dir: Optional[Path] = None
 
@@ -154,6 +157,9 @@ def load_dev_tool_config() -> Optional[DevToolConfig]:
         web_search_url=(os.environ.get("AGENT_WEB_SEARCH_URL") or "").strip(),
         executor=agent_executor.load_executor_config(),
         office_tools=_env_bool("AGENT_OFFICE_TOOLS", True),
+        sheet_tools=_env_bool("AGENT_SHEET_TOOLS", True),
+        sheet_max_bytes=max(1000, _env_int("AGENT_SHEET_MAX_BYTES", 50_000_000)),
+        sheet_max_rows=max(1, _env_int("AGENT_SHEET_MAX_ROWS", 200_000)),
         workspace_skills_dir=workspace_skills_dir,
     )
 
@@ -1350,6 +1356,12 @@ def build_dev_tools(sdk, config: Optional[DevToolConfig] = None):
         from app.agent.office_tools import build_office_tools
 
         tools.extend(build_office_tools(sdk, cfg))
+
+    if cfg.sheet_tools:
+        # Imported lazily: sheet_tools imports this module for path confinement.
+        from app.agent.sheet_tools import build_sheet_tools
+
+        tools.extend(build_sheet_tools(sdk, cfg))
 
     if cfg.allow_shell:
         tools.extend(

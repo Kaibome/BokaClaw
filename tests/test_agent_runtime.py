@@ -1640,15 +1640,29 @@ def test_build_runtime_wires_subagents_guidance_and_scope_confined_to_the_worksp
     agent_runtime.build_runtime(sdk, config, {"user_id": None, "message": "hi"})
 
     runtime = sdk.runtimes[0]
-    assert [spec.name for spec in runtime.subagents] == ["explore", "plan", "research_agent"]
+    assert [spec.name for spec in runtime.subagents] == ["explore", "plan", "research_agent", "sheet-agent"]
     assert runtime.subagent_options.kwargs["enabled"] is True
     assert runtime.subagent_options.kwargs["max_calls_per_run"] == 2
     assert runtime.subagent_options.kwargs["verification_policy"] == "spot_check"
     assert "Subagents are available" in runtime.config.kwargs["system_prompt"]
+    assert "`sheet-agent`" in runtime.config.kwargs["system_prompt"]
 
     validate = runtime.subagent_task_validator
     assert validate(types.SimpleNamespace(scope=["src/app.py"])) is None
     assert "outside the workspace" in validate(types.SimpleNamespace(scope=["/etc/passwd"]))
+
+
+def test_build_runtime_omits_sheet_agent_when_the_tools_are_off(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENT_DEV_TOOLS", "true")
+    monkeypatch.setenv("AGENT_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("AGENT_SHEET_TOOLS", "false")
+    sdk = FakeSDK()
+
+    agent_runtime.build_runtime(sdk, _config(subagents_enabled=True), {"user_id": None, "message": "hi"})
+
+    runtime = sdk.runtimes[0]
+    assert [spec.name for spec in runtime.subagents] == ["explore", "plan", "research_agent"]
+    assert "`sheet-agent`" not in runtime.config.kwargs["system_prompt"]
 
 
 def test_bridge_emits_subagent_usage_and_spans(monkeypatch):

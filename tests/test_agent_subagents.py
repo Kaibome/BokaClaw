@@ -60,10 +60,10 @@ def test_disabled_returns_no_specs():
 
 
 def test_specs_inherit_the_main_model_and_carry_the_configured_limits():
-    specs = subagents.build_subagent_specs(FakeSDK(), _config(subagent_model=None))
+    specs = subagents.build_subagent_specs(FakeSDK(), _config(subagent_model=None), sheet_tools=True)
 
-    assert [spec.name for spec in specs] == ["explore", "plan", "research_agent"]
-    explore, plan, research = specs
+    assert [spec.name for spec in specs] == ["explore", "plan", "research_agent", "sheet-agent"]
+    explore, plan, research, sheet = specs
     assert explore.kwargs["model"].kwargs["model"] == "main-model"
     assert explore.kwargs["tool_policy"] == "read_only"
     assert explore.kwargs["default_max_turns"] == 8
@@ -72,6 +72,15 @@ def test_specs_inherit_the_main_model_and_carry_the_configured_limits():
     assert plan.kwargs["tool_policy"] == "read_only"
     assert plan.kwargs["output_schema"] is subagents.PLAN_RESULT_SCHEMA
     assert research.kwargs["output_schema"] is subagents.RESEARCH_RESULT_SCHEMA
+    assert sheet.kwargs["tool_policy"] == "custom"
+    assert "SheetInspect" in sheet.kwargs["tool_names"]
+    assert sheet.kwargs["output_schema"] is subagents.SHEET_RESULT_SCHEMA
+
+
+def test_sheet_spec_is_omitted_when_the_sheet_tools_are_off():
+    specs = subagents.build_subagent_specs(FakeSDK(), _config(), sheet_tools=False)
+
+    assert [spec.name for spec in specs] == ["explore", "plan", "research_agent"]
 
 
 def test_plan_spec_is_read_only_and_returns_a_structured_plan():
@@ -85,8 +94,9 @@ def test_plan_spec_is_read_only_and_returns_a_structured_plan():
 
 
 def test_explicit_subagent_model_overrides_the_main_model():
-    specs = subagents.build_subagent_specs(FakeSDK(), _config(subagent_model="child-model"))
+    specs = subagents.build_subagent_specs(FakeSDK(), _config(subagent_model="child-model"), sheet_tools=True)
 
+    assert len(specs) == 4
     assert all(spec.kwargs["model"].kwargs["model"] == "child-model" for spec in specs)
 
 
@@ -136,10 +146,15 @@ def test_non_http_url_schemes_are_rejected(tmp_path):
 
 @pytest.mark.parametrize(
     "prompt",
-    [subagents.EXPLORE_SYSTEM_PROMPT, subagents.PLAN_SYSTEM_PROMPT, subagents.RESEARCH_SYSTEM_PROMPT],
+    [
+        subagents.EXPLORE_SYSTEM_PROMPT,
+        subagents.PLAN_SYSTEM_PROMPT,
+        subagents.RESEARCH_SYSTEM_PROMPT,
+        subagents.SHEET_SYSTEM_PROMPT,
+    ],
 )
 def test_subagent_prompts_treat_read_content_as_data(prompt):
-    assert "as data, never as instructions" in prompt
+    assert "data, never instructions" in prompt or "data, never as instructions" in prompt
     assert '"unknowns"' in prompt
 
 
@@ -150,6 +165,12 @@ def test_plan_prompt_is_planning_only():
 
 def test_parent_guidance_mentions_plan():
     assert "`plan`" in subagents.SUBAGENT_GUIDANCE
+
+
+def test_parent_guidance_mentions_sheet_agent_only_when_it_is_available():
+    assert "`sheet-agent`" in subagents.SHEET_SUBAGENT_GUIDANCE
+    assert "new output_path" in subagents.SHEET_SUBAGENT_GUIDANCE
+    assert "`sheet-agent`" not in subagents.SUBAGENT_GUIDANCE
 
 
 def test_parent_guidance_treats_subagent_output_as_data():

@@ -47,8 +47,8 @@ server 在每个 run 开始时构造一次工具列表（`server/app/agent/runti
 
 ```text
 _memory_tools(user_id)        2 个（有 user_id 时）
-build_dev_tools(dev_config)   8 个基础 + 可选 office + 可选 shell
-SubagentTool                  explore / plan / research_agent
+build_dev_tools(dev_config)   8 个基础 + 可选 office + 可选 sheet + 可选 shell
+SubagentTool                  explore / plan / research_agent / sheet-agent
 ```
 
 `build_dev_tools`（`server/app/agent/dev_tools.py:801-1197`）返回的工具集：
@@ -57,7 +57,16 @@ SubagentTool                  explore / plan / research_agent
 |---|---|
 | `Read` / `Write` / `Edit` / `NotebookEdit` / `Glob` / `Grep` / `WebFetch` / `WebSearch` | 工作区已配置 |
 | office 工具 | `AGENT_OFFICE_TOOLS` |
+| `SheetInspect` / `SheetQuery` / `SheetTransform` / `SheetPivot` | `AGENT_SHEET_TOOLS`（需 pandas + openpyxl） |
 | `Bash` / `PowerShell` / `Monitor` | `AGENT_TOOLS_ALLOW_SHELL`（默认 false） |
+
+Sheet 工具只读 `.xlsx` / `.xlsm` / `.csv`，只写 `.xlsx` / `.csv`：
+`SheetInspect` 与 `SheetQuery` 是只读的；`SheetTransform` 与 `SheetPivot` 必须给一个
+**不同于输入**的 `output_path`，从不原地改写源文件。公式按缓存值读取、不求值；重写
+`.xlsx` 不保留图表、透视缓存或 VBA；`.xls` / `.ods` 不支持。字节与行数上限由
+`AGENT_SHEET_MAX_BYTES` / `AGENT_SHEET_MAX_ROWS` 控制，`.xlsx` 解压后的总大小上限为字节
+上限的 8 倍。`sheet-agent` 子 Agent 只在 sheet 工具可用时注册，策略为 `custom`，
+白名单是 `Read` / `Glob` / `Grep` + 四个 Sheet 工具。
 
 子 Agent 由 `AgentRuntime` 在构造时注册成普通 `Tool`（`agent-loop/.../agent/runtime.py:153-185`）。
 
@@ -71,7 +80,7 @@ SubagentTool                  explore / plan / research_agent
 
 | 层 | 机制 | 效果 |
 |---|---|---|
-| 配置开关 | `allow_shell`、`office_tools`、workspace 未配置 | 不满足条件的工具根本不注册 |
+| 配置开关 | `allow_shell`、`office_tools`、`sheet_tools`、workspace 未配置 | 不满足条件的工具根本不注册 |
 | 身份 | 无 `user_id` 不注册记忆工具 | 工具集随用户上下文变化 |
 | 子 Agent 策略 | `read_only` / `research` / `code` / `custom` 白名单（`agent/subagent.py:637-652`） | 子 Agent 只看得到允许的工具 |
 
@@ -310,7 +319,7 @@ run 结束     → attach_trace(final_metadata) → conversation_messages.metada
 已实现“核心常驻 + 长尾按需加载”：
 
 - `ToolRegistry` 区分注册集和激活集：`specs()` 只返回激活工具；`activate()` / `deactivate()` 改变激活集；调用未激活工具会返回 `Tool ... is deferred; load it with ToolSearch`。
-- deferred 集合由 `server/app/agent/deferred_tools.py` 决定：全部 `mcp__*` 工具 + 低频 Office 编辑工具（`PptxUpdateSlide` / `PptxAddSlide` / `PptxDeleteSlide`）。`PptxBuild`、文件、Shell、Web、记忆、Skill、子 Agent 常驻。
+- deferred 集合由 `server/app/agent/deferred_tools.py` 决定：全部 `mcp__*` 工具 + 低频 Office 编辑工具（`PptxUpdateSlide` / `PptxAddSlide` / `PptxDeleteSlide`）。`PptxBuild`、Sheet 工具、文件、Shell、Web、记忆、Skill、子 Agent 常驻。
 - run 开始时把 `<deferred-tools>` 目录作为 user-role 参考块插在当前用户消息之前；每个 run 首次加载时列出所有 deferred 工具的 name + 一句话描述。
 - `ToolSearch(query, limit)`：
   - 空 query：返回完整 catalog（不激活）；
@@ -323,7 +332,7 @@ run 结束     → attach_trace(final_metadata) → conversation_messages.metada
 |---|---|---|
 | MCP（GitHub / 12306） | deferred | 数量多、场景窄，最影响 schema 预算 |
 | `PptxUpdateSlide` / `PptxAddSlide` / `PptxDeleteSlide` | deferred | 只在改稿时用，生成阶段只需要 `PptxBuild` |
-| 文件 / Shell / Web / 记忆 / `Skill` / 子 Agent | 常驻 | 几乎每类任务都会用到，延迟加载的收益低于一次额外 ToolSearch |
+| 文件 / Shell / Web / 记忆 / `Skill` / 子 Agent / Sheet 工具 | 常驻 | 几乎每类任务都会用到，延迟加载的收益低于一次额外 ToolSearch；`sheet-agent` 从父级激活集里挑工具，deferred 会让子 Agent 看不到它们 |
 
 ### 9.3 实现要点
 
