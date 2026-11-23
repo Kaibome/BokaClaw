@@ -1050,6 +1050,85 @@
 
 ---
 
+## P-40 多模态图片输入缺失，接入成本集中在跨层文本假设
+
+- **状态**：已解决
+- **发现时间**：2026-11-18
+- **解决时间**：2026-11-19
+- **场景**：评估在 Agent 对话中让用户上传图片、由模型直接看图的能力。
+- **现象**：
+  - `POST /agent` 只接受 `message: str`，`AgentInvokeRequest` 没有附件字段（`server/app/agent/schemas.py`）；
+  - `conversation_messages.content` 是 `TEXT`，没有附件表或上传接口（`server/app/models.py`）；
+  - `build_history` / `build_messages` 只接受字符串 content，非字符串会被丢弃或转成空串（`server/app/agent/store.py`、`runtime.py`）；
+  - SDK 的 `count_message_tokens` 把非字符串 content JSON 序列化后按字符 token 化，压缩摘要也会展开 content（`agent-loop/src/bokaclaw_agent/agent/context.py`、`compression.py`）——base64 会让上下文预算瞬间爆掉；
+  - `Read` 工具对图片只返回元数据，并明确提示运行时是 text-only（`server/app/agent/dev_tools.py`）；
+  - Dashboard composer 只有 Textarea，消息气泡只渲染文本/助手 Markdown（`dashboard/src/components/agent/chat-composer.tsx`、`message-bubble.tsx`）；
+  - 现有 Agent 配置只有 DeepSeek 文本模型，没有视觉端点。
+- **根因**：运行时从 API、持久化、历史、token 预算、追踪到前端都按纯文本设计；OpenAI 兼容 provider 虽然透传 `messages`，但上游没有任何环节生成图片 content part。
+- **方案**：Phase 1 只做用户上传图片。附件描述符写入 `conversation_messages.metadata.attachments`，文件按 `user_id/sha256` 内容寻址存放；模型侧使用 OpenAI `image_url` content parts 和 data URL；含图片的 run 整体切换到视觉模型；同时修复 token 估算、压缩摘要、span 脱敏和前端上传/渲染。完整设计见 [`docs/dashboard/agent-image-input.md`](../dashboard/agent-image-input.md)。估算 15–18 人日，MVP 裁剪后 10–12 人日。
+- **已实现（2026-11-19）**：
+  - 新增 `POST/GET /agent/attachments`、`GET /agent/capabilities`，上传经 magic bytes + Pillow 重编码，EXIF 剥离、长边 1568、内容寻址落盘到 `AGENT_ATTACHMENTS_ROOT`；
+  - `AgentInvokeRequest` 支持 `attachment_ids` 与空 caption；附件描述符写入 `conversation_messages.metadata.attachments`，`ConversationMessageOut` 新增顶层 `attachments`；
+  - `build_history` 保留最近 `AGENT_HISTORY_MAX_IMAGES` 张历史图，超出写 `[Earlier image omitted]`；`build_messages` 生成 OpenAI `image_url` content parts；
+  - 含图片的 run 切换到 `AGENT_VISION_*`（DashScope Qwen-VL 兼容模式可直接配置），纯文本 run 保持 DeepSeek；
+  - SDK 的 token 计数按 `image_token_estimate` 计图，压缩摘要用 `[image]` 占位、超预算先丢图；span 与 `_message_hash` 脱敏 data URL；
+  - Dashboard 支持选择/粘贴/拖拽上传、上传进度、缩略图、大图预览、带图重试；记忆 episode 用 `用户上传了图片：<name>` 占位。
+- **验证**：新增/扩展 `tests/test_agent_attachments.py`、`tests/test_agent_attachment_router.py`、`test_agent_runtime.py`、`test_agent_turn_memory.py`、`agent-loop/tests/test_context.py`、`test_compression.py`；相关 server 测试 **175 passed / 1 环境相关失败**（本机 `127.0.0.1:9` 返回 ReadTimeout，预期 `agent_unreachable`），agent-loop **258 passed / 1 skipped**，`tsc` 与 `next build` 通过。
+- **真实 E2E（2026-11-19）**：
+  - DashScope 北京地域下 `qwen-vl-max-latest` 返回 403 `access_denied`、`qwen-vl-max` 返回
+    404 `model_not_found`；同一 key 调 `qwen-plus` / `qwen3-vl-plus` 均为 200，确认是模型可用性
+    而非 key 问题，最终切换 `AGENT_VISION_MODEL=qwen3-vl-plus`。
+  - 上传 900×320 PNG（`vision-test.png`）后发送“描述图中文字和图形”，返回
+    “黑色粗体文字 BOKACLAW / VISION TEST 2026，右侧红色空心圆圈”，`user_message.attachments`
+    正常回放。
+  - “看图 + WebSearch”run 正确读出 `BOKACLAW` 并调用搜索，返回结果标题；直接 API 测试也确认
+    `qwen3-vl-plus` 在带图请求中返回了 `get_weather` 的 `tool_calls`。
+  - 无新附件的流式追问“上一张图右边是什么形状”经历史图片仍答“圆形”，SSE 事件为
+    `meta / memory.recall / message.delta / message.completed / done`。
+  - `agent_runs.request` 与 `agent_run_spans` 中 `base64` / `data:image` 计数均为 0；
+    `conversation_messages.metadata.attachments` 只有描述符，纯文本 run 回归正常。
+- **可复用结论**：接入多模态的真正成本不在 provider 协议，而在全链路的字符串假设；先锁 token 预算、压缩与脱敏，再改前端，能避免“能发图但成本失控”的假成功。
+
+---
+
+## P-41 Excel 请求未产出文件：模型把 Bash 工具调用写成 DSML 纯文本
+
+- **状态**：已解决
+- **发现时间**：2026-11-23
+- **解决时间**：2026-11-23
+- **场景**：用户要求「帮我收集华为最热销的 10 款手机的销量，将数据填写到 excel 表格中」。run `28aa5652-e9da-4925-be99-637ff8218d70`，会话 `91154b2b-80ff-4a0e-9dfd-e0c38e2cbeff`。
+- **现象**：
+  - run 状态为 `completed`，但助手消息 `metadata.finish_reason=no_progress`，耗时约 148s，21 次模型调用 / 33 次工具调用 / 549,879 tokens；
+  - 工具分布：`WebSearch` 24 次、`WebFetch` 5 次（1 次 failed）、`Bash` 2 次、`Glob` 1 次；`usage_breakdown.sources.subagents.calls=0`，没有使用任何子代理；
+  - 工作区没有新增 xlsx，只有 2026-11-18 既有的 `sheet-smoke/sales.xlsx` 与 `summary.xlsx`；
+  - 最终助手消息 7,486 字符，不是自然语言，而是 4 个 `<｜｜DSML｜｜` 标记包裹的原始 Bash 调用；脚本用 openpyxl 写 `/app/workspace/华为手机销量TOP10.xlsx`，但这条调用没有出现在 `agent_run_events` 的 `tool.call` / `tool.result` 中，即从未执行；
+  - 第 12 轮 Bash 已确认执行环境有 openpyxl（`tool.result` stdout `3.1.5`），且 `Bash` 可用。
+- **根因**：
+  1. **不是缺少写 Excel 的能力**：Bash 已启用并路由到 executor，executor 镜像预装 `openpyxl==3.1.5`，模型也确实生成了可用的 openpyxl 脚本；
+  2. **直接原因**：模型把工具调用写成了 DeepSeek 的 DSML 特殊 token 文本（`<｜｜DSML｜｜ calls>` / `<｜｜DSML｜｜ invoke>`），而不是结构化的 `tool_calls`；运行时把它当作普通终答接受，脚本没有执行；
+  3. **触发条件**：多轮 WebSearch/WebFetch 后无新证据，无进展守卫判定 `no_progress` 并强制收尾，收尾内容恰好是这段畸形工具调用；
+  4. **结构性缺口**：已有 `SheetInspect` / `SheetQuery` / `SheetTransform` / `SheetPivot` 四个表格工具，但都面向既有文件，没有“从任意数据新建工作簿”的工具，也没有 sheet 子代理；要完成该请求仍需 Bash + openpyxl，缺少“文件已生成”的结构化校验与更低自由度的工具选择。
+- **根因假设**：DSML 泄漏可能与长上下文、供应商特殊 token 格式，以及 OpenAI 兼容适配层在 `tool_calls` 解析失败时的回退有关；需用同一模型复现并检查原始响应后再定性，暂不归因于“模型能力不足”。
+- **解决措施（2026-11-23）**：
+  - SDK 新增 `agent-loop/src/bokaclaw_agent/agent/protocol.py`：`contains_dsml` 检测 `<｜｜DSML｜｜`，`parse_dsml_tool_calls` 把 `invoke` / `parameter` 还原为 `ToolCall`，`strip_dsml` 清掉标记并保留周围自然语言；
+  - `AgentRuntime` 在模型响应进入协议前统一调用 `_normalize_dsml_response`：工具轮次中若 DSML 可解析，则改写为结构化 `tool_calls` 并真正执行；不可解析且没有可用文本时抛 `ModelProtocolError`；工具被禁用的收尾轮次中，纯 DSML 一律拒绝，只有周围自然语言会被保留；
+  - 新增公开异常 `ModelProtocolError`（继承 `ModelError`），server 的本地运行时把它映射为 `agent_protocol_error`，用户看到明确错误而不是“看似成功”的空答案；
+  - 新增 `SheetCreate` 表格工具：从 `columns` + `rows` 直接新建 `.xlsx` / `.csv`，无需源文件；支持位置行与对象行、表头加粗/冻结、列宽估算、数字格式、嵌套值 JSON 序列化；默认把以 `= + - @` 开头的字符串写成文本，`allow_formulas=true` 才保留公式；
+  - `sheet-agent` 子代理的工具白名单与提示词加入 `SheetCreate`，从零建表不再需要 Bash；
+  - 新增 `agent-loop/tests/test_protocol.py` 与运行时回归测试，覆盖“解析并执行”“剥离标记”“不可解析拒绝”“no_progress 收尾轮次拒绝”；server 新增 `SheetCreate` 与映射测试。
+- **验证**：
+  - `agent-loop` 全量 **272 passed / 1 skipped**，ruff 通过；
+  - server 相关 `test_agent_runtime` / `test_agent_subagents` / `test_agent_router` 合计 **132 passed**，ruff 通过；
+  - `SheetCreate` 相关 `test_agent_sheet_tools` / `test_agent_subagents` 合计 **57 passed**；加入 dev tools 与 runtime 后 **215 passed**，ruff 通过；
+  - 真实 E2E（重建镜像后）：模型调用 `SheetCreate` 创建 `/app/workspace/huawei-top10.xlsx`（5,185 字节、3 行数据、3 列），再用 `SheetInspect` 确认 4×3、列名与数值型单元格正确；openpyxl 复核表头加粗、冻结 `A2`、数字以 `int` 写入。
+- **剩余风险**：
+  - 模型仍可能继续输出 DSML；本次修复保证它不会被当成终答，工具被禁用的收尾轮次会明确失败；
+  - 流式响应在恢复前已把 DSML 文本作为 `message.delta` 推给前端，最终持久化消息是干净的，但前端可能短暂闪现原始标记；后续可在 SSE 层过滤；
+  - 模型仍可能不选 `SheetCreate` 而走 Bash；工具描述与 `sheet-agent` 提示词已明确“从零创建”场景，但无法强制路由。
+- **可复用结论**：当模型既会输出自然语言又会输出工具调用时，“终答形状校验”必须和工具策略一样当作硬约束；只读/写权限解决了能不能做，解决不了“调用有没有真正发生”。
+
+---
+
 ## 变更记录
 
 | 日期 | 变更 |
@@ -1111,3 +1190,10 @@
 | 2026-11-15 | 追加并解决 P-38：Bing RSS 对长中文查询返回无关结果；本地启动 `searxng/searxng` 并接入 `bokaclaw-net`，保留 DuckDuckGo/Google/Brave/360search 且显式启用，SearXNG 经宿主代理访问 DDG；`server/.env` 配置 `AGENT_WEB_SEARCH_URL` 与 `AGENT_WEB_FETCH_ALLOW_PRIVATE`；同一查询 `WebSearch` 返回 5 条高相关结果（发现时间 2026-11-15，解决时间 2026-11-15） |
 | 2026-11-16 | 追加并解决 P-39：benchmark 预算检查轮询 `snapshot()` 会结算 pending 请求，导致 `model_calls` 重复计数；新增只读 `RunUsageMeter.total_tokens()` 并补回归测试；server 全量 `680 passed, 1 skipped`，agent-loop `196 passed, 1 skipped`（发现时间 2026-11-16，解决时间 2026-11-16） |
 | 2026-11-16 | 追加并解决 P-23：工具错误分类 + 有界重试 + per-tool 熔断 + 幂等（原子写 / executor `Idempotency-Key` / `client_run_id` 唯一索引与请求重放）；SDK 新增 `tools/errors.py`、`tools/retry.py`、`tools/breaker.py`，server 新增 `AGENT_TOOL_RETRY_*` / `AGENT_TOOL_BREAKER_*` / `AGENT_EXECUTOR_IDEMPOTENCY_*`，migration `018`；agent-loop 246 passed / 1 skipped，server agent 相关 221 passed、server/tests 61 passed，ruff / tsc / Prettier 通过（发现时间 2026-11-07，解决时间 2026-11-16） |
+| 2026-11-18 | 追加 P-40：分析用户上传图片的多模态接入路径与成本（15–18 人日 / MVP 10–12 人日），设计见 `docs/dashboard/agent-image-input.md`（发现时间 2026-11-18，解决时间 —） |
+| 2026-11-19 | 追加并解决 P-40：实现附件上传/内容寻址存储、`attachment_ids` 契约、历史图片预算、OpenAI `image_url` content parts、SDK 图片 token/压缩修复、span 脱敏、DashScope Qwen-VL 按 run 切换与 Dashboard 上传/预览/重试；相关 server 175 passed（另 1 个环境相关失败）、agent-loop 258 passed，tsc/next build 通过。真实 DashScope E2E 通过：`qwen-vl-max-latest` 当前地域 403，改用 `qwen3-vl-plus`，完成图片理解、带图 WebSearch、历史图片追问（答“圆形”），并确认 `agent_runs.request` / `agent_run_spans` 无 base64（发现时间 2026-11-18，解决时间 2026-11-19） |
+| 2026-11-23 | 追加 P-41：分析 run `28aa5652` 的 Excel 请求未产出文件——模型把 Bash 工具调用写成 DSML 纯文本，运行时当作终答接受；Bash 与 openpyxl 3.1.5 均可用，缺口在终答形状校验与缺少专用表格工具（发现时间 2026-11-23，解决时间 —） |
+| 2026-11-23 | P-41 部分缓解：SDK 新增 DSML 检测/解析/剥离与 `ModelProtocolError`，工具轮次可自愈执行、收尾轮次拒绝纯标记终答；server 映射为 `agent_protocol_error`；agent-loop 272 passed / 1 skipped，server 相关 132 passed，ruff 通过（发现时间 2026-11-23，解决时间 2026-11-23） |
+| 2026-11-23 | 追加并解决 P-41 的工具缺口：新增 `SheetCreate`，从 `columns` + `rows` 新建 `.xlsx` / `.csv`，支持对象行推断、表头样式/冻结、数字格式与公式文本化；加入 `sheet-agent` 白名单；sheet 相关 57 passed、扩展 215 passed；真实 run 创建 `huawei-top10.xlsx` 并由 `SheetInspect` 复核（发现时间 2026-11-23，解决时间 2026-11-23） |
+| 2026-11-23 | P-41 补充：改写 `skills/bokaclaw-office-routing/SKILL.md`，新建工作簿映射到 `SheetCreate`，既有表映射到 `SheetInspect` / `SheetQuery` / `SheetTransform` / `SheetPivot` / `sheet-agent`，PPT/PDF/DOCX 改为 BokaClaw 实际能力；真实请求验证 `Skill → SheetCreate → SheetInspect`，生成 `routing-test.xlsx`（发现时间 2026-11-23，解决时间 2026-11-23） |
+| 2026-11-23 | routing 技能补强：禁止用 ToolSearch 查 Sheet 工具、搜索不足时直接用已有数据建表；真实华为请求验证 `Skill → SheetCreate → SheetInspect`，生成 `huawei_top10_sales.xlsx`（17×8），9 款无公开数据留空并标注（发现时间 2026-11-23，解决时间 2026-11-23） |

@@ -57,12 +57,14 @@ SubagentTool                  explore / plan / research_agent / sheet-agent
 |---|---|
 | `Read` / `Write` / `Edit` / `NotebookEdit` / `Glob` / `Grep` / `WebFetch` / `WebSearch` | 工作区已配置 |
 | office 工具 | `AGENT_OFFICE_TOOLS` |
-| `SheetInspect` / `SheetQuery` / `SheetTransform` / `SheetPivot` | `AGENT_SHEET_TOOLS`（需 pandas + openpyxl） |
+| `SheetInspect` / `SheetCreate` / `SheetQuery` / `SheetTransform` / `SheetPivot` | `AGENT_SHEET_TOOLS`（需 pandas + openpyxl） |
 | `Bash` / `PowerShell` / `Monitor` | `AGENT_TOOLS_ALLOW_SHELL`（默认 false） |
 
 Sheet 工具只读 `.xlsx` / `.xlsm` / `.csv`，只写 `.xlsx` / `.csv`：
-`SheetInspect` 与 `SheetQuery` 是只读的；`SheetTransform` 与 `SheetPivot` 必须给一个
-**不同于输入**的 `output_path`，从不原地改写源文件。公式按缓存值读取、不求值；重写
+`SheetInspect` 与 `SheetQuery` 是只读的；`SheetCreate` 从 `columns` + `rows` 新建工作簿
+（没有输入文件）；`SheetTransform` 与 `SheetPivot` 必须给一个 **不同于输入** 的
+`output_path`，从不原地改写源文件。`SheetCreate` 默认把以 `= + - @` 开头的字符串写成
+文本，`allow_formulas=true` 才保留公式。公式按缓存值读取、不求值；重写
 `.xlsx` 不保留图表、透视缓存或 VBA；`.xls` / `.ods` 不支持。字节与行数上限由
 `AGENT_SHEET_MAX_BYTES` / `AGENT_SHEET_MAX_ROWS` 控制，`.xlsx` 解压后的总大小上限为字节
 上限的 8 倍。`sheet-agent` 子 Agent 只在 sheet 工具可用时注册，策略为 `custom`，

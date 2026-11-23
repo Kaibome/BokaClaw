@@ -1,8 +1,9 @@
 """Spreadsheet tools for the in-process agent runtime.
 
-The MVP exposes four tools:
+The MVP exposes five tools:
 
 ``SheetInspect``   workbook metadata and a small sample, without loading the file.
+``SheetCreate``    create a new workbook from tabular data that has no source file.
 ``SheetQuery``     read-only filter / aggregate / sort / project over one sheet.
 ``SheetTransform`` clean a sheet (dedupe, fill, cast, rename, ...) into a **new** file.
 ``SheetPivot``     build a pivot table from one sheet into a **new** file.
@@ -19,6 +20,8 @@ them, and an ``.xlsx`` rewrite does not preserve charts, pivot caches or VBA.
 
 from __future__ import annotations
 
+import csv
+import json
 import logging
 import math
 import os
@@ -37,10 +40,13 @@ logger = logging.getLogger(__name__)
 try:  # pandas and openpyxl are server requirements; tests may run without them.
     import numpy as np
     import pandas as pd
-    from openpyxl import load_workbook
+    from openpyxl import Workbook, load_workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
 except ImportError:  # pragma: no cover - exercised only when a package is absent
     np = None
     pd = None
+    Workbook = None
     load_workbook = None
 
 SHEET_TOOLS_AVAILABLE = pd is not None and np is not None and load_workbook is not None
@@ -73,6 +79,9 @@ _MAX_WARNINGS = 32
 _DEFAULT_SHEET = "Sheet1"
 _INVALID_SHEET = re.compile(r"[\\/*?:\[\]]")
 _ARCHIVE_EXPANSION_FACTOR = 8
+_FORMULA_PREFIXES = ("=", "+", "-", "@")
+_MIN_COLUMN_WIDTH = 10
+_MAX_COLUMN_WIDTH = 60
 
 
 def _warn(warnings: List[str], message: str) -> None:
@@ -306,6 +315,193 @@ def _write_frame(
             frame.to_csv(temp_path, index=index, encoding="utf-8-sig")
         else:
             frame.to_excel(temp_path, index=index, sheet_name=_sheet_name(sheet_name), engine="openpyxl")
+        # mkstemp creates 0600. Mirror _atomic_write_text: keep the target's
+        # mode on overwrite, otherwise make the file readable like Write does.
+        mode = (path.stat().st_mode & 0o7777) if path.exists() else 0o644
+        os.chmod(temp_path, mode)
+        os.replace(temp_path, path)
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
+
+
+# ---- creation ----------------------------------------------------------------
+
+
+def _check_create_output(config: DevToolConfig, output_path: str, overwrite: bool) -> Path:
+    path = _resolve(config, output_path, must_exist=False, for_write=True)
+    if path.suffix.lower() not in WRITABLE_SUFFIXES:
+        raise ValueError(
+            f"output_path {output_path!r} must end with one of " + ", ".join(sorted(WRITABLE_SUFFIXES))
+        )
+    if path.exists() and not overwrite:
+        raise ValueError(f"{output_path!r} already exists; pass overwrite=true to replace it")
+    if path.exists() and not path.is_file():
+        raise ValueError(f"{output_path!r} exists and is not a file")
+    return path
+
+
+def _cell_value(value: Any) -> Any:
+    """Convert one cell to a JSON-compatible scalar that openpyxl can write."""
+    if isinstance(value, (dict, list, tuple, set)):
+        return json.dumps(value, ensure_ascii=False, default=str)
+    return _jsonable(value)
+
+
+def _looks_like_formula(value: Any) -> bool:
+    return isinstance(value, str) and value[:1] in _FORMULA_PREFIXES
+
+
+def _create_rows(
+    columns: Optional[Sequence[str]],
+    rows: Any,
+    warnings: List[str],
+) -> Tuple[List[str], List[List[Any]]]:
+    """Normalize user-supplied columns and rows for a new workbook."""
+    if rows is None:
+        raw_rows: List[Any] = []
+    elif isinstance(rows, dict):
+        raw_rows = [rows]
+    elif isinstance(rows, (list, tuple)):
+        raw_rows = list(rows)
+    else:
+        raise ValueError("rows must be a list of lists or objects")
+
+    if columns:
+        names = [str(column).strip() for column in columns]
+    else:
+        inferred: List[str] = []
+        for index, row in enumerate(raw_rows, start=1):
+            if not isinstance(row, dict):
+                raise ValueError(
+                    f"row {index} must be an object when columns is omitted; pass columns for positional rows"
+                )
+            for key in row:
+                name = str(key)
+                if name not in inferred:
+                    inferred.append(name)
+        names = inferred
+    if not names or not any(name for name in names):
+        raise ValueError("columns must contain at least one column name")
+    names = _normalize_columns(names, warnings)
+
+    normalized: List[List[Any]] = []
+    for index, row in enumerate(raw_rows, start=1):
+        if isinstance(row, dict):
+            keyed = {str(key): value for key, value in row.items()}
+            values = [keyed.get(name) for name in names]
+        elif isinstance(row, (list, tuple)):
+            values = list(row)
+            if len(values) != len(names):
+                raise ValueError(f"row {index} has {len(values)} values but columns has {len(names)}")
+        else:
+            raise ValueError(f"row {index} must be a list or an object")
+        normalized.append([_cell_value(value) for value in values])
+    return names, normalized
+
+
+def _atomic_save_workbook(workbook: Any, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle, temporary = tempfile.mkstemp(prefix=".bokaclaw-sheet-", suffix=".xlsx", dir=str(path.parent))
+    os.close(handle)
+    temp_path = Path(temporary)
+    try:
+        workbook.save(temp_path)
+        mode = (path.stat().st_mode & 0o7777) if path.exists() else 0o644
+        os.chmod(temp_path, mode)
+        os.replace(temp_path, path)
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
+    finally:
+        workbook.close()
+
+
+def _write_created_xlsx(
+    path: Path,
+    columns: Sequence[str],
+    rows: Sequence[Sequence[Any]],
+    sheet_name: str,
+    *,
+    allow_formulas: bool,
+    number_formats: Optional[Dict[str, str]],
+    freeze_header: bool,
+    warnings: List[str],
+) -> None:
+    formats = {str(key): str(value) for key, value in (number_formats or {}).items()}
+    unknown = [key for key in formats if key not in columns]
+    if unknown:
+        raise ValueError(f"number_formats has unknown column(s) {unknown}; available: {', '.join(columns)}")
+
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = _sheet_name(sheet_name)
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill("solid", fgColor="1F4E79")
+    header_alignment = Alignment(horizontal="center", vertical="center")
+    worksheet.append(list(columns))
+    for cell in worksheet[1]:
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = header_alignment
+
+    widths = [max(_MIN_COLUMN_WIDTH, min(_MAX_COLUMN_WIDTH, len(str(column)) + 2)) for column in columns]
+    formula_cells = 0
+    for row in rows:
+        worksheet.append(list(row))
+        row_index = worksheet.max_row
+        for index, value in enumerate(row, start=1):
+            cell = worksheet.cell(row=row_index, column=index)
+            if _looks_like_formula(value) and not allow_formulas:
+                # openpyxl turns a leading "=" into a formula; force the cell
+                # back to text so untrusted web data cannot execute on open.
+                cell.data_type = "s"
+                formula_cells += 1
+            width = min(_MAX_COLUMN_WIDTH, max(_MIN_COLUMN_WIDTH, len(str(value)) + 2))
+            widths[index - 1] = max(widths[index - 1], width)
+        for index, column in enumerate(columns, start=1):
+            if column in formats:
+                worksheet.cell(row=row_index, column=index).number_format = formats[column]
+
+    if freeze_header:
+        worksheet.freeze_panes = "A2"
+    for index, width in enumerate(widths, start=1):
+        worksheet.column_dimensions[get_column_letter(index)].width = width
+    if formula_cells:
+        _warn(
+            warnings,
+            f"wrote {formula_cells} formula-like cell(s) as text; pass allow_formulas=true to keep formulas",
+        )
+    _atomic_save_workbook(workbook, path)
+
+
+def _write_created_csv(
+    path: Path,
+    columns: Sequence[str],
+    rows: Sequence[Sequence[Any]],
+    *,
+    allow_formulas: bool,
+    warnings: List[str],
+) -> None:
+    if not allow_formulas:
+        formula_cells = sum(1 for row in rows for value in row if _looks_like_formula(value))
+        if formula_cells:
+            _warn(
+                warnings,
+                f"{formula_cells} cell(s) start with a formula character; spreadsheet apps may "
+                "interpret them as formulas when the CSV is opened",
+            )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle, temporary = tempfile.mkstemp(prefix=".bokaclaw-sheet-", suffix=".csv", dir=str(path.parent))
+    temp_path = Path(temporary)
+    try:
+        with os.fdopen(handle, "w", newline="", encoding="utf-8-sig") as stream:
+            writer = csv.writer(stream)
+            writer.writerow(list(columns))
+            for row in rows:
+                writer.writerow(["" if value is None else value for value in row])
+        mode = (path.stat().st_mode & 0o7777) if path.exists() else 0o644
+        os.chmod(temp_path, mode)
         os.replace(temp_path, path)
     except Exception:
         temp_path.unlink(missing_ok=True)
@@ -870,6 +1066,79 @@ def build_sheet_tools(sdk: Any, config: DevToolConfig) -> List[Any]:
             ],
         }
 
+    def SheetCreate(
+        output_path: str,
+        columns: Optional[List[str]] = None,
+        rows: Optional[List[Any]] = None,
+        sheet: str = "",
+        overwrite: bool = False,
+        allow_formulas: bool = False,
+        number_formats: Optional[Dict[str, str]] = None,
+        freeze_header: bool = True,
+    ) -> Dict[str, Any]:
+        """Create a new workbook from tabular data; no source file is required.
+
+        Use this when the data was gathered elsewhere (for example from web
+        research) and no spreadsheet exists yet. For cleaning or reshaping an
+        existing file, use SheetTransform instead; for a pivot, use SheetPivot.
+
+        Args:
+            output_path: New .xlsx or .csv path inside the workspace.
+            columns: Ordered column names. Required for positional rows; inferred
+                from the object keys when rows are objects.
+            rows: Data rows. Each row is a list matching columns, or an object
+                keyed by column name. Omit to create a header-only workbook.
+            sheet: Worksheet name for .xlsx output; ignored for CSV.
+            overwrite: Replace an existing output file instead of refusing.
+            allow_formulas: Keep strings that start with =, +, - or @ as formulas.
+                Off by default so untrusted data is written as text.
+            number_formats: Optional {column: Excel number format} for .xlsx, for
+                example {"Price": "#,##0.00", "Date": "yyyy-mm-dd"}.
+            freeze_header: Freeze the header row in .xlsx output.
+        """
+        output = _check_create_output(config, output_path, overwrite)
+        warnings: List[str] = []
+        names, data = _create_rows(columns, rows, warnings)
+        if len(data) > _max_rows(config):
+            raise ValueError(
+                f"rows has {len(data)} entries; the limit is {_max_rows(config)} "
+                "(raise AGENT_SHEET_MAX_ROWS to allow it)"
+            )
+
+        suffix = output.suffix.lower()
+        sheet_name = _sheet_name(sheet) if suffix == ".xlsx" else (output.stem or _DEFAULT_SHEET)
+        if suffix == ".xlsx":
+            _write_created_xlsx(
+                output,
+                names,
+                data,
+                sheet_name,
+                allow_formulas=allow_formulas,
+                number_formats=number_formats,
+                freeze_header=freeze_header,
+                warnings=warnings,
+            )
+        else:
+            if number_formats:
+                _warn(warnings, "number_formats is ignored for CSV output")
+            if not freeze_header:
+                _warn(warnings, "freeze_header is ignored for CSV output")
+            _write_created_csv(output, names, data, allow_formulas=allow_formulas, warnings=warnings)
+
+        return {
+            "output_path": _relative(config, output),
+            "format": suffix.lstrip("."),
+            "sheet": sheet_name,
+            "rows": len(data),
+            "columns": list(names),
+            "bytes": output.stat().st_size,
+            "warnings": warnings,
+            "notes": [
+                "This tool creates a new file; it never edits an existing workbook.",
+                "Strings that start with =, +, - or @ are written as text unless allow_formulas=true.",
+            ],
+        }
+
     def SheetQuery(
         file_path: str,
         sheet: str = "",
@@ -1117,6 +1386,7 @@ def build_sheet_tools(sdk: Any, config: DevToolConfig) -> List[Any]:
 
     return [
         sdk.tool(SheetInspect, name="SheetInspect", effect="read", concurrency_safe=True),
+        sdk.tool(SheetCreate, name="SheetCreate"),
         sdk.tool(SheetQuery, name="SheetQuery", effect="read", concurrency_safe=True),
         sdk.tool(SheetTransform, name="SheetTransform"),
         sdk.tool(SheetPivot, name="SheetPivot"),

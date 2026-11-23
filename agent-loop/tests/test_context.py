@@ -2,12 +2,42 @@ from __future__ import annotations
 
 import pytest
 
-from bokaclaw_agent.agent.context import ContextManager, assistant_message, normalize_input, tool_message
+from bokaclaw_agent.agent.context import (
+    ContextManager,
+    assistant_message,
+    content_text,
+    count_message_tokens,
+    normalize_input,
+    tool_message,
+)
+from bokaclaw_agent.agent.tokenization import HeuristicTokenCounter
 from bokaclaw_agent.core.types import ModelResponse, ToolCall, ToolResult
 
 
 def test_normalize_input_string():
     assert normalize_input("hello") == [{"role": "user", "content": "hello"}]
+
+
+def test_image_parts_use_a_fixed_estimate_instead_of_base64_length():
+    message = {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "what is this?"},
+            {
+                "type": "image_url",
+                "image_url": {"url": "data:image/jpeg;base64," + "A" * 100_000},
+            },
+        ],
+    }
+
+    tokens = count_message_tokens(
+        message,
+        counter=HeuristicTokenCounter(),
+        image_token_estimate=1200,
+    )
+
+    assert tokens < 1500
+    assert content_text(message["content"]) == "what is this?\n[image]"
 
 
 def test_normalize_input_rejects_invalid_items():

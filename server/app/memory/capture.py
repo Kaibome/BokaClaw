@@ -133,6 +133,7 @@ def capture_turn(
     is_subagent: bool = False,
     used_memory_tool: bool = False,
     injected_memory: bool = False,
+    has_attachments: bool = False,
 ) -> CaptureReport:
     """Append one raw episode for a completed turn. Never raises."""
 
@@ -162,7 +163,12 @@ def capture_turn(
 
     user_text = strip_noise(user_message)
     assistant_text = strip_noise(assistant_message)
-    if _too_short(user_text) or is_noise(user_text):
+    if not has_attachments and (_too_short(user_text) or is_noise(user_text)):
+        report.reason = "short_or_noise"
+        return report
+    if has_attachments and not user_text:
+        user_text = "用户上传了一张图片"
+    if is_noise(user_text):
         report.reason = "short_or_noise"
         return report
     if assistant_text and _is_generic_assistant(assistant_text):

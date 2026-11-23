@@ -207,14 +207,16 @@ another OpenAI-compatible endpoint. Compression summaries can run on a separate,
 The Claude Code-style developer tools are registered by default: `Read`, `Write`, `Edit`,
 `NotebookEdit`, `Glob`, `Grep`, `WebFetch`, `WebSearch`, the presentation tools `PptxBuild`,
 `PptxUpdateSlide`, `PptxAddSlide`, and `PptxDeleteSlide`, and the spreadsheet tools `SheetInspect`,
-`SheetQuery`, `SheetTransform`, and `SheetPivot`. `Bash`, `PowerShell`, and `Monitor` are added only
-when `AGENT_TOOLS_ALLOW_SHELL=true`. `AGENT_OFFICE_TOOLS=false` removes the Pptx tools, and
-`AGENT_SHEET_TOOLS=false` removes the spreadsheet tools.
+`SheetCreate`, `SheetQuery`, `SheetTransform`, and `SheetPivot`. `Bash`, `PowerShell`, and `Monitor`
+are added only when `AGENT_TOOLS_ALLOW_SHELL=true`. `AGENT_OFFICE_TOOLS=false` removes the Pptx
+tools, and `AGENT_SHEET_TOOLS=false` removes the spreadsheet tools.
 
 The spreadsheet tools read `.xlsx`, `.xlsm`, and `.csv`. `SheetInspect` and `SheetQuery` are
-read-only; `SheetTransform` and `SheetPivot` always write a new file and refuse to overwrite the
-input. Formulas are read as their cached values and are never recalculated; rewriting an `.xlsx`
-does not preserve charts, pivot caches, or VBA. `.xls` and `.ods` are not supported.
+read-only; `SheetCreate` writes a new workbook from tabular data with no source file;
+`SheetTransform` and `SheetPivot` write a new file derived from an input and refuse to overwrite the
+input. Formula-like strings are written as text by default, and `.csv` output warns instead of
+altering the value. Formulas are read as their cached values and are never recalculated; rewriting
+an `.xlsx` does not preserve charts, pivot caches, or VBA. `.xls` and `.ods` are not supported.
 
 `WebFetch` caches every successful page for the duration of one run. Fetched page text is returned
 inside `<<<BEGIN UNTRUSTED WEB CONTENT source=<url>>>>` … `<<<END UNTRUSTED WEB CONTENT>>>` markers.
@@ -222,6 +224,20 @@ inside `<<<BEGIN UNTRUSTED WEB CONTENT source=<url>>>>` … `<<<END UNTRUSTED WE
 File paths are resolved inside `AGENT_WORKSPACE_ROOT`, and `..` or symlink escapes are rejected.
 Set `AGENT_EXECUTOR_URL` to run shell tools in the sandboxed executor container; leaving it empty
 runs them inside the server process, where there is **no OS-level sandbox**.
+
+### Image input
+
+Set `AGENT_VISION_MODEL` (and optionally `AGENT_VISION_BASE_URL` / `AGENT_VISION_API_KEY`) to an
+OpenAI-compatible vision endpoint to enable image input. The dashboard uploads normalized images
+through `POST /agent/attachments`, then sends their ids in `POST /agent.attachment_ids`. The server
+stores bytes under `AGENT_ATTACHMENTS_ROOT` (default `/app/history/attachments`) and keeps only
+descriptors in `conversation_messages.metadata.attachments`; image data URLs are built at model-call
+time and never persisted in `agent_runs.request` or spans. Runs containing images switch to the
+vision model; text-only runs keep `AGENT_MODEL`.
+
+`GET /agent/capabilities` reports whether the dashboard should show the attach control. The remote
+`AGENT_LOOP_URL` path rejects images unless `AGENT_REMOTE_VISION_SUPPORTED=true` and the executor
+shares the attachment volume. See [`docs/dashboard/agent-image-input.md`](../docs/dashboard/agent-image-input.md).
 
 ### MCP tools
 

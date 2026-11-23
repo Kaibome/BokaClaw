@@ -8,7 +8,7 @@ from fastapi import HTTPException
 from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
-from app.agent.schemas import ConversationMessageOut, ConversationOut
+from app.agent.schemas import AttachmentOut, ConversationMessageOut, ConversationOut
 from app.models import Conversation, ConversationMessage
 
 
@@ -21,10 +21,13 @@ MAX_TITLE_LENGTH = 80
 MAX_HISTORY_CHARACTERS = 24_000
 DEFAULT_HISTORY_TOOL_RESULT_MAX_CHARS = 2_000
 DEFAULT_HISTORY_TOOL_ARGUMENT_MAX_CHARS = 1_000
+DEFAULT_HISTORY_MAX_IMAGES = 4
+HISTORY_IMAGE_CHAR_COST = 4_000
 HISTORY_TRUNCATION_MARKER = "\n... [truncated] ...\n"
 _HISTORY_TOOL_TRACE_ENV = "AGENT_LOOP_HISTORY_TOOL_TRACE"
 _HISTORY_TOOL_RESULT_MAX_CHARS_ENV = "AGENT_LOOP_HISTORY_TOOL_RESULT_MAX_CHARS"
 _HISTORY_TOOL_ARGUMENT_MAX_CHARS_ENV = "AGENT_LOOP_HISTORY_TOOL_ARGUMENT_MAX_CHARS"
+_HISTORY_MAX_IMAGES_ENV = "AGENT_HISTORY_MAX_IMAGES"
 _FALSE_VALUES = {"0", "false", "no", "off"}
 
 
@@ -41,11 +44,11 @@ def _env_bounded_int(name: str, default: int) -> int:
     return max(0, value)
 
 
-def derive_title(message: str) -> str:
+def derive_title(message: str, fallback: str = DEFAULT_TITLE) -> str:
     """Collapse whitespace and truncate to a short conversation title."""
     collapsed = " ".join(message.split())
     if len(collapsed) <= MAX_TITLE_LENGTH:
-        return collapsed or DEFAULT_TITLE
+        return collapsed or fallback
     return f"{collapsed[:MAX_TITLE_LENGTH]}..."
 
 
@@ -77,7 +80,38 @@ def serialize_conversation(conversation: Conversation) -> ConversationOut:
     )
 
 
+def _attachment_descriptors(meta: Any) -> list[dict[str, Any]]:
+    """Return well-formed attachment descriptors from a message metadata object."""
+
+    if not isinstance(meta, dict):
+        return []
+    raw = meta.get("attachments")
+    if not isinstance(raw, list):
+        return []
+    descriptors: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        attachment_id = item.get("id")
+        if not isinstance(attachment_id, str) or not attachment_id:
+            continue
+        try:
+            descriptor = {
+                "id": attachment_id,
+                "name": str(item.get("name") or attachment_id)[:120],
+                "mime_type": str(item.get("mime_type") or "image/jpeg"),
+                "bytes": max(0, int(item.get("bytes") or 0)),
+                "width": max(0, int(item.get("width") or 0)),
+                "height": max(0, int(item.get("height") or 0)),
+            }
+        except (TypeError, ValueError):
+            continue
+        descriptors.append(descriptor)
+    return descriptors
+
+
 def serialize_message(message: ConversationMessage) -> ConversationMessageOut:
+    attachments = [AttachmentOut(**descriptor) for descriptor in _attachment_descriptors(message.meta)]
     return ConversationMessageOut(
         id=str(message.id),
         conversation_id=str(message.conversation_id),
@@ -85,6 +119,7 @@ def serialize_message(message: ConversationMessage) -> ConversationMessageOut:
         content=message.content,
         status=message.status,
         metadata=message.meta or {},
+        attachments=attachments,
         created_at=message.created_at,
     )
 
@@ -210,6 +245,7 @@ def _render_history_message(
     include_tool_trace: bool,
     tool_result_max_chars: int,
     tool_argument_max_chars: int,
+    keep_image_ids: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Render one stored message as the wire-format messages it represents.
 
@@ -217,12 +253,32 @@ def _render_history_message(
     by one ``tool`` message per call and, when the run produced an answer, a
     final assistant message. The model therefore sees what earlier runs already
     fetched instead of starting from a blank slate.
+
+    ``keep_image_ids`` bounds how many historical images reach the model view;
+    images not in the set become a text placeholder so the turn is still
+    understandable without another multi-megabyte request.
     """
     content = message.content or ""
     if message.role == "user":
-        if message.status != "completed" or not content:
+        if message.status != "completed":
             return []
-        return [{"role": "user", "content": content}]
+        descriptors = _attachment_descriptors(message.meta)
+        kept = [
+            descriptor
+            for descriptor in descriptors
+            if keep_image_ids is None or descriptor["id"] in keep_image_ids
+        ]
+        dropped = len(descriptors) - len(kept)
+        if dropped and content:
+            content = f"{content}\n[Earlier image omitted]"
+        elif dropped:
+            content = "[Earlier image omitted]"
+        if not content and not kept:
+            return []
+        rendered: dict[str, Any] = {"role": "user", "content": content}
+        if kept:
+            rendered["attachments"] = kept
+        return [rendered]
     if message.role != "assistant":
         return []
 
@@ -277,6 +333,9 @@ def _history_block_cost(block: list[dict[str, Any]]) -> int:
         content = message.get("content")
         if isinstance(content, str):
             cost += len(content)
+        attachments = message.get("attachments")
+        if isinstance(attachments, list):
+            cost += len(attachments) * HISTORY_IMAGE_CHAR_COST
         for call in message.get("tool_calls") or []:
             function = call.get("function") or {}
             cost += len(function.get("name") or "") + len(function.get("arguments") or "")
@@ -338,17 +397,32 @@ def build_history(
         ).all()
     )
 
+    max_images = _env_bounded_int(_HISTORY_MAX_IMAGES_ENV, DEFAULT_HISTORY_MAX_IMAGES)
+    images_kept = 0
+
+    def render(message: ConversationMessage) -> list[dict[str, Any]]:
+        nonlocal images_kept
+        keep_image_ids: set[str] | None = None
+        descriptors = _attachment_descriptors(message.meta)
+        if message.role == "user" and descriptors:
+            remaining = max(0, max_images - images_kept)
+            keep = descriptors[:remaining]
+            keep_image_ids = {descriptor["id"] for descriptor in keep}
+            images_kept += len(keep)
+        return _render_history_message(
+            message,
+            include_tool_trace=include_tool_trace,
+            tool_result_max_chars=tool_result_max_chars,
+            tool_argument_max_chars=tool_argument_max_chars,
+            keep_image_ids=keep_image_ids,
+        )
+
     selected: list[list[dict[str, Any]]] = []
     characters = 0
     index = 0
     while index < len(recent):
         message = recent[index]
-        block = _render_history_message(
-            message,
-            include_tool_trace=include_tool_trace,
-            tool_result_max_chars=tool_result_max_chars,
-            tool_argument_max_chars=tool_argument_max_chars,
-        )
+        block = render(message)
         if not block:
             index += 1
             continue
@@ -356,12 +430,7 @@ def build_history(
         cost = _history_block_cost(block)
         paired: list[dict[str, Any]] | None = None
         if message.role == "assistant" and index + 1 < len(recent) and recent[index + 1].role == "user":
-            user_block = _render_history_message(
-                recent[index + 1],
-                include_tool_trace=include_tool_trace,
-                tool_result_max_chars=tool_result_max_chars,
-                tool_argument_max_chars=tool_argument_max_chars,
-            )
+            user_block = render(recent[index + 1])
             if user_block:
                 paired = user_block
                 cost += _history_block_cost(user_block)

@@ -50,6 +50,10 @@ class FakeNoProgressError(Exception):
     pass
 
 
+class FakeModelProtocolError(Exception):
+    pass
+
+
 class FakeConfigurationError(Exception):
     pass
 
@@ -136,6 +140,7 @@ class FakeRuntime:
 class FakeSDK:
     MaxIterationsExceeded = FakeMaxIterationsExceeded
     NoProgressError = FakeNoProgressError
+    ModelProtocolError = FakeModelProtocolError
     ConfigurationError = FakeConfigurationError
     ModelConfig = FakeModelConfig
     AgentConfig = FakeAgentConfig
@@ -248,6 +253,15 @@ def clean_agent_env(monkeypatch):
         "AGENT_SUBAGENT_TOKEN_BUDGET",
         "AGENT_SUBAGENT_VERIFICATION",
         "AGENT_SUBAGENT_ALLOW_ABSOLUTE_PATHS",
+        "AGENT_VISION_MODEL",
+        "AGENT_VISION_API_KEY",
+        "AGENT_VISION_BASE_URL",
+        "AGENT_VISION_IMAGE_DETAIL",
+        "AGENT_VISION_CONTEXT_WINDOW",
+        "AGENT_IMAGE_TOKEN_ESTIMATE",
+        "AGENT_HISTORY_MAX_IMAGES",
+        "AGENT_ATTACHMENTS_ROOT",
+        "DASHSCOPE_API_KEY",
         "AGENT_WORKSPACE_ROOT",
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
@@ -378,6 +392,79 @@ def test_env_settings_are_applied(monkeypatch):
     assert config.max_iterations == 3
     assert config.max_seconds == 42
     assert config.system_prompt == "custom"
+
+
+def test_vision_settings_are_loaded_and_reported_as_configured(monkeypatch):
+    monkeypatch.setattr(agent_runtime, "_current_llm_config", lambda: {})
+    monkeypatch.setenv("AGENT_MODEL", "deepseek-chat")
+    monkeypatch.setenv("AGENT_API_KEY", "k")
+    monkeypatch.setenv("AGENT_VISION_MODEL", "qwen-vl-max-latest")
+    monkeypatch.setenv("AGENT_VISION_API_KEY", "vision-key")
+    monkeypatch.setenv("AGENT_VISION_BASE_URL", "https://dashscope.example/v1")
+    monkeypatch.setenv("AGENT_VISION_IMAGE_DETAIL", "high")
+    monkeypatch.setenv("AGENT_VISION_CONTEXT_WINDOW", "65536")
+    monkeypatch.setenv("AGENT_IMAGE_TOKEN_ESTIMATE", "900")
+
+    config = agent_runtime.load_local_config()
+
+    assert config is not None
+    assert config.vision_model == "qwen-vl-max-latest"
+    assert config.vision_api_key == "vision-key"
+    assert config.vision_base_url == "https://dashscope.example/v1"
+    assert config.vision_image_detail == "high"
+    assert config.vision_context_window == 65536
+    assert config.image_token_estimate == 900
+    assert agent_runtime.vision_configured() is True
+
+
+def test_dashscope_key_fills_the_compatible_mode_url(monkeypatch):
+    monkeypatch.setattr(agent_runtime, "_current_llm_config", lambda: {})
+    monkeypatch.setenv("AGENT_MODEL", "deepseek-chat")
+    monkeypatch.setenv("AGENT_API_KEY", "k")
+    monkeypatch.setenv("AGENT_VISION_MODEL", "qwen-vl-max-latest")
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "dashscope-key")
+
+    config = agent_runtime.load_local_config()
+
+    assert config is not None
+    assert config.vision_api_key == "dashscope-key"
+    assert config.vision_base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    assert agent_runtime.vision_configured() is True
+
+
+def test_vision_model_alone_is_not_reported_as_configured(monkeypatch):
+    monkeypatch.setattr(agent_runtime, "_current_llm_config", lambda: {})
+    monkeypatch.setenv("AGENT_MODEL", "deepseek-chat")
+    monkeypatch.setenv("AGENT_API_KEY", "k")
+    monkeypatch.setenv("AGENT_VISION_MODEL", "qwen-vl-max-latest")
+
+    assert agent_runtime.vision_configured() is False
+
+
+def test_model_request_span_redacts_image_data_urls(monkeypatch):
+    monkeypatch.setattr(agent_runtime, "_span_prompt_mode", lambda: "full")
+
+    event = agent_runtime._model_request_event(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "look"},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "data:image/jpeg;base64," + "A" * 500},
+                        },
+                    ],
+                }
+            ]
+        },
+        1,
+    )
+
+    assert "base64" not in str(event.prompt)
+    assert "redacted image" in str(event.prompt)
+    assert "base64" not in str(event.last_message_hash)
 
 
 def test_context_budgets_default_on_for_the_server(monkeypatch):
@@ -638,6 +725,29 @@ def test_build_runtime_omits_the_compression_model_when_unset():
     runtime = agent_runtime.build_runtime(FakeSDK(), _config(), _payload())
 
     assert runtime.config.kwargs["compression_model"] is None
+
+
+def test_build_runtime_uses_vision_only_for_the_main_model():
+    runtime = agent_runtime.build_runtime(
+        FakeSDK(),
+        _config(
+            vision_model="vl-model",
+            vision_api_key="vl-key",
+            vision_base_url="http://vision.example/v1",
+        ),
+        _payload(),
+        use_vision=True,
+    )
+
+    main = runtime.config.kwargs["model"]
+    assert main.kwargs["model"] == "vl-model"
+    assert main.kwargs["api_key"] == "vl-key"
+    assert main.kwargs["base_url"] == "http://vision.example/v1"
+
+    compression = runtime.config.kwargs["compression_model"]
+    assert compression.kwargs["model"] == "test-model"
+    assert compression.kwargs["api_key"] == "test-key"
+    assert compression.kwargs["base_url"] is None
 
 
 def test_build_runtime_registers_ask_user_for_background_runs():
@@ -1296,6 +1406,18 @@ async def test_stream_local_agent_maps_no_progress(monkeypatch):
         await _collect(_payload())
 
     assert excinfo.value.code == "agent_no_progress"
+
+
+@pytest.mark.asyncio
+async def test_stream_local_agent_maps_model_protocol_error(monkeypatch):
+    sdk = FakeSDK(error=FakeModelProtocolError("raw DSML"))
+    monkeypatch.setattr(agent_runtime, "load_local_config", lambda: _config())
+    monkeypatch.setattr(agent_runtime, "_load_sdk", lambda: sdk)
+
+    with pytest.raises(AgentLoopError) as excinfo:
+        await _collect(_payload())
+
+    assert excinfo.value.code == "agent_protocol_error"
 
 
 @pytest.mark.asyncio

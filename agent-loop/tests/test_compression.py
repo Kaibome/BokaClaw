@@ -3,7 +3,8 @@ from __future__ import annotations
 import pytest
 from conftest import FakeProvider
 
-from bokaclaw_agent.agent.compression import ContextCompressor
+from bokaclaw_agent.agent import compression as compression_module
+from bokaclaw_agent.agent.compression import ContextCompressor, _format_transcript, _message_units
 from bokaclaw_agent.agent.context import (
     TRUNCATION_MARKER,
     count_message_tokens,
@@ -99,6 +100,39 @@ def _compressor(**overrides):
     )
     usage: dict[str, int] = {}
     return ContextCompressor(config, provider, usage), provider, usage
+
+
+def test_summary_transcript_replaces_images_with_placeholders():
+    messages: list[dict[str, object]] = [
+        {"role": "system", "content": "sys"},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "old image"},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/jpeg;base64," + "A" * 50_000},
+                },
+            ],
+        },
+        {"role": "assistant", "content": "answer " + "y" * 400},
+        {"role": "user", "content": "second " + "z" * 400},
+        {"role": "assistant", "content": "answer two " + "w" * 400},
+        {"role": "user", "content": "current"},
+    ]
+    provider = FakeProvider([ModelResponse(content="summary", usage={"total_tokens": 5})])
+    compressor = ContextCompressor(
+        AgentConfig(context_max_tokens=1200, context_keep_recent_tokens=256),
+        provider,
+        {},
+    )
+
+    result = compressor.compress(messages)
+
+    assert result.stats["summarized"] is True
+    request_text = str(provider.calls[0]["messages"])
+    assert "base64" not in request_text
+    assert "[image]" in request_text
 
 
 def test_compression_is_disabled_by_default():
@@ -241,12 +275,27 @@ def test_summary_transcript_truncates_one_message_above_the_8000_char_cap():
     assert len(request_text) < 20_000
 
 
-def test_summary_transcript_keeps_only_the_last_64000_chars():
+def test_format_transcript_caps_each_chunk_at_the_input_limit(monkeypatch):
+    monkeypatch.setattr(compression_module, "SUMMARY_INPUT_MAX_CHARS", 10_000)
+    messages = [
+        {"role": "user", "content": "EARLY-MARKER " + "a" * 9_000},
+        {"role": "assistant", "content": "b" * 9_000},
+        {"role": "tool", "tool_call_id": "c1", "content": "c" * 9_000 + "-LATE-MARKER"},
+    ]
+
+    transcript = _format_transcript(messages)
+
+    assert len(transcript) <= 10_000
+    assert "EARLY-MARKER" not in transcript
+    assert "LATE-MARKER" in transcript
+
+
+def _fold_with_tool_units(contents: list[str]) -> list[dict[str, object]]:
     messages: list[dict[str, object]] = [
         {"role": "system", "content": "sys"},
-        {"role": "user", "content": "EARLY-MARKER task"},
+        {"role": "user", "content": "task"},
     ]
-    for index in range(10):
+    for index, content in enumerate(contents):
         messages.append(
             {
                 "role": "assistant",
@@ -260,21 +309,72 @@ def test_summary_transcript_keeps_only_the_last_64000_chars():
                 ],
             }
         )
-        messages.append(
-            {
-                "role": "tool",
-                "tool_call_id": f"c{index}",
-                "content": f"T{index}-" + "z" * 10_000 + f"-LATE-{index}",
-            }
-        )
+        messages.append({"role": "tool", "tool_call_id": f"c{index}", "content": content})
     messages.append({"role": "user", "content": "current"})
-    compressor, provider, _ = _compressor(context_max_tokens=1600, context_keep_recent_tokens=400)
+    return messages
 
-    compressor.compress(messages)
 
-    request_text = provider.calls[0]["messages"][1]["content"]
-    assert "EARLY-MARKER" not in request_text
-    assert "LATE-9" in request_text
+def test_summary_rolls_through_multiple_chunks(monkeypatch):
+    monkeypatch.setattr(compression_module, "SUMMARY_CHUNK_TOKENS", 500)
+    provider = FakeProvider([ModelResponse(content=f"S{index}", usage={"total_tokens": 5}) for index in range(1, 4)])
+    compressor = ContextCompressor(
+        AgentConfig(context_max_tokens=1024, context_keep_recent_tokens=100),
+        provider,
+        {},
+    )
+
+    result = compressor.compress(_fold_with_tool_units(["A" * 1_000, "B" * 1_000, "C" * 1_000]))
+
+    assert result.stats["summarized"] is True
+    assert result.stats["model_calls"] == 3
+    assert result.stats["summary_chunks"] == 3
+    assert result.stats["summary_chunks_failed"] == 0
+    assert len(provider.calls) == 3
+    assert "A" * 1_000 in provider.calls[0]["messages"][1]["content"]
+    assert "Previous summary:\nS1" in provider.calls[1]["messages"][1]["content"]
+    assert "Previous summary:\nS2" in provider.calls[2]["messages"][1]["content"]
+    assert "S3" in result.messages[0]["content"]
+
+
+def test_summary_chunk_failure_is_partial_and_continues(monkeypatch):
+    monkeypatch.setattr(compression_module, "SUMMARY_CHUNK_TOKENS", 500)
+    provider = FakeProvider(
+        [
+            RuntimeError("first chunk failed"),
+            ModelResponse(content="S2", usage={"total_tokens": 5}),
+            ModelResponse(content="S3", usage={"total_tokens": 5}),
+        ]
+    )
+    compressor = ContextCompressor(
+        AgentConfig(context_max_tokens=1024, context_keep_recent_tokens=100),
+        provider,
+        {},
+    )
+
+    result = compressor.compress(_fold_with_tool_units(["A" * 1_000, "B" * 1_000, "C" * 1_000]))
+
+    assert len(provider.calls) == 3
+    assert result.stats["summarized"] is True
+    assert result.stats["fallback"] is True
+    assert result.stats["model_calls"] == 3
+    assert result.stats["summary_chunks"] == 3
+    assert result.stats["summary_chunks_failed"] == 1
+    assert "S3" in result.messages[0]["content"]
+
+
+def test_message_units_keep_tool_call_blocks_together():
+    messages = [
+        {"role": "assistant", "content": None, "tool_calls": [{"id": "c1"}]},
+        {"role": "tool", "tool_call_id": "c1", "content": "one"},
+        {"role": "tool", "tool_call_id": "c2", "content": "two"},
+        {"role": "user", "content": "next"},
+    ]
+
+    units = _message_units(messages)
+
+    assert [len(unit) for unit in units] == [3, 1]
+    assert units[0] == messages[:3]
+    assert units[1] == messages[3:]
 
 
 def test_summary_output_is_capped_at_12000_chars():
@@ -433,6 +533,8 @@ def test_context_compressed_event_precedes_the_model_request():
         "usage",
         "model_calls",
         "usage_unknown_calls",
+        "summary_chunks",
+        "summary_chunks_failed",
         "input",
         "output",
     }

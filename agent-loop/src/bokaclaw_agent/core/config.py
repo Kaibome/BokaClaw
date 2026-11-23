@@ -68,6 +68,14 @@ class AgentConfig(BaseModel):
         default="summary",
         description="How to compress over-budget context: summarize with the provider or only drop.",
     )
+    image_token_estimate: int = Field(
+        default=1200,
+        ge=1,
+        description=(
+            "Conservative token estimate for each image content part when a tokenizer cannot "
+            "measure pixels. Used by context budgets and compression."
+        ),
+    )
     tool_result_max_chars: int | None = Field(
         default=None,
         ge=256,

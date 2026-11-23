@@ -9,7 +9,9 @@ import { SseParser, type SseMessage } from "@/utils/sse";
 import { useI18n } from "@/i18n/provider";
 import type {
   ActiveRun,
+  AgentCapabilities,
   AgentRun,
+  Attachment,
   ChatMessage,
   CompressionInfo,
   ConnectionState,
@@ -388,6 +390,9 @@ export function useAgentChat() {
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [isSending, setIsSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [capabilities, setCapabilities] = useState<AgentCapabilities | null>(
+    null,
+  );
 
   const activeIdRef = useRef<string | null>(null);
   const runIdRef = useRef<string | null>(null);
@@ -417,6 +422,21 @@ export function useAgentChat() {
   const loadMessagesRef = useRef<(conversationId: string) => Promise<void>>(
     async () => {},
   );
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .get<AgentCapabilities>(AGENT_ENDPOINTS.CAPABILITIES)
+      .then((response) => {
+        if (!cancelled) setCapabilities(response.data);
+      })
+      .catch(() => {
+        if (!cancelled) setCapabilities(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const clearRetryTimer = useCallback(() => {
     if (retryTimerRef.current !== null) {
@@ -1491,9 +1511,12 @@ export function useAgentChat() {
   );
 
   const send = useCallback(
-    async (rawText: string): Promise<SendResult> => {
+    async (
+      rawText: string,
+      attachments: Attachment[] = [],
+    ): Promise<SendResult> => {
       const text = rawText.trim();
-      if (!text) return { ok: false };
+      if (!text && attachments.length === 0) return { ok: false };
       if (sendingRef.current) return { ok: false, draft: text };
 
       const existingRunId = runIdRef.current;
@@ -1535,6 +1558,7 @@ export function useAgentChat() {
           content: text,
           status: "completed",
           metadata: {},
+          attachments,
           created_at: new Date().toISOString(),
         },
         {
@@ -1558,7 +1582,12 @@ export function useAgentChat() {
       try {
         const response = await postStream(
           AGENT_ENDPOINTS.INVOKE,
-          { conversation_id: conversationId, message: text, stream: true },
+          {
+            conversation_id: conversationId,
+            message: text,
+            attachment_ids: attachments.map((attachment) => attachment.id),
+            stream: true,
+          },
           { signal: controller.signal },
         );
 
@@ -2030,6 +2059,7 @@ export function useAgentChat() {
     activeRunId,
     error,
     contextUsage,
+    capabilities,
     send,
     stop,
     answerQuestion,

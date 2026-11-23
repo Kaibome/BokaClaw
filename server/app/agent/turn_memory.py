@@ -27,6 +27,30 @@ class TurnMemorySave:
     duration_ms: Optional[int] = None
 
 
+def _attachment_names(payload: Dict[str, Any]) -> list[str]:
+    names: list[str] = []
+    descriptors = payload.get("attachments")
+    if isinstance(descriptors, list):
+        for descriptor in descriptors:
+            if isinstance(descriptor, dict) and descriptor.get("name"):
+                names.append(str(descriptor["name"])[:80])
+    if not names:
+        for attachment_id in payload.get("attachment_ids") or []:
+            if isinstance(attachment_id, str):
+                names.append(attachment_id[:80])
+    return names
+
+
+def _memory_question(payload: Dict[str, Any]) -> str:
+    message = str(payload.get("message") or "").strip()
+    if message:
+        return message
+    names = _attachment_names(payload)
+    if names:
+        return f"用户上传了图片：{', '.join(names[:2])}"
+    return ""
+
+
 def _used_memory_tool(entries: Iterable[Dict[str, Any]]) -> bool:
     for entry in entries or ():
         if not isinstance(entry, dict):
@@ -51,7 +75,8 @@ def save_turn_memory(
     cost without improving the next turn.
     """
 
-    report = TurnMemorySave(question=str(payload.get("message") or "")[:200])
+    question = _memory_question(payload)
+    report = TurnMemorySave(question=question[:200])
     trace = list(entries or [])
     metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
     if metadata.get("benchmark"):
@@ -63,7 +88,7 @@ def save_turn_memory(
         service = get_memory_instance()
         capture = service.capture_turn(
             str(payload.get("user_id") or ""),
-            str(payload.get("message") or ""),
+            question,
             content or "",
             tool_entries=trace,
             metadata=metadata,
@@ -73,6 +98,7 @@ def save_turn_memory(
             is_subagent=bool(metadata.get("is_subagent") or metadata.get("subagent")),
             used_memory_tool=_used_memory_tool(trace),
             injected_memory=memory_injected,
+            has_attachments=bool(_attachment_names(payload)) or bool(payload.get("attachment_ids")),
         )
     except Exception as exc:
         logger.warning("Episodic capture failed for run %s", payload.get("run_id"), exc_info=True)

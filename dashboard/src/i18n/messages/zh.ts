@@ -119,6 +119,18 @@ const zh: Messages = {
   "agent.composer.stop": "停止生成",
   "agent.composer.stoppingAria": "正在停止",
   "agent.composer.send": "发送消息",
+  "agent.composer.attach": "添加图片",
+  "agent.composer.attachAria": "添加图片",
+  "agent.composer.attachments": "附件",
+  "agent.composer.removeAttachment": "移除 {name}",
+  "agent.composer.uploading": "上传中…",
+  "agent.composer.uploadFailed": "上传失败：{name}",
+  "agent.composer.tooManyImages": "最多只能添加 {max} 张图片。",
+  "agent.composer.imageTooLarge": "{name} 超过大小限制。",
+  "agent.composer.unsupportedImage": "{name} 不是支持的图片类型。",
+  "agent.composer.imageAlt": "附件图片 {index}",
+  "agent.composer.previewImage": "预览附件图片",
+  "agent.composer.imageInputUnavailable": "服务端未配置图片输入。",
 
   // Agent errors and toasts
   "agent.errors.notConfigured":

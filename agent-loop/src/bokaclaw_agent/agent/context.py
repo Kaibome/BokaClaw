@@ -22,25 +22,82 @@ def count_tokens(text: str | None, *, counter: TokenCounter | None = None) -> in
     return (counter or get_token_counter()).count(text)
 
 
-def count_message_tokens(message: dict[str, Any], *, counter: TokenCounter | None = None) -> int:
-    """Count one wire-format message, including tool calls and role overhead."""
+IMAGE_PLACEHOLDER = "[image]"
+
+
+def content_text(value: Any) -> str:
+    """Render message content as text without expanding base64 image payloads."""
+
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts: list[str] = []
+        for part in value:
+            if isinstance(part, dict):
+                part_type = part.get("type")
+                if part_type == "text":
+                    parts.append(str(part.get("text") or ""))
+                elif part_type == "image_url":
+                    parts.append(IMAGE_PLACEHOLDER)
+                else:
+                    parts.append(_json_text(part)[:1_000])
+            else:
+                parts.append(str(part))
+        return "\n".join(part for part in parts if part)
+    if value is None:
+        return ""
+    return _json_text(value)
+
+
+def count_message_tokens(
+    message: dict[str, Any],
+    *,
+    counter: TokenCounter | None = None,
+    image_token_estimate: int = 1_200,
+) -> int:
+    """Count one wire-format message, including tool calls and role overhead.
+
+    Image parts use a fixed conservative estimate instead of counting their
+    base64 data URL as text; tokenizing a multi-megabyte data URL would make the
+    context budget meaningless and is very slow.
+    """
 
     counter = counter or get_token_counter()
     tokens = MESSAGE_OVERHEAD_TOKENS
     content = message.get("content")
     if isinstance(content, str):
         tokens += counter.count(content)
+    elif isinstance(content, list):
+        for part in content:
+            if isinstance(part, dict):
+                part_type = part.get("type")
+                if part_type == "text":
+                    tokens += counter.count(str(part.get("text") or ""))
+                elif part_type == "image_url":
+                    tokens += max(1, image_token_estimate)
+                else:
+                    tokens += counter.count(_json_text(part)[:1_000])
+            else:
+                tokens += counter.count(str(part))
     elif content is not None:
-        tokens += counter.count(_json_text(content))
+        tokens += counter.count(_json_text(content)[:4_000])
     tool_calls = message.get("tool_calls")
     if tool_calls:
         tokens += counter.count(_json_text(tool_calls))
     return tokens
 
 
-def count_messages_tokens(messages: list[dict[str, Any]], *, counter: TokenCounter | None = None) -> int:
+def count_messages_tokens(
+    messages: list[dict[str, Any]],
+    *,
+    counter: TokenCounter | None = None,
+    image_token_estimate: int = 1_200,
+) -> int:
     counter = counter or get_token_counter()
-    return sum(count_message_tokens(message, counter=counter) for message in messages)
+    return sum(
+        count_message_tokens(message, counter=counter, image_token_estimate=image_token_estimate)
+        for message in messages
+    )
 
 
 def truncate_text(

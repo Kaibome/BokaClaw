@@ -96,6 +96,7 @@ Content-Type: application/json
 {
   "conversation_id": "uuid | null",
   "message": "用户这一轮输入",
+  "attachment_ids": ["<sha256>.jpg"],
   "agent_id": "string | null",
   "run_id": "string | null",
   "client_run_id": "string | null",
@@ -107,7 +108,9 @@ Content-Type: application/json
 字段说明：
 
 - `conversation_id`：为空时自动创建会话，标题取首条消息前 80 个字符。
-- `message`：去空白后不能为空，服务端上限 32,000 字符。
+- `message`：服务端上限 32,000 字符；没有附件时去空白后不能为空，带附件时可以为空。
+- `attachment_ids`：先通过 `POST /agent/attachments` 上传得到的图片 id，最多 4 张。服务端从
+  `conversation_messages.metadata.attachments` 读取描述符，图片本身不会进入 SSE 或 run 请求快照。
 - `agent_id`：透传给执行层，用于记忆作用域。
 - `run_id`：已废弃的旧版记忆作用域字段，不再表示执行标识；执行的 run id 由服务端生成并在 `meta` 中返回。
 - `client_run_id`：客户端自带的关联标识，仅用于日志排查，不参与去重。
@@ -407,6 +410,7 @@ X-Request-ID: <rid>
 | `PptxBuild` | 按结构化 slide spec 生成 `.pptx`；版式、换行、字号、页码由工具计算，返回 `warnings` | `AGENT_OFFICE_TOOLS=true` |
 | `PptxUpdateSlide` / `PptxAddSlide` / `PptxDeleteSlide` | 单页替换/插入/删除，自动重排页码与章节号 | 同上 |
 | `SheetInspect` | 列出工作表、维度、表头与样例行，不加载全表 | `AGENT_SHEET_TOOLS=true` |
+| `SheetCreate` | 从 `columns` + `rows` 新建 `.xlsx` / `.csv`，无需源文件 | 同上 |
 | `SheetQuery` | 只读筛选、分组聚合、排序、投影，最多返回 500 行 | 同上 |
 | `SheetTransform` | 去重/填空/类型转换/重命名等清洗，写入新的 `.xlsx` / `.csv` | 同上 |
 | `SheetPivot` | 按 index/columns/values 生成透视表，写入新文件 | 同上 |
@@ -418,10 +422,11 @@ X-Request-ID: <rid>
 
 - 文件工具只能访问 `AGENT_WORKSPACE_ROOT` 内的路径，`..` 与指向外部的 symlink 都会被拒绝；
 - `Bash` / `PowerShell` / `Monitor` 没有 OS 级沙箱，可访问 server 进程能访问的一切（包括 `.env` 与数据库凭据），必须显式开启；
-- 图片无法作为多模态输入，`Read` 只返回类型、尺寸和说明；PDF 依赖 `pypdf`；
-- Sheet 工具只读 `.xlsx` / `.xlsm` / `.csv`，只写 `.xlsx` / `.csv`；`SheetTransform` 与
-  `SheetPivot` 必须写入不同于输入的新文件，公式按缓存值读取、不重算，重写 `.xlsx` 不保留
-  图表、透视缓存或 VBA；
+- `Read` 工具仍只返回图片类型、尺寸和说明；用户上传的图片走 `POST /agent/attachments` 和
+  `image_url` content parts（见 [`agent-image-input.md`](./agent-image-input.md)）；PDF 依赖 `pypdf`；
+- Sheet 工具只读 `.xlsx` / `.xlsm` / `.csv`，只写 `.xlsx` / `.csv`；`SheetCreate` 从数据新建文件，
+  `SheetTransform` 与 `SheetPivot` 必须写入不同于输入的新文件，公式按缓存值读取、不重算，
+  重写 `.xlsx` 不保留图表、透视缓存或 VBA；
 - 所有命令有超时与输出大小上限，`Monitor` 的缓冲保留最近 5000 行。
 
 ## 5. 数据库设计
@@ -1060,7 +1065,8 @@ AGENT_LOOP_URL=http://host.docker.internal:8890   # 或 compose 内的 http://ag
 ## 13. 本次不做
 
 - 不把 `agent-loop/` 作为独立服务部署（默认进程内运行），但保留 `/invoke` HTTP/SSE 契约作为远程扩展点；
-- 不引入 Markdown 渲染、代码高亮、文件上传、多模态（后续可加 `react-markdown` + `remark-gfm`）；
+- 不引入第三方 Markdown 渲染或代码高亮；图片上传/多模态见
+  [`agent-image-input.md`](./agent-image-input.md)（Phase 1 只做用户上传图片）；
 - 不做工具轨迹的按迭代分组、运行中自动展开、复制按钮；当前默认折叠只显示最新一条，可手动 `Show all` 展开全部；
 - 不做跨重启续跑、步级 checkpoint、多副本执行或分布式队列；服务端重启时活跃 run 会被回收为终态；
 - 不做多用户/多租户权限模型；会话归属固定为登录用户；

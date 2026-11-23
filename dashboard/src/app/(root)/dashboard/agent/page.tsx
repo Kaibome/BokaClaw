@@ -32,6 +32,7 @@ export default function AgentPage() {
     isStreaming,
     cancelRequested,
     contextUsage,
+    capabilities,
     error,
     send,
     stop,
@@ -63,7 +64,9 @@ export default function AgentPage() {
       .slice(0, index < 0 ? messages.length : index)
       .reverse()
       .find((item) => item.role === "user");
-    if (previousUser) void send(previousUser.content);
+    if (previousUser) {
+      void send(previousUser.content, previousUser.attachments ?? []);
+    }
   };
 
   const list = (
@@ -142,6 +145,7 @@ export default function AgentPage() {
               isStreaming={isStreaming}
               cancelRequested={cancelRequested}
               contextUsage={contextUsage}
+              capabilities={capabilities}
             />
           </div>
         </Card>

@@ -1,17 +1,20 @@
 "use client";
 
+import { useState } from "react";
 import { AlertCircle, RotateCcw, Scissors } from "lucide-react";
 
+import { AuthenticatedImage } from "@/components/agent/authenticated-image";
 import { RunIdBadge } from "@/components/agent/run-id-badge";
 import { MarkdownContent } from "@/components/agent/markdown-content";
 import { ToolTrace } from "@/components/agent/tool-trace";
 import { UserQuestionCard } from "@/components/agent/user-question";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { cn, formatTokens } from "@/lib/utils";
 import type { ChatMessageView } from "@/hooks/use-agent-chat";
 import type { MessageKey } from "@/i18n/messages/en";
 import { useI18n, type I18nContextValue } from "@/i18n/provider";
-import type { CompressionInfo, RunUsage } from "@/types/api";
+import type { Attachment, CompressionInfo, RunUsage } from "@/types/api";
 
 type Translate = I18nContextValue["t"];
 
@@ -166,6 +169,7 @@ export function MessageBubble({
   ) => Promise<void> | void;
 }) {
   const { t } = useI18n();
+  const [preview, setPreview] = useState<Attachment | null>(null);
   const isUser = message.role === "user";
   const isInterrupted = !isUser && message.runStatus === "interrupted";
   const isFailed =
@@ -198,95 +202,135 @@ export function MessageBubble({
       false);
 
   return (
-    <div
-      className={cn(
-        "flex flex-col gap-1",
-        isUser ? "items-end" : "items-start",
-      )}
-    >
+    <>
       <div
         className={cn(
-          "max-w-[85%] [overflow-wrap:anywhere] rounded-xl border border-memBorder-primary px-3 py-2 text-sm text-onSurface-default-primary",
-          isUser
-            ? "whitespace-pre-wrap bg-surface-default-secondary"
-            : "bg-surface-default-primary",
+          "flex flex-col gap-1",
+          isUser ? "items-end" : "items-start",
         )}
       >
-        {message.content ? (
-          isUser ? (
-            <span>{message.content}</span>
-          ) : (
-            <MarkdownContent content={message.content} />
-          )
-        ) : message.streaming && !isReconnecting && !hasPendingQuestion ? (
-          <TypingDots />
+        <div
+          className={cn(
+            "max-w-[85%] [overflow-wrap:anywhere] rounded-xl border border-memBorder-primary px-3 py-2 text-sm text-onSurface-default-primary",
+            isUser
+              ? "whitespace-pre-wrap bg-surface-default-secondary"
+              : "bg-surface-default-primary",
+          )}
+        >
+          {isUser && message.attachments?.length ? (
+            <div
+              className={cn(
+                "mb-2 grid gap-2",
+                message.attachments.length === 1
+                  ? "grid-cols-1"
+                  : "grid-cols-2",
+              )}
+            >
+              {message.attachments.map((attachment, index) => (
+                <AuthenticatedImage
+                  key={attachment.id}
+                  attachmentId={attachment.id}
+                  alt={t("agent.composer.imageAlt", { index: index + 1 })}
+                  onClick={() => setPreview(attachment)}
+                />
+              ))}
+            </div>
+          ) : null}
+          {message.content ? (
+            isUser ? (
+              <span>{message.content}</span>
+            ) : (
+              <MarkdownContent content={message.content} />
+            )
+          ) : message.streaming && !isReconnecting && !hasPendingQuestion ? (
+            <TypingDots />
+          ) : null}
+          {message.streaming && !isReconnecting && message.content && (
+            <span className="ml-0.5 inline-block h-4 w-[2px] translate-y-0.5 animate-pulse bg-onSurface-default-primary align-middle" />
+          )}
+        </div>
+
+        {!isUser && message.questions?.length && onAnswerQuestion ? (
+          <UserQuestionCard
+            questions={message.questions}
+            onAnswer={onAnswerQuestion}
+          />
         ) : null}
-        {message.streaming && !isReconnecting && message.content && (
-          <span className="ml-0.5 inline-block h-4 w-[2px] translate-y-0.5 animate-pulse bg-onSurface-default-primary align-middle" />
+
+        {!isUser && message.toolTrace?.length ? (
+          <ToolTrace entries={message.toolTrace} />
+        ) : null}
+
+        {!isUser && (runId || usage || message.compression) ? (
+          <div className="flex flex-wrap items-center gap-0.5">
+            {runId ? <RunIdBadge runId={runId} /> : null}
+            {usage ? <UsageBadge usage={usage} /> : null}
+            {message.compression ? (
+              <CompressionBadge compression={message.compression} />
+            ) : null}
+          </div>
+        ) : null}
+
+        {isReconnecting && (
+          <span className="typo-caption-sm text-onSurface-default-tertiary">
+            {t("agent.status.reconnecting")}
+          </span>
+        )}
+        {isStopping && (
+          <span className="typo-caption-sm text-onSurface-default-tertiary">
+            {t("agent.status.stopping")}
+          </span>
+        )}
+        {isInterrupted && (
+          <span className="flex items-center gap-1 typo-caption-sm text-onSurface-danger-primary">
+            <AlertCircle className="size-3" />
+            {t("agent.status.interrupted")}
+          </span>
+        )}
+        {isCancelled && (
+          <span className="typo-caption-sm text-onSurface-default-tertiary">
+            {t("agent.status.stopped")}
+          </span>
+        )}
+        {isFailed && (
+          <span className="flex items-center gap-1 typo-caption-sm text-onSurface-danger-primary">
+            <AlertCircle className="size-3" />
+            {t("agent.status.failed")}
+          </span>
+        )}
+
+        {canRetry && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="xs"
+            className="h-6 gap-1 px-1.5 text-onSurface-default-secondary"
+            onClick={() => onRetry?.(message)}
+          >
+            <RotateCcw className="size-3" />
+            {t("agent.retry")}
+          </Button>
         )}
       </div>
-
-      {!isUser && message.questions?.length && onAnswerQuestion ? (
-        <UserQuestionCard
-          questions={message.questions}
-          onAnswer={onAnswerQuestion}
-        />
-      ) : null}
-
-      {!isUser && message.toolTrace?.length ? (
-        <ToolTrace entries={message.toolTrace} />
-      ) : null}
-
-      {!isUser && (runId || usage || message.compression) ? (
-        <div className="flex flex-wrap items-center gap-0.5">
-          {runId ? <RunIdBadge runId={runId} /> : null}
-          {usage ? <UsageBadge usage={usage} /> : null}
-          {message.compression ? (
-            <CompressionBadge compression={message.compression} />
+      <Dialog
+        open={Boolean(preview)}
+        onOpenChange={(open) => {
+          if (!open) setPreview(null);
+        }}
+      >
+        <DialogContent className="max-w-3xl">
+          <DialogTitle className="sr-only">
+            {t("agent.composer.previewImage")}
+          </DialogTitle>
+          {preview ? (
+            <AuthenticatedImage
+              attachmentId={preview.id}
+              alt={preview.name}
+              className="max-h-[75vh] w-full cursor-default border-0 object-contain"
+            />
           ) : null}
-        </div>
-      ) : null}
-
-      {isReconnecting && (
-        <span className="typo-caption-sm text-onSurface-default-tertiary">
-          {t("agent.status.reconnecting")}
-        </span>
-      )}
-      {isStopping && (
-        <span className="typo-caption-sm text-onSurface-default-tertiary">
-          {t("agent.status.stopping")}
-        </span>
-      )}
-      {isInterrupted && (
-        <span className="flex items-center gap-1 typo-caption-sm text-onSurface-danger-primary">
-          <AlertCircle className="size-3" />
-          {t("agent.status.interrupted")}
-        </span>
-      )}
-      {isCancelled && (
-        <span className="typo-caption-sm text-onSurface-default-tertiary">
-          {t("agent.status.stopped")}
-        </span>
-      )}
-      {isFailed && (
-        <span className="flex items-center gap-1 typo-caption-sm text-onSurface-danger-primary">
-          <AlertCircle className="size-3" />
-          {t("agent.status.failed")}
-        </span>
-      )}
-
-      {canRetry && (
-        <Button
-          type="button"
-          variant="ghost"
-          size="xs"
-          className="h-6 gap-1 px-1.5 text-onSurface-default-secondary"
-          onClick={() => onRetry?.(message)}
-        >
-          <RotateCcw className="size-3" />
-          {t("agent.retry")}
-        </Button>
-      )}
-    </div>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }

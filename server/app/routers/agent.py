@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import logging
+import os
 import uuid
 from dataclasses import dataclass
 from typing import Any, AsyncIterator
@@ -10,6 +11,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
+from app.agent import attachments
 from app.agent.events import AgentContextCompressed, AgentToolCall, AgentToolResult
 from app.agent.loop import (
     AgentCompleted,
@@ -29,8 +31,10 @@ from app.agent.runner import (
     load_run_config,
     serialize_run,
 )
+from app.agent.runtime import vision_configured
 from app.agent.schemas import (
     AgentAnswerRequest,
+    AgentCapabilitiesOut,
     AgentInvokeRequest,
     AgentInvokeResponse,
     ConversationMessageOut,
@@ -65,6 +69,34 @@ NOT_CONFIGURED_DETAIL = (
 HEARTBEAT_SECONDS = 15
 ACTIVE_RUN_STATUSES = ("queued", "running")
 TERMINAL = frozenset(TERMINAL_RUN_STATUSES)
+
+
+def _remote_vision_supported() -> bool:
+    return (os.environ.get("AGENT_REMOTE_VISION_SUPPORTED") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _validate_attachments(
+    body: AgentInvokeRequest,
+    user: User,
+    config: Any,
+) -> list[dict[str, Any]]:
+    """Reject image requests before any run or message row is created."""
+
+    if not body.attachment_ids:
+        return []
+    if config.url and not config.mock and not _remote_vision_supported():
+        raise attachments.AttachmentError(
+            "agent_remote_vision_unsupported",
+            "Image input is not supported by the remote agent executor.",
+            400,
+        )
+    if not config.url and not config.mock and not vision_configured():
+        raise attachments.AttachmentError(
+            "agent_vision_not_configured",
+            "Image input requires AGENT_VISION_MODEL (an OpenAI-compatible vision endpoint).",
+            503,
+        )
+    return attachments.validate_for_send(str(user.id), body.attachment_ids)
 
 
 class ActiveRunConflict(Exception):
@@ -128,17 +160,24 @@ def _replay_background_turn(db, body: AgentInvokeRequest, user: User) -> Backgro
     )
 
 
-def _prepare_turn(body: AgentInvokeRequest, user: User, history_limit: int) -> PreparedTurn:
+def _prepare_turn(
+    body: AgentInvokeRequest,
+    user: User,
+    history_limit: int,
+    attachment_descriptors: list[dict[str, Any]] | None = None,
+) -> PreparedTurn:
+    descriptors = attachment_descriptors or []
+    fallback_title = f"Image: {descriptors[0]['name']}" if descriptors else DEFAULT_TITLE
     with SessionLocal() as db:
         if body.conversation_id is not None:
             conversation = get_owned_conversation(db, body.conversation_id, user.id)
             if conversation.title == DEFAULT_TITLE and not list_messages(db, conversation.id, limit=1):
-                conversation.title = derive_title(body.message)
+                conversation.title = derive_title(body.message, fallback_title)
         else:
             conversation = create_conversation(
                 db,
                 user.id,
-                title=derive_title(body.message),
+                title=derive_title(body.message, fallback_title),
                 agent_id=body.agent_id,
                 metadata=body.metadata,
             )
@@ -148,6 +187,8 @@ def _prepare_turn(body: AgentInvokeRequest, user: User, history_limit: int) -> P
         message_metadata = dict(body.metadata)
         if body.run_id:
             message_metadata["run_id"] = body.run_id
+        if descriptors:
+            message_metadata["attachments"] = descriptors
         user_message = append_message(db, conversation, role="user", content=body.message, metadata=message_metadata)
 
         return PreparedTurn(
@@ -157,13 +198,20 @@ def _prepare_turn(body: AgentInvokeRequest, user: User, history_limit: int) -> P
         )
 
 
-def _create_background_turn(body: AgentInvokeRequest, user: User, history_limit: int) -> BackgroundTurn:
+def _create_background_turn(
+    body: AgentInvokeRequest,
+    user: User,
+    history_limit: int,
+    attachment_descriptors: list[dict[str, Any]] | None = None,
+) -> BackgroundTurn:
     """Persist the user turn and the queued run atomically.
 
     The active-run check happens before any write so a second tab gets a clean
     409. The partial unique index is the final guard against two requests that
     pass that check at the same time.
     """
+    descriptors = attachment_descriptors or []
+    fallback_title = f"Image: {descriptors[0]['name']}" if descriptors else DEFAULT_TITLE
     with SessionLocal() as db:
         replay = _replay_background_turn(db, body, user)
         if replay is not None:
@@ -180,11 +228,11 @@ def _create_background_turn(body: AgentInvokeRequest, user: User, history_limit:
             if active is not None:
                 raise ActiveRunConflict(active.id, active.conversation_id)
             if conversation.title == DEFAULT_TITLE and not list_messages(db, conversation.id, limit=1):
-                conversation.title = derive_title(body.message)
+                conversation.title = derive_title(body.message, fallback_title)
         else:
             conversation = Conversation(
                 created_by=user.id,
-                title=derive_title(body.message),
+                title=derive_title(body.message, fallback_title),
                 agent_id=body.agent_id,
                 meta=body.metadata,
             )
@@ -199,6 +247,8 @@ def _create_background_turn(body: AgentInvokeRequest, user: User, history_limit:
         message_metadata = dict(body.metadata)
         if body.run_id:
             message_metadata["run_id"] = body.run_id
+        if descriptors:
+            message_metadata["attachments"] = descriptors
         user_message = ConversationMessage(
             id=user_message_id,
             conversation_id=conversation_id,
@@ -216,6 +266,8 @@ def _create_background_turn(body: AgentInvokeRequest, user: User, history_limit:
             "conversation_id": str(conversation_id),
             "message_id": str(user_message_id),
             "message": body.message,
+            "attachment_ids": body.attachment_ids,
+            "attachments": descriptors,
             "history": history,
             "user_id": str(user.id),
             "agent_id": body.agent_id or conversation.agent_id,
@@ -376,12 +428,33 @@ async def invoke_agent(
             },
         )
 
+    try:
+        attachment_descriptors = await asyncio.to_thread(_validate_attachments, body, user, config)
+    except attachments.AttachmentError as exc:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=_error_payload(exc.code, exc.detail, request_id, body.conversation_id),
+        )
+
     run_config = load_run_config()
     if not run_config.background:
-        return await _legacy_invoke(request, body, user, config.history_messages, request_id)
+        return await _legacy_invoke(
+            request,
+            body,
+            user,
+            config.history_messages,
+            request_id,
+            attachment_descriptors,
+        )
 
     try:
-        turn = await asyncio.to_thread(_create_background_turn, body, user, config.history_messages)
+        turn = await asyncio.to_thread(
+            _create_background_turn,
+            body,
+            user,
+            config.history_messages,
+            attachment_descriptors,
+        )
     except ActiveRunConflict as exc:
         return JSONResponse(
             status_code=409,
@@ -418,6 +491,20 @@ async def invoke_agent(
         if message is not None:
             meta["message"] = serialize_message(message).model_dump(mode="json")
     return _stream_response(_subscription_stream(manager, turn.run_id, subscription, meta, 0))
+
+
+@router.get("/capabilities", response_model=AgentCapabilitiesOut, summary="Agent feature capabilities")
+async def get_agent_capabilities(_user: User = Depends(require_auth)):
+    config = load_config()
+    remote_ok = bool(config.url) and _remote_vision_supported()
+    local_ok = (not config.url) and (config.mock or vision_configured())
+    image_input = attachments.upload_available() and (config.mock or remote_ok or local_ok)
+    return AgentCapabilitiesOut(
+        image_input=image_input,
+        max_images=attachments.max_files(),
+        max_bytes=attachments.max_upload_bytes(),
+        allowed_mime_types=list(attachments.ALLOWED_MIME_TYPES),
+    )
 
 
 def _meta_for_turn(turn: BackgroundTurn, subscription: RunSubscription) -> dict[str, Any]:
@@ -873,8 +960,10 @@ async def _legacy_invoke(
     user: User,
     history_limit: int,
     request_id: str,
+    attachment_descriptors: list[dict[str, Any]] | None = None,
 ):
-    turn = _prepare_turn(body, user, history_limit)
+    descriptors = attachment_descriptors or []
+    turn = _prepare_turn(body, user, history_limit, descriptors)
     conversation_id = uuid.UUID(turn.conversation.id)
     assistant_id = uuid.uuid4()
 
@@ -882,6 +971,8 @@ async def _legacy_invoke(
         "conversation_id": str(conversation_id),
         "message_id": turn.user_message.id,
         "message": body.message,
+        "attachment_ids": body.attachment_ids,
+        "attachments": descriptors,
         "history": turn.history,
         "user_id": str(user.id),
         "agent_id": body.agent_id or turn.conversation.agent_id,

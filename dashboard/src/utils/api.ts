@@ -1,5 +1,8 @@
 import axios, { AxiosError, AxiosInstance } from "axios";
 
+import { AGENT_ENDPOINTS } from "@/utils/api-endpoints";
+import type { Attachment } from "@/types/api";
+
 let cachedToken: string | null = null;
 const LOGIN_PATH = "/login";
 
@@ -201,3 +204,44 @@ export const getStream = async (
 };
 
 export const api = createApi();
+
+export const uploadAttachment = async (
+  file: File,
+  options: {
+    onProgress?: (percent: number) => void;
+    signal?: AbortSignal;
+  } = {},
+): Promise<Attachment> => {
+  const form = new FormData();
+  form.append("file", file);
+  const response = await api.post<Attachment>(
+    AGENT_ENDPOINTS.ATTACHMENTS,
+    form,
+    {
+      signal: options.signal,
+      onUploadProgress: (event) => {
+        if (!options.onProgress) return;
+        const total = event.total ?? file.size;
+        if (!total) return;
+        options.onProgress(
+          Math.min(100, Math.round((event.loaded / total) * 100)),
+        );
+      },
+    },
+  );
+  return response.data;
+};
+
+export const getAttachmentBlob = async (
+  attachmentId: string,
+  signal?: AbortSignal,
+): Promise<Blob> => {
+  const response = await api.get<Blob>(
+    AGENT_ENDPOINTS.ATTACHMENT(attachmentId),
+    {
+      responseType: "blob",
+      signal,
+    },
+  );
+  return response.data;
+};

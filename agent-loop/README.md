@@ -486,11 +486,14 @@ is built, after history is loaded and before `MODEL_REQUEST` is emitted.
 store keep the full original content, so a later run can still work from it.
 
 - **Summary mode** keeps the system prompt, summarizes everything before the
-  recent window, and appends the summary to the system message. The summary
-  rolls forward: the next compression folds only newly dropped messages into
-  the previous summary. Summarization is best effort — a provider error,
-  empty reply, or too little content falls back to deterministic truncation,
-  and the run continues.
+  recent window, and appends the summary to the system message. Large folds are
+  split into chunks of at most 64K rendered tokens (and 256K characters per
+  chunk) so the summarizer sees the whole fold; chunks are folded oldest to
+  newest into the previous summary. The summary rolls forward: the next
+  compression folds only newly dropped messages into it. Summarization is best
+  effort — a failed chunk is skipped and marked partial, and a provider error,
+  empty reply, or too little content falls back to deterministic truncation
+  while the run continues.
 - **Truncate mode** drops old messages at a safe boundary (never starting with
   an orphaned `tool` message). The most recent user turn is always pinned, so a
   single-user tool loop keeps its instruction.
@@ -600,7 +603,7 @@ runtime = AgentRuntime(config, provider=provider, on_event=on_event)
 
 Events: `run_started`, `model_request`, `model_response`, `tool_call`, `tool_result`, `context_compressed`, `subagent_started`, `subagent_event`, `subagent_finished`, `run_ended`, `error`. Callback exceptions are logged and never interrupt a run.
 
-`context_compressed` is emitted when a request was rewritten **or** when a summarization model call happened, immediately before the matching `model_request`. Its `data` is `{before_tokens, after_tokens, dropped_messages, summarized, fallback}`, plus `{usage, model_calls, usage_unknown_calls}` when a summary call ran. The `seq` rule below applies to it like every other event.
+`context_compressed` is emitted when a request was rewritten **or** when a summarization model call happened, immediately before the matching `model_request`. Its `data` is `{before_tokens, after_tokens, trigger_tokens, trigger_ratio, dropped_messages, summarized, fallback}`, plus `{usage, model_calls, usage_unknown_calls, summary_chunks, summary_chunks_failed}` when a summary call ran. The `seq` rule below applies to it like every other event.
 
 `model_response` always carries `usage` with `prompt_tokens` / `completion_tokens` / `total_tokens` for that one call. An empty object means the endpoint did not report usage — consumers must count it as an unknown call rather than zero tokens. Streaming requests ask for usage via `stream_options.include_usage` and retry once without it if an endpoint rejects the parameter.
 
@@ -614,8 +617,13 @@ Every `AgentEvent` carries a `seq` that starts at `1` for each run and increases
   guard are opt-in in the SDK (off by default); `max_history_messages` still
   provides message-count truncation on resume.
 - Tool calls returned in one model turn are executed sequentially, in order.
+- A tool call emitted as raw DSML text instead of the structured `tool_calls` field is parsed and executed when possible; an answer that is nothing but unparseable markup raises `ModelProtocolError` instead of being accepted as a final answer.
 - One active run per session is recommended. Concurrent writers are serialised by a row lock and `UNIQUE(session_id, seq)`, but turn ordering is not guaranteed.
-- Text content only; multimodal `content` parts are not supported.
+- Input messages may use OpenAI content-part arrays. Image (`image_url`) parts are forwarded to
+  the provider unchanged and counted with `AgentConfig.image_token_estimate`; the SDK does not
+  fetch or construct images. Output deltas, tool results, and `RunResult.content` remain text.
+  Per-message content-part lists are not supported by the bundled Postgres `SessionStore`
+  (`content TEXT`); the BokaClaw server does not use that store.
 - Subagents run synchronously, one at a time, with a read-oriented tool
   allowlist by default. Background delegation, parallel children, nested
   delegation, and cross-run resume are reserved for later phases.

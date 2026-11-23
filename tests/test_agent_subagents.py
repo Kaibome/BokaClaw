@@ -73,8 +73,11 @@ def test_specs_inherit_the_main_model_and_carry_the_configured_limits():
     assert plan.kwargs["output_schema"] is subagents.PLAN_RESULT_SCHEMA
     assert research.kwargs["output_schema"] is subagents.RESEARCH_RESULT_SCHEMA
     assert sheet.kwargs["tool_policy"] == "custom"
-    assert "SheetInspect" in sheet.kwargs["tool_names"]
+    assert {"SheetInspect", "SheetCreate", "SheetQuery", "SheetTransform", "SheetPivot"} <= set(
+        sheet.kwargs["tool_names"]
+    )
     assert sheet.kwargs["output_schema"] is subagents.SHEET_RESULT_SCHEMA
+    assert "create" in subagents.SHEET_RESULT_SCHEMA["properties"]["operation"]["enum"]
 
 
 def test_sheet_spec_is_omitted_when_the_sheet_tools_are_off():

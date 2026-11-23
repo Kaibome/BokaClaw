@@ -38,6 +38,7 @@ from app.core.server_state import (
 from app.memory.errors import MemoryNotFound, MemoryValidationError
 from app.models import RequestLog, User
 from app.routers import agent as agent_router
+from app.routers import agent_attachments as agent_attachments_router
 from app.routers import api_keys as api_keys_router
 from app.routers import auth as auth_router
 from app.routers import conversations as conversations_router
@@ -179,6 +180,33 @@ async def _memory_reconcile_loop(service: Any) -> None:
             logging.warning("Periodic memory reconcile failed", exc_info=True)
 
 
+async def _attachment_prune_loop() -> None:
+    """Delete unreferenced uploaded images at startup and on a fixed interval."""
+
+    from app.agent.attachments import prune_interval_seconds, prune_orphans
+
+    interval = prune_interval_seconds()
+    if interval <= 0:
+        return
+
+    def run() -> dict[str, int]:
+        with SessionLocal() as db:
+            return prune_orphans(db)
+
+    try:
+        stats = await asyncio.to_thread(run)
+        logging.info("Attachment prune completed: %s", stats)
+    except Exception:
+        logging.warning("Startup attachment prune failed", exc_info=True)
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            stats = await asyncio.to_thread(run)
+            logging.info("Periodic attachment prune completed: %s", stats)
+        except Exception:
+            logging.warning("Periodic attachment prune failed", exc_info=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Own the background agent-run worker and memory reconciler for this process.
@@ -200,13 +228,19 @@ async def lifespan(app: FastAPI):
         )
     except Exception:
         logging.warning("Failed to start the memory reconcile loop", exc_info=True)
+    attachment_task: Optional[asyncio.Task] = None
+    try:
+        attachment_task = asyncio.create_task(_attachment_prune_loop())
+    except Exception:
+        logging.warning("Failed to start the attachment prune loop", exc_info=True)
     try:
         yield
     finally:
-        if reconcile_task is not None:
-            reconcile_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await reconcile_task
+        for task in (reconcile_task, attachment_task):
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
         if manager.config.background:
             try:
                 await manager.shutdown()
@@ -246,6 +280,7 @@ app.include_router(traces_router.router)
 app.include_router(evals_router.router)
 app.include_router(conversations_router.router)
 app.include_router(agent_router.router)
+app.include_router(agent_attachments_router.router)
 
 
 class Message(BaseModel):

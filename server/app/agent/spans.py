@@ -54,6 +54,7 @@ _SECRET_PATTERNS = (
     re.compile(r"api[_-]?key\s*[\"']?\s*[:=]\s*[\"']?[^\"'\s,}]{4,}", re.IGNORECASE),
 )
 _SECRET_KEYS = {"api_key", "apikey", "authorization", "password", "secret", "token", "access_token"}
+_DATA_URL_PATTERN = re.compile(r"data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=\s]+")
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -106,7 +107,7 @@ def _sampled(run_id: Any, rate: float) -> bool:
 
 def _redact(value: Any) -> Any:
     if isinstance(value, str):
-        redacted = value
+        redacted = _DATA_URL_PATTERN.sub("<redacted image data>", value)
         for pattern in _SECRET_PATTERNS:
             redacted = pattern.sub("[REDACTED]", redacted)
         return redacted

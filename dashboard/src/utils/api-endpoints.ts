@@ -50,6 +50,10 @@ export const ENTITY_ENDPOINTS = {
 
 export const AGENT_ENDPOINTS = {
   INVOKE: "/agent",
+  CAPABILITIES: "/agent/capabilities",
+  ATTACHMENTS: "/agent/attachments",
+  ATTACHMENT: (attachmentId: string) =>
+    `/agent/attachments/${encodeURIComponent(attachmentId)}`,
   CONVERSATIONS: "/conversations",
   CONVERSATION: (conversationId: string) => `/conversations/${conversationId}`,
   MESSAGES: (conversationId: string) =>

@@ -122,6 +122,19 @@ const en = {
   "agent.composer.stop": "Stop generating",
   "agent.composer.stoppingAria": "Stopping",
   "agent.composer.send": "Send message",
+  "agent.composer.attach": "Attach images",
+  "agent.composer.attachAria": "Attach images",
+  "agent.composer.attachments": "Attachments",
+  "agent.composer.removeAttachment": "Remove {name}",
+  "agent.composer.uploading": "Uploading…",
+  "agent.composer.uploadFailed": "Upload failed: {name}",
+  "agent.composer.tooManyImages": "You can attach at most {max} images.",
+  "agent.composer.imageTooLarge": "{name} is larger than the size limit.",
+  "agent.composer.unsupportedImage": "{name} is not a supported image type.",
+  "agent.composer.imageAlt": "Attached image {index}",
+  "agent.composer.previewImage": "Preview attached image",
+  "agent.composer.imageInputUnavailable":
+    "Image input is not configured on this server.",
 
   // Agent errors and toasts
   "agent.errors.notConfigured":

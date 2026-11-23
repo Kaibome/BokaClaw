@@ -20,6 +20,14 @@ class ModelError(AgentError):
     """Raised when the model provider fails to return a usable response."""
 
 
+class ModelProtocolError(ModelError):
+    """Raised when a model response violates the runtime's message protocol.
+
+    Example: a provider returns a tool call as raw DSML text instead of the
+    structured ``tool_calls`` field and leaves no usable final answer.
+    """
+
+
 class ToolError(AgentError):
     """Base class for tool related failures."""
 

@@ -40,6 +40,32 @@ def test_save_turn_memory_persists_only_the_episode(monkeypatch):
     assert captured["tool_entries"] == trace
 
 
+def test_image_only_turn_uses_a_placeholder_and_bypasses_the_short_check(monkeypatch):
+    captured = {}
+
+    class FakeService:
+        def capture_turn(self, user_id, message, content, **kwargs):
+            captured.update({"message": message, **kwargs})
+            return types.SimpleNamespace(action="appended", chars=80, memory_id="m-1", path="/tmp/day.md", reason=None)
+
+    monkeypatch.setitem(sys.modules, "app.core.server_state", types.SimpleNamespace(get_memory_instance=FakeService))
+
+    report = save_turn_memory(
+        {
+            "user_id": "user-1",
+            "message": "",
+            "attachment_ids": ["a" * 64 + ".jpg"],
+            "attachments": [{"id": "a" * 64 + ".jpg", "name": "chart.png"}],
+        },
+        "The chart shows growth.",
+        [],
+    )
+
+    assert report.action == "appended"
+    assert captured["message"].startswith("用户上传了图片：chart.png")
+    assert captured["has_attachments"] is True
+
+
 def test_save_turn_memory_passes_the_injected_flag(monkeypatch):
     captured = {}
 

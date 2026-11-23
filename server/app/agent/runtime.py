@@ -17,10 +17,11 @@ import os
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Tuple
 
+from app.agent import attachments as attachment_store
 from app.agent.deferred_tools import collect_deferred, render_deferred_catalog, tool_search_result
 from app.agent.dev_tools import build_dev_tools, load_dev_tool_config
 from app.agent.events import (
@@ -181,6 +182,15 @@ class LocalAgentConfig:
     max_iterations: int
     max_seconds: float
     final_answer_on_max_iterations: bool = True
+    # Vision model used when the model view contains image parts. Empty means
+    # image input is disabled and the request must fail before a run starts.
+    vision_model: Optional[str] = None
+    vision_api_key: Optional[str] = None
+    vision_base_url: Optional[str] = None
+    vision_image_detail: Optional[str] = None
+    vision_context_window: Optional[int] = None
+    image_token_estimate: int = 1200
+    remote_vision_supported: bool = False
     context_max_tokens: Optional[int] = None
     # Compression triggers at this fraction of context_max_tokens, leaving the
     # rest as headroom for the model's response and runtime context blocks.
@@ -298,6 +308,20 @@ def load_local_config() -> Optional[LocalAgentConfig]:
     # The real model window is a display concern; fall back to the compression
     # budget so the dashboard has a denominator without extra configuration.
     context_window_tokens = _env_budget("AGENT_CONTEXT_WINDOW", context_max_tokens)
+    vision_model = (os.getenv("AGENT_VISION_MODEL") or "").strip() or None
+    dashscope_key = (os.getenv("DASHSCOPE_API_KEY") or "").strip() or None
+    vision_api_key = (os.getenv("AGENT_VISION_API_KEY") or "").strip() or dashscope_key
+    vision_base_url = (os.getenv("AGENT_VISION_BASE_URL") or "").strip() or None
+    if vision_base_url is None and vision_model and dashscope_key:
+        # Convenience for the DashScope OpenAI-compatible mode. An explicit
+        # AGENT_VISION_BASE_URL always wins; other providers must set it.
+        vision_base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    vision_detail = (os.getenv("AGENT_VISION_IMAGE_DETAIL") or "").strip().lower() or None
+    if vision_detail not in {None, "auto", "low", "high"}:
+        vision_detail = None
+    vision_context_window = _env_budget("AGENT_VISION_CONTEXT_WINDOW", context_window_tokens)
+    image_token_estimate = max(1, _env_int("AGENT_IMAGE_TOKEN_ESTIMATE", 1200))
+    remote_vision_supported = _env_flag("AGENT_REMOTE_VISION_SUPPORTED", False)
     context_keep_recent_tokens = _env_optional_int("AGENT_CONTEXT_KEEP_RECENT_TOKENS")
     if context_keep_recent_tokens is not None:
         # Keep the SDK config valid even when the environment is misconfigured:
@@ -332,6 +356,13 @@ def load_local_config() -> Optional[LocalAgentConfig]:
         max_iterations=max(1, _env_int("AGENT_MAX_ITERATIONS", 10)),
         max_seconds=max(1.0, _env_float("AGENT_LOOP_MAX_SECONDS", 300.0)),
         final_answer_on_max_iterations=_env_flag("AGENT_FINAL_ANSWER_ON_MAX_ITERATIONS", True),
+        vision_model=vision_model,
+        vision_api_key=vision_api_key,
+        vision_base_url=vision_base_url,
+        vision_image_detail=vision_detail,
+        vision_context_window=vision_context_window,
+        image_token_estimate=image_token_estimate,
+        remote_vision_supported=remote_vision_supported,
         context_max_tokens=context_max_tokens,
         context_trigger_ratio=context_trigger_ratio,
         context_window_tokens=context_window_tokens,
@@ -409,6 +440,17 @@ def is_locally_configured() -> bool:
     return True
 
 
+def vision_configured() -> bool:
+    """Return whether an OpenAI-compatible vision model is configured locally."""
+
+    config = load_local_config()
+    return bool(
+        config is not None
+        and config.vision_model
+        and (config.vision_api_key or config.vision_base_url)
+    )
+
+
 def _history_tool_calls(value: Any) -> List[Dict[str, Any]]:
     """Keep only well-formed OpenAI tool calls from a history item."""
     if not isinstance(value, list):
@@ -481,16 +523,71 @@ def _research_memory_note(block: str) -> str:
     )
 
 
-def build_messages(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _descriptor_list(value: Any) -> List[Dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    descriptors: List[Dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        attachment_id = item.get("id")
+        if not isinstance(attachment_id, str) or not attachment_id:
+            continue
+        descriptors.append(item)
+    return descriptors
+
+
+def _user_content_parts(
+    user_id: str,
+    caption: Any,
+    descriptors: List[Dict[str, Any]],
+    *,
+    image_detail: Optional[str],
+    missing_policy: str,
+) -> List[Dict[str, Any]]:
+    parts: List[Dict[str, Any]] = []
+    text = caption.strip() if isinstance(caption, str) else ""
+    if text:
+        parts.append({"type": "text", "text": text})
+
+    missing = 0
+    for descriptor in descriptors:
+        attachment_id = descriptor.get("id")
+        if not isinstance(attachment_id, str):
+            missing += 1
+            continue
+        data = attachment_store.load_bytes(user_id, attachment_id)
+        if data is None:
+            missing += 1
+            continue
+        parts.append(attachment_store.image_content_part(descriptor, data, detail=image_detail))
+
+    if missing:
+        if missing_policy == "error":
+            raise AgentLoopError("agent_attachment_missing", "One or more attachments are missing.")
+        parts.append({"type": "text", "text": "[Image unavailable]"})
+    return parts
+
+
+def build_messages(payload: Dict[str, Any], *, image_detail: Optional[str] = None) -> List[Dict[str, Any]]:
     """Turn a server payload into the message list sent to the model.
 
     History may include the tool calls and results persisted for earlier runs.
     They are forwarded in OpenAI wire format so the model can reuse facts it
     already gathered. Orphaned or malformed tool records are dropped rather
     than sent upstream, where they would fail validation.
+
+    User messages with attachments become OpenAI content-part arrays. Image
+    bytes are read here, at execution time, and never enter the persisted
+    request payload or SSE frames.
     """
     messages: List[Dict[str, Any]] = []
     pending_tool_calls: set[str] = set()
+    user_id = str(payload.get("user_id") or "")
+    detail = image_detail
+    if detail is None:
+        detail = (os.getenv("AGENT_VISION_IMAGE_DETAIL") or "").strip() or None
+
     for item in payload.get("history") or []:
         if not isinstance(item, dict):
             continue
@@ -520,14 +617,54 @@ def build_messages(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
                 messages.append({"role": "assistant", "content": content})
             continue
 
-        if role in {"user", "system"} and isinstance(content, str):
-            pending_tool_calls = set()
-            messages.append({"role": role, "content": content})
+        if role == "user":
+            descriptors = _descriptor_list(item.get("attachments"))
+            if descriptors:
+                parts = _user_content_parts(
+                    user_id,
+                    content,
+                    descriptors,
+                    image_detail=detail,
+                    missing_policy="history",
+                )
+                if parts:
+                    pending_tool_calls = set()
+                    messages.append({"role": "user", "content": parts})
+                continue
+            if isinstance(content, str):
+                pending_tool_calls = set()
+                messages.append({"role": "user", "content": content})
+            continue
 
-    message = payload.get("message")
-    if not isinstance(message, str) or not message.strip():
+        if role == "system" and isinstance(content, str):
+            pending_tool_calls = set()
+            messages.append({"role": "system", "content": content})
+
+    descriptors = _descriptor_list(payload.get("attachments"))
+    if not descriptors:
+        for attachment_id in payload.get("attachment_ids") or []:
+            if not isinstance(attachment_id, str):
+                continue
+            descriptor = attachment_store.load_descriptor(user_id, attachment_id)
+            if descriptor is not None:
+                descriptors.append(descriptor)
+
+    parts = _user_content_parts(
+        user_id,
+        payload.get("message"),
+        descriptors,
+        image_detail=detail,
+        missing_policy="error" if descriptors else "history",
+    )
+    if not parts:
         raise AgentLoopError("agent_protocol_error", "Agent request is missing a message.")
-    messages.append({"role": "user", "content": message})
+    if descriptors:
+        current_content: Any = parts
+    elif parts[0].get("type") == "text":
+        current_content = str(parts[0].get("text") or "")
+    else:
+        current_content = parts
+    messages.append({"role": "user", "content": current_content})
     return messages
 
 
@@ -695,6 +832,38 @@ def _optional_int(value: Any) -> Optional[int]:
         return None
 
 
+def _messages_have_images(messages: List[Dict[str, Any]]) -> bool:
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, list) and any(
+            isinstance(part, dict) and part.get("type") == "image_url" for part in content
+        ):
+            return True
+    return False
+
+
+def _redact_image_parts(value: Any) -> Any:
+    """Replace data-URL payloads before a prompt enters spans or hashes."""
+
+    if isinstance(value, dict):
+        if value.get("type") == "image_url":
+            image_url = value.get("image_url")
+            if isinstance(image_url, dict):
+                url = image_url.get("url")
+                if isinstance(url, str):
+                    return {
+                        **value,
+                        "image_url": {
+                            **image_url,
+                            "url": f"<redacted image: {len(url)} chars>",
+                        },
+                    }
+        return {key: _redact_image_parts(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_image_parts(item) for item in value]
+    return value
+
+
 def _model_request_event(
     data: dict[str, Any],
     iteration: int,
@@ -705,19 +874,28 @@ def _model_request_event(
 
     ``messages`` belongs to the SDK and is appended to after the event fires,
     so a full prompt must be snapshotted here rather than referenced later.
+    Image data URLs are always replaced with a size marker so spans never grow
+    with base64 payloads.
     """
     messages = data.get("messages")
     messages = messages if isinstance(messages, list) else []
-    roles = [str(message.get("role") or "unknown") if isinstance(message, dict) else "unknown" for message in messages]
+    redacted = [
+        _redact_image_parts(message) if isinstance(message, dict) else message
+        for message in messages
+    ]
+    roles = [
+        str(message.get("role") or "unknown") if isinstance(message, dict) else "unknown"
+        for message in redacted
+    ]
     tools = data.get("tools")
     prompt = None
     if _span_prompt_mode() == "full":
-        prompt = [dict(message) if isinstance(message, dict) else {"content": str(message)} for message in messages]
+        prompt = [dict(message) if isinstance(message, dict) else {"content": str(message)} for message in redacted]
     return AgentModelRequest(
         iteration=iteration,
         message_count=len(messages),
         roles=roles,
-        last_message_hash=_message_hash(messages[-1]) if messages else None,
+        last_message_hash=_message_hash(redacted[-1]) if redacted else None,
         tools=[tool for tool in tools if isinstance(tool, dict)] if isinstance(tools, list) else [],
         prompt=prompt,
         model=model,
@@ -1034,12 +1212,16 @@ def build_runtime(
     cancel_event: Optional[threading.Event] = None,
     max_seconds: Optional[float] = None,
     extra_tools: Optional[List[Any]] = None,
+    use_vision: bool = False,
 ):
     benchmark = _is_benchmark_payload(payload)
+    active_model = config.vision_model if use_vision and config.vision_model else config.model
+    active_api_key = (config.vision_api_key or config.api_key) if use_vision else config.api_key
+    active_base_url = (config.vision_base_url or config.base_url) if use_vision else config.base_url
     model_config = sdk.ModelConfig(
-        model=config.model,
-        api_key=config.api_key,
-        base_url=config.base_url,
+        model=active_model,
+        api_key=active_api_key,
+        base_url=active_base_url,
         temperature=config.temperature,
         max_tokens=config.max_tokens,
         timeout=config.request_timeout,
@@ -1051,6 +1233,15 @@ def build_runtime(
             model=config.compression_model,
             api_key=config.compression_api_key or config.api_key,
             base_url=config.compression_base_url or config.base_url,
+            timeout=config.request_timeout,
+            max_retries=config.max_retries,
+        )
+    elif use_vision:
+        # Keep summaries on the text model even when the main call is vision.
+        compression_model_config = sdk.ModelConfig(
+            model=config.model,
+            api_key=config.api_key,
+            base_url=config.base_url,
             timeout=config.request_timeout,
             max_retries=config.max_retries,
         )
@@ -1111,6 +1302,7 @@ def build_runtime(
         context_trigger_ratio=config.context_trigger_ratio,
         context_keep_recent_tokens=config.context_keep_recent_tokens,
         context_compression=config.context_compression,
+        image_token_estimate=config.image_token_estimate,
         tool_result_max_chars=config.tool_result_max_chars,
         tool_concurrency=config.tool_concurrency,
         tool_retry_enabled=config.tool_retry_enabled,
@@ -1382,7 +1574,21 @@ async def stream_local_agent(
                 len(research.block),
             )
 
-    messages = build_messages(payload)
+    messages = await asyncio.to_thread(
+        build_messages,
+        payload,
+        image_detail=config.vision_image_detail,
+    )
+    use_vision = _messages_have_images(messages)
+    if use_vision and not config.vision_model:
+        raise AgentLoopError(
+            "agent_vision_not_configured",
+            "Image input requires AGENT_VISION_MODEL (an OpenAI-compatible vision endpoint).",
+        )
+    active_model = config.vision_model if use_vision else config.model
+    context_config = config
+    if use_vision and config.vision_context_window:
+        context_config = replace(config, context_window_tokens=config.vision_context_window)
     if generic is not None and generic.block:
         messages.insert(len(messages) - 1, {"role": "user", "content": _memory_note(generic.block)})
     if research is not None and research.block:
@@ -1436,7 +1642,7 @@ async def stream_local_agent(
         tokens = _response_prompt_tokens(event)
         if tokens is not None:
             last_prompt_tokens["value"] = tokens
-        _bridge_event(event, put, model=getattr(config, "model", None))
+        _bridge_event(event, put, model=active_model)
 
     mcp_tools: List[Any] = []
     mcp_config = load_mcp_config()
@@ -1462,6 +1668,7 @@ async def stream_local_agent(
         cancel_event=cancel_event,
         max_seconds=max_seconds,
         extra_tools=[*mcp_tools, *skill_tools],
+        use_vision=use_vision,
     )
 
     deferred_tools = getattr(runtime, "deferred_tools", None)
@@ -1522,6 +1729,14 @@ async def stream_local_agent(
                     "Agent kept repeating the same steps without new results.",
                 ),
             )
+        except sdk.ModelProtocolError:
+            put(
+                "error",
+                AgentLoopError(
+                    "agent_protocol_error",
+                    "Agent returned raw tool-call markup instead of a final answer.",
+                ),
+            )
         except sdk.ConfigurationError as exc:
             put("error", AgentLoopError("agent_not_configured", str(exc)))
         except Exception as exc:
@@ -1571,7 +1786,7 @@ async def stream_local_agent(
                     metadata=_completion_metadata(
                         payload,
                         value,
-                        config=config,
+                        config=context_config,
                         used_tokens=last_prompt_tokens["value"],
                     )
                 )

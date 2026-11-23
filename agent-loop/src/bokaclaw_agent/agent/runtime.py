@@ -16,6 +16,7 @@ from ..core.exceptions import (
     ConfigurationError,
     MaxIterationsExceeded,
     ModelError,
+    ModelProtocolError,
     NoProgressError,
     RunCancelled,
 )
@@ -47,6 +48,7 @@ from .context import (
 )
 from .ledger import ToolLedger
 from .progress import ProgressGuard
+from .protocol import contains_dsml, parse_dsml_tool_calls, strip_dsml
 from .subagent import (
     DelegationLedger,
     SubagentOptions,
@@ -473,6 +475,7 @@ class AgentRuntime:
                 else:
                     response = self._complete(messages, **model_kwargs)
                     self._merge_usage(usage, response.usage)
+                response = self._normalize_dsml_response(response, tool_turn=True)
                 self._emit(
                     EventType.MODEL_RESPONSE,
                     session_id,
@@ -618,6 +621,8 @@ class AgentRuntime:
                         logger.warning("Tool-free final answer failed; reporting the step limit", exc_info=True)
                         response = None
 
+                if response is not None:
+                    response = self._normalize_dsml_response(response, tool_turn=False)
                 answer = (response.content or "").strip() if response is not None else ""
                 if not answer:
                     result = self._build_result(
@@ -688,6 +693,8 @@ class AgentRuntime:
                     logger.warning("Tool-free no-progress answer failed", exc_info=True)
                     response = None
 
+                if response is not None:
+                    response = self._normalize_dsml_response(response, tool_turn=False)
                 answer = (response.content or "").strip() if response is not None else ""
                 if not answer:
                     result = self._build_result(
@@ -880,6 +887,39 @@ class AgentRuntime:
             response = self._complete(messages, use_tools=False, **model_kwargs)
             self._merge_usage(usage, response.usage)
         return response
+
+    @staticmethod
+    def _normalize_dsml_response(response: ModelResponse, *, tool_turn: bool) -> ModelResponse:
+        """Recover or reject raw DSML markup before the response is accepted.
+
+        A provider may return a tool call as DSML text instead of the structured
+        ``tool_calls`` field. In a tool-enabled turn the markup is parsed back
+        into calls and executed; in a tool-free turn it cannot run, so only any
+        surrounding prose survives. A response that is nothing but unparseable
+        markup is a protocol error, never a final answer.
+        """
+
+        content = response.content or ""
+        if response.tool_calls or not contains_dsml(content):
+            return response
+
+        calls = parse_dsml_tool_calls(content)
+        cleaned = strip_dsml(content)
+        if calls and tool_turn:
+            logger.warning("Recovered %d tool call(s) from raw DSML markup", len(calls))
+            return response.model_copy(
+                update={
+                    "content": cleaned or None,
+                    "tool_calls": calls,
+                    "finish_reason": "tool_calls",
+                }
+            )
+        if cleaned:
+            logger.warning("Dropped raw DSML tool-call markup from the model response")
+            return response.model_copy(update={"content": cleaned})
+        if tool_turn:
+            raise ModelProtocolError("Model returned raw DSML tool-call markup that could not be parsed.")
+        raise ModelProtocolError("Model returned raw DSML tool-call markup in a turn where tools were disabled.")
 
     def _with_runtime_context(
         self,

@@ -107,7 +107,7 @@ def client():
 
 @pytest.fixture
 def stub_persistence(monkeypatch):
-    monkeypatch.setattr(agent_router, "_prepare_turn", lambda body, user, limit: _prepared_turn())
+    monkeypatch.setattr(agent_router, "_prepare_turn", lambda body, user, limit, descriptors=None: _prepared_turn())
 
     def _save(conversation_id, owner_id, message_id, content, status, metadata):
         return ConversationMessageOut(

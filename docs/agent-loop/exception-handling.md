@@ -53,6 +53,7 @@ ReAct run
 |---|---|---|---|
 | 上下文压缩摘要失败 | 否 | 继续，降级截断 | `context.compressed.fallback=true` |
 | 主模型调用失败 | 是 | `failed` | `agent_upstream_error` |
+| DSML 工具调用写入文本 | 视情况 | 工具轮次可继续；收尾轮次 `failed` | `agent_protocol_error` |
 | 工具执行失败 | 否 | 继续 | tool result `is_error=true` |
 | 子 Agent 失败 | 否 | 父 Agent 继续 | 子结果 `status=failed/timeout` |
 | ReAct 整体超时 | 是 | `failed` | `agent_timeout` |
@@ -130,6 +131,20 @@ ReAct run
 ```text
 agent_protocol_error: Agent produced no content.
 ```
+
+同类协议校验：如果模型把工具调用写成原始 DSML 文本（`<｜｜DSML｜｜ invoke ...>`）而不是结构化 `tool_calls`，`AgentRuntime._normalize_dsml_response()` 会在响应进入 ReAct 协议前处理：
+
+- 工具轮次中可解析时，还原为 `ToolCall` 并真正执行，run 继续；
+- 不可解析且没有可用文本时，抛 `ModelProtocolError`；
+- 工具被禁用的步数/无进展收尾轮次中，纯 DSML 一律拒绝，只有周围自然语言会保留。
+
+server 的本地运行时把它映射为：
+
+```text
+agent_protocol_error: Agent returned raw tool-call markup instead of a final answer.
+```
+
+边界：流式响应在归一化之前已经把 DSML 文本作为 `message.delta` 推给前端；最终持久化消息是干净的，但前端可能短暂闪现原始标记。
 
 ### 3.3 Server 处理
 

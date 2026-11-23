@@ -17,6 +17,7 @@ from ..core.types import ModelResponse
 from ..core.utils import resolve_awaitable
 from ..providers.base import ModelProvider
 from .context import (
+    content_text,
     count_message_tokens,
     count_messages_tokens,
     safe_start_index,
@@ -27,10 +28,15 @@ from .tokenization import TokenCounter, get_token_counter
 logger = logging.getLogger(__name__)
 
 # Caps are sized so one summary call fits a 128K-token summarizer even in the
-# worst case: ~64K CJK input chars + ~12K previous-summary chars + 1.5K output.
+# worst case: ~64K chunk tokens + ~12K previous-summary chars + 1.5K output.
+# Large folds are split into chunks of at most SUMMARY_CHUNK_TOKENS rendered
+# tokens and merged into one rolling summary; SUMMARY_INPUT_MAX_CHARS is a
+# per-chunk safety cap.
 SUMMARY_MAX_TOKENS = 1_536
 SUMMARY_MAX_CHARS = 12_000
-SUMMARY_INPUT_MAX_CHARS = 64_000
+SUMMARY_CHUNK_TOKENS = 64_000
+SUMMARY_MAX_CHUNKS = 8
+SUMMARY_INPUT_MAX_CHARS = 256_000
 SUMMARY_MESSAGE_MAX_CHARS = 8_000
 SUMMARY_MIN_FOLD_TOKENS = 256
 SUMMARY_PREVIEW_CHARS = 4_000
@@ -70,6 +76,7 @@ class ContextCompressor:
         self.trigger_ratio = config.context_trigger_ratio
         self.keep_recent_tokens = config.context_keep_recent_tokens
         self.mode = config.context_compression
+        self.image_token_estimate = config.image_token_estimate
         self.provider = provider
         self.usage = usage
         self.token_counter = token_counter or get_token_counter()
@@ -79,17 +86,25 @@ class ContextCompressor:
         self._call_usage: dict[str, int] = {}
         self._call_count = 0
         self._call_unknown = 0
+        self._chunk_count = 0
+        self._chunk_failures = 0
 
     def compress(self, messages: list[dict[str, Any]], *, tools_tokens: int = 0) -> CompressionResult:
         self._call_usage = {}
         self._call_count = 0
         self._call_unknown = 0
+        self._chunk_count = 0
+        self._chunk_failures = 0
         if self.max_tokens is None:
             return CompressionResult(messages)
 
         trigger_tokens = int(self.max_tokens * self.trigger_ratio)
         budget = trigger_tokens - max(0, tools_tokens)
-        before = count_messages_tokens(messages, counter=self.token_counter)
+        before = count_messages_tokens(
+            messages,
+            counter=self.token_counter,
+            image_token_estimate=self.image_token_estimate,
+        )
         if before <= budget:
             return CompressionResult(messages)
 
@@ -120,12 +135,21 @@ class ContextCompressor:
             if new_indices:
                 if self.mode == "summary":
                     folded = [messages[index] for index in new_indices]
-                    if count_messages_tokens(folded, counter=self.token_counter) >= SUMMARY_MIN_FOLD_TOKENS:
-                        summary = self._summarize(folded, self._summary)
+                    if (
+                        count_messages_tokens(
+                            folded,
+                            counter=self.token_counter,
+                            image_token_estimate=self.image_token_estimate,
+                        )
+                        >= SUMMARY_MIN_FOLD_TOKENS
+                    ):
+                        summary = self._summarize_chunks(self._summary_chunks(folded))
                         if summary is not None:
                             self._summary = summary
-                            self._summary_error = None
+                            if self._chunk_failures == 0:
+                                self._summary_error = None
                             summarized = True
+                            fallback = self._chunk_failures > 0
                         else:
                             fallback = True
                     else:
@@ -152,7 +176,11 @@ class ContextCompressor:
                 view = [*messages[:system_end], *tail]
 
         view = self._fit_budget(view, budget)
-        after = count_messages_tokens(view, counter=self.token_counter)
+        after = count_messages_tokens(
+            view,
+            counter=self.token_counter,
+            image_token_estimate=self.image_token_estimate,
+        )
         stats: dict[str, Any] = {
             "before_tokens": before,
             "after_tokens": after,
@@ -190,6 +218,8 @@ class ContextCompressor:
                 stats["usage"] = dict(self._call_usage)
             stats["model_calls"] = self._call_count
             stats["usage_unknown_calls"] = self._call_unknown
+            stats["summary_chunks"] = self._chunk_count
+            stats["summary_chunks_failed"] = self._chunk_failures
         self._call_usage = {}
         self._call_count = 0
         self._call_unknown = 0
@@ -203,7 +233,11 @@ class ContextCompressor:
         total = 0
         start = len(messages)
         for index in range(len(messages) - 1, system_end - 1, -1):
-            total += count_message_tokens(messages[index], counter=self.token_counter)
+            total += count_message_tokens(
+                messages[index],
+                counter=self.token_counter,
+                image_token_estimate=self.image_token_estimate,
+            )
             start = index
             if total >= keep_recent:
                 break
@@ -224,6 +258,68 @@ class ContextCompressor:
             if messages[index].get("role") == "user":
                 return index
         return None
+
+    def _summary_chunks(self, messages: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+        """Split a fold into chunks that each fit one summarizer request.
+
+        Chunks are packed by the token count of their rendered transcript, so
+        per-message caps are already applied. A tool-call block (the assistant
+        with ``tool_calls`` plus its following tool messages) is never split.
+        """
+
+        chunks: list[list[dict[str, Any]]] = []
+        current: list[dict[str, Any]] = []
+        current_tokens = 0
+        current_chars = 0
+
+        for unit in _message_units(messages):
+            transcript = _format_transcript(unit)
+            tokens = self.token_counter.count(transcript)
+            chars = len(transcript) + 1
+            if current and (
+                current_tokens + tokens > SUMMARY_CHUNK_TOKENS or current_chars + chars > SUMMARY_INPUT_MAX_CHARS
+            ):
+                chunks.append(current)
+                current = []
+                current_tokens = 0
+                current_chars = 0
+            current.extend(unit)
+            current_tokens += tokens
+            current_chars += chars
+
+        if current:
+            chunks.append(current)
+        return chunks
+
+    def _summarize_chunks(self, chunks: list[list[dict[str, Any]]]) -> str | None:
+        """Roll the summary through chunks oldest to newest.
+
+        A failed chunk is skipped and marks the result as partial; later chunks
+        still use the last successful summary. The hard call cap is advisory:
+        the current 256K window produces at most a handful of chunks, and
+        dropping folded content to honor the cap would defeat the purpose.
+        """
+
+        if len(chunks) > SUMMARY_MAX_CHUNKS:
+            logger.warning(
+                "Context fold needs %d summary chunks (cap %d); summarizing all to keep coverage",
+                len(chunks),
+                SUMMARY_MAX_CHUNKS,
+            )
+
+        summary = self._summary
+        succeeded = False
+        failures = 0
+        self._chunk_count = len(chunks)
+        for chunk in chunks:
+            result = self._summarize(chunk, summary)
+            if result is None:
+                failures += 1
+                continue
+            summary = result
+            succeeded = True
+        self._chunk_failures = failures
+        return summary if succeeded else None
 
     def _summarize(self, messages: list[dict[str, Any]], previous: str | None) -> str | None:
         transcript = _format_transcript(messages)
@@ -291,14 +387,74 @@ class ContextCompressor:
             if isinstance(value, int):
                 total[key] = total.get(key, 0) + value
 
-    def _fit_budget(self, messages: list[dict[str, Any]], budget: int) -> list[dict[str, Any]]:
-        """Shrink the largest message contents until the view fits.
+    def _count(self, messages: list[dict[str, Any]]) -> int:
+        return count_messages_tokens(
+            messages,
+            counter=self.token_counter,
+            image_token_estimate=self.image_token_estimate,
+        )
 
-        Structure is never changed here, so tool-call pairs stay intact.
+    @staticmethod
+    def _strip_images(content: Any) -> list[dict[str, Any]] | None:
+        if not isinstance(content, list):
+            return None
+        changed = False
+        parts: list[dict[str, Any]] = []
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "image_url":
+                parts.append({"type": "text", "text": "[image omitted]"})
+                changed = True
+            else:
+                parts.append(part)
+        return parts if changed else None
+
+    def _fit_budget(self, messages: list[dict[str, Any]], budget: int) -> list[dict[str, Any]]:
+        """Shrink the view until it fits, dropping images before text.
+
+        Structure is never changed here, so tool-call pairs stay intact. Images
+        from older messages go first; the newest user turn keeps its images
+        unless even that is not enough.
         """
 
+        current = self._count(messages)
+        if current <= budget:
+            return messages
+
+        user_indices = [index for index, message in enumerate(messages) if message.get("role") == "user"]
+        newest_user = max(user_indices) if user_indices else len(messages)
+
+        # Pass 1: replace images in messages older than the newest user turn.
+        for index, message in enumerate(messages):
+            if index >= newest_user:
+                continue
+            stripped = self._strip_images(message.get("content"))
+            if stripped is None:
+                continue
+            messages[index] = {**message, "content": stripped}
+            current = self._count(messages)
+            if current <= budget:
+                return messages
+
+        # Pass 2: the newest turn's images are the last resort.
+        if current > budget:
+            for index in range(len(messages) - 1, -1, -1):
+                message = messages[index]
+                stripped = self._strip_images(message.get("content"))
+                if stripped is None:
+                    continue
+                messages[index] = {**message, "content": stripped}
+                current = self._count(messages)
+                if current <= budget:
+                    return messages
+
+        # Pass 3: flatten remaining content-part lists so text truncation can work.
+        for index, message in enumerate(messages):
+            content = message.get("content")
+            if isinstance(content, list):
+                messages[index] = {**message, "content": content_text(content)}
+        current = self._count(messages)
+
         for _ in range(64):
-            current = count_messages_tokens(messages, counter=self.token_counter)
             if current <= budget:
                 break
 
@@ -320,6 +476,7 @@ class ContextCompressor:
                 target = max(64, len(content) // 2)
             capped, _ = truncate_text(content, target)
             messages[index] = {**messages[index], "content": capped}
+            current = self._count(messages)
 
         return messages
 
@@ -335,32 +492,47 @@ def _role_counts(messages: list[dict[str, Any]]) -> dict[str, int]:
 def _messages_chars(messages: list[dict[str, Any]]) -> int:
     total = 0
     for message in messages:
-        content = message.get("content")
-        if isinstance(content, str):
-            total += len(content)
-        elif content is not None:
-            total += len(json.dumps(content, ensure_ascii=False, default=str))
+        total += len(content_text(message.get("content")))
     return total
 
 
+def _message_units(messages: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Group an assistant tool-call block with its tool results.
+
+    Chunking must never separate a ``tool_calls`` assistant from the tool
+    messages that answer it; each other message is its own unit.
+    """
+
+    units: list[list[dict[str, Any]]] = []
+    index = 0
+    while index < len(messages):
+        message = messages[index]
+        unit = [message]
+        index += 1
+        if message.get("role") == "assistant" and message.get("tool_calls"):
+            while index < len(messages) and messages[index].get("role") == "tool":
+                unit.append(messages[index])
+                index += 1
+        units.append(unit)
+    return units
+
+
+def _format_message(message: dict[str, Any]) -> str:
+    role = str(message.get("role") or "unknown")
+    text = content_text(message.get("content"))
+
+    tool_calls = message.get("tool_calls")
+    if tool_calls:
+        text = (text + "\n" if text else "") + "tool_calls: " + _json_text(tool_calls)
+
+    text = truncate_text(text, SUMMARY_MESSAGE_MAX_CHARS)[0]
+    if role == "tool" and message.get("tool_call_id"):
+        return f"tool {message['tool_call_id']}: {text}"
+    return f"{role}: {text}"
+
+
 def _format_transcript(messages: list[dict[str, Any]]) -> str:
-    lines: list[str] = []
-    for message in messages:
-        role = str(message.get("role") or "unknown")
-        content = message.get("content")
-        text = content if isinstance(content, str) else _json_text(content)
-
-        tool_calls = message.get("tool_calls")
-        if tool_calls:
-            text = (text + "\n" if text else "") + "tool_calls: " + _json_text(tool_calls)
-
-        text = truncate_text(text, SUMMARY_MESSAGE_MAX_CHARS)[0]
-        if role == "tool" and message.get("tool_call_id"):
-            lines.append(f"tool {message['tool_call_id']}: {text}")
-        else:
-            lines.append(f"{role}: {text}")
-
-    transcript = "\n".join(lines)
+    transcript = "\n".join(_format_message(message) for message in messages)
     if len(transcript) > SUMMARY_INPUT_MAX_CHARS:
         transcript = transcript[-SUMMARY_INPUT_MAX_CHARS:]
     return transcript

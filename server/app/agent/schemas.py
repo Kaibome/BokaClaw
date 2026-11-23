@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 ChatRole = Literal["user", "assistant", "system", "tool"]
 MessageStatus = Literal["completed", "cancelled", "failed"]
@@ -46,6 +46,15 @@ class ConversationOut(BaseModel):
     updated_at: datetime
 
 
+class AttachmentOut(BaseModel):
+    id: str
+    name: str
+    mime_type: str
+    bytes: int
+    width: int
+    height: int
+
+
 class ConversationMessageOut(BaseModel):
     id: str
     conversation_id: str
@@ -53,7 +62,15 @@ class ConversationMessageOut(BaseModel):
     content: str
     status: MessageStatus
     metadata: dict[str, Any]
+    attachments: list[AttachmentOut] = Field(default_factory=list)
     created_at: datetime
+
+
+class AgentCapabilitiesOut(BaseModel):
+    image_input: bool
+    max_images: int
+    max_bytes: int
+    allowed_mime_types: list[str]
 
 
 class ActiveRunOut(BaseModel):
@@ -129,7 +146,10 @@ class ConversationDetailOut(ConversationOut):
 
 class AgentInvokeRequest(BaseModel):
     conversation_id: uuid.UUID | None = None
-    message: str = Field(..., min_length=1, max_length=32_000)
+    message: str = Field("", max_length=32_000)
+    # Hard safety cap; the effective limit comes from AGENT_ATTACHMENT_MAX_FILES
+    # and GET /agent/capabilities.
+    attachment_ids: list[str] = Field(default_factory=list, max_length=8)
     agent_id: str | None = Field(None, max_length=255)
     # Deprecated: legacy memory scope. Execution uses agent_runs.id (run_id).
     run_id: str | None = Field(None, max_length=255)
@@ -137,13 +157,13 @@ class AgentInvokeRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     stream: bool = False
 
-    @field_validator("message")
-    @classmethod
-    def _non_blank(cls, value: str) -> str:
-        stripped = value.strip()
-        if not stripped:
-            raise ValueError("message must not be blank")
-        return stripped
+    @model_validator(mode="after")
+    def _require_text_or_attachment(self) -> "AgentInvokeRequest":
+        stripped = self.message.strip()
+        if not stripped and not self.attachment_ids:
+            raise ValueError("message must not be blank when no attachments are provided")
+        self.message = stripped
+        return self
 
 
 class AgentAnswerRequest(BaseModel):

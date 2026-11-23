@@ -262,6 +262,22 @@ export interface Conversation {
   updated_at: string;
 }
 
+export interface Attachment {
+  id: string;
+  name: string;
+  mime_type: string;
+  bytes: number;
+  width: number;
+  height: number;
+}
+
+export interface AgentCapabilities {
+  image_input: boolean;
+  max_images: number;
+  max_bytes: number;
+  allowed_mime_types: string[];
+}
+
 export interface ChatMessage {
   id: string;
   conversation_id: string;
@@ -269,6 +285,7 @@ export interface ChatMessage {
   content: string;
   status: MessageStatus;
   metadata: Record<string, unknown>;
+  attachments?: Attachment[];
   created_at: string;
 }
 

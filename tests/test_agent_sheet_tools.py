@@ -13,6 +13,8 @@ if _SERVER_DIR not in sys.path:
 pd = pytest.importorskip("pandas")
 pytest.importorskip("openpyxl")
 
+from openpyxl import load_workbook  # noqa: E402
+
 from app.agent.dev_tools import DevToolConfig, build_dev_tools  # noqa: E402
 from app.agent.sheet_tools import build_sheet_tools  # noqa: E402
 
@@ -77,7 +79,7 @@ SALES = pd.DataFrame(
 def test_sheet_tools_register_with_the_core_tools(tmp_path):
     tools = {tool.name: tool.fn for tool in build_dev_tools(FakeSDK(), _config(tmp_path))}
 
-    assert {"SheetInspect", "SheetQuery", "SheetTransform", "SheetPivot"} <= set(tools)
+    assert {"SheetInspect", "SheetCreate", "SheetQuery", "SheetTransform", "SheetPivot"} <= set(tools)
 
 
 def test_sheet_tools_are_optional(tmp_path):
@@ -127,6 +129,133 @@ def test_inspect_reads_csv(tmp_path):
     assert result["sheets"][0]["name"] == "sales"
     assert result["sheets"][0]["rows"] == 2
     assert result["sheets"][0]["sample"][0] == ["north", "Q1", 10, 1]
+
+
+# ---- SheetCreate --------------------------------------------------------------
+
+
+def test_create_writes_a_new_workbook_from_positional_rows(tmp_path):
+    result = _tools(tmp_path)["SheetCreate"](
+        "new.xlsx",
+        columns=["Model", "Sales"],
+        rows=[["Mate 80", 1000], ["Pura 80", 500]],
+        sheet="Top 10",
+    )
+
+    assert result["output_path"] == "new.xlsx"
+    assert result["format"] == "xlsx"
+    assert result["sheet"] == "Top 10"
+    assert result["rows"] == 2
+    assert result["columns"] == ["Model", "Sales"]
+    assert result["bytes"] > 0
+    written = pd.read_excel(tmp_path / "new.xlsx", sheet_name="Top 10")
+    assert list(written.columns) == ["Model", "Sales"]
+    assert written["Sales"].tolist() == [1000, 500]
+
+
+def test_create_infers_columns_from_object_rows(tmp_path):
+    result = _tools(tmp_path)["SheetCreate"](
+        "new.xlsx",
+        rows=[{"Model": "Mate 80", "Sales": 1000}, {"Model": "Pura 80", "Sales": 500}],
+    )
+
+    assert result["columns"] == ["Model", "Sales"]
+    written = pd.read_excel(tmp_path / "new.xlsx")
+    assert written["Model"].tolist() == ["Mate 80", "Pura 80"]
+
+
+def test_create_can_write_csv(tmp_path):
+    result = _tools(tmp_path)["SheetCreate"](
+        "new.csv",
+        columns=["a", "b"],
+        rows=[[1, 2], [3, 4]],
+    )
+
+    assert result["format"] == "csv"
+    written = pd.read_csv(tmp_path / "new.csv")
+    assert written.to_dict(orient="list") == {"a": [1, 3], "b": [2, 4]}
+
+
+def test_create_can_write_a_header_only_workbook(tmp_path):
+    result = _tools(tmp_path)["SheetCreate"]("empty.xlsx", columns=["a", "b"])
+
+    assert result["rows"] == 0
+    written = pd.read_excel(tmp_path / "empty.xlsx")
+    assert list(written.columns) == ["a", "b"]
+    assert written.empty
+
+
+def test_create_refuses_to_overwrite_without_the_flag(tmp_path):
+    tools = _tools(tmp_path)
+    tools["SheetCreate"]("new.xlsx", columns=["a"], rows=[[1]])
+
+    with pytest.raises(ValueError, match="already exists"):
+        tools["SheetCreate"]("new.xlsx", columns=["a"], rows=[[2]])
+
+    tools["SheetCreate"]("new.xlsx", columns=["a"], rows=[[2]], overwrite=True)
+    assert pd.read_excel(tmp_path / "new.xlsx")["a"].tolist() == [2]
+
+
+def test_create_rejects_rows_that_do_not_match_the_columns(tmp_path):
+    with pytest.raises(ValueError, match="row 2 has 1 values but columns has 2"):
+        _tools(tmp_path)["SheetCreate"]("new.xlsx", columns=["a", "b"], rows=[[1, 2], [3]])
+
+
+def test_create_writes_formula_like_values_as_text_by_default(tmp_path):
+    _tools(tmp_path)["SheetCreate"](
+        "safe.xlsx",
+        columns=["value"],
+        rows=[["=1+1"], ["+cmd"], ["@name"]],
+    )
+
+    sheet = load_workbook(tmp_path / "safe.xlsx", data_only=False).active
+    assert [sheet.cell(row=index, column=1).data_type for index in range(2, 5)] == ["s", "s", "s"]
+    assert sheet.cell(row=2, column=1).value == "=1+1"
+
+
+def test_create_keeps_formulas_when_explicitly_allowed(tmp_path):
+    _tools(tmp_path)["SheetCreate"](
+        "formula.xlsx",
+        columns=["value"],
+        rows=[["=1+1"]],
+        allow_formulas=True,
+    )
+
+    sheet = load_workbook(tmp_path / "formula.xlsx", data_only=False).active
+    assert sheet.cell(row=2, column=1).data_type == "f"
+    assert sheet.cell(row=2, column=1).value == "=1+1"
+
+
+def test_create_applies_number_formats(tmp_path):
+    _tools(tmp_path)["SheetCreate"](
+        "formatted.xlsx",
+        columns=["price"],
+        rows=[[1234.5]],
+        number_formats={"price": "#,##0.00"},
+    )
+
+    sheet = load_workbook(tmp_path / "formatted.xlsx").active
+    assert sheet.cell(row=2, column=1).number_format == "#,##0.00"
+
+
+def test_create_serializes_nested_values_as_json(tmp_path):
+    _tools(tmp_path)["SheetCreate"](
+        "nested.xlsx",
+        columns=["payload"],
+        rows=[[{"a": 1}]],
+    )
+
+    sheet = load_workbook(tmp_path / "nested.xlsx").active
+    assert sheet.cell(row=2, column=1).value == '{"a": 1}'
+
+
+def test_create_rejects_paths_outside_the_workspace(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside.xlsx"
+
+    with pytest.raises(ValueError, match="outside the workspace"):
+        _tools(workspace)["SheetCreate"](str(outside), columns=["a"], rows=[[1]])
 
 
 # ---- SheetQuery ---------------------------------------------------------------
@@ -302,6 +431,19 @@ def test_transform_reports_coerced_casts(tmp_path):
     assert any("became null" in warning for warning in result["warnings"])
     written = pd.read_excel(tmp_path / "out.xlsx")
     assert written["amount"].isna().sum() == 1
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits")
+def test_transform_output_is_readable_and_keeps_an_existing_mode(tmp_path):
+    _write_workbook(tmp_path / "in.xlsx", {"Data": SALES})
+    tools = _tools(tmp_path)
+
+    tools["SheetTransform"]("in.xlsx", "out.xlsx")
+    assert (tmp_path / "out.xlsx").stat().st_mode & 0o777 == 0o644
+
+    (tmp_path / "out.xlsx").chmod(0o640)
+    tools["SheetTransform"]("in.xlsx", "out.xlsx", overwrite=True)
+    assert (tmp_path / "out.xlsx").stat().st_mode & 0o777 == 0o640
 
 
 def test_transform_rejects_an_unknown_operation_and_column(tmp_path):

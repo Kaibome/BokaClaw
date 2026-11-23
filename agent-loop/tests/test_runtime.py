@@ -7,7 +7,13 @@ from conftest import FakeProvider
 
 from bokaclaw_agent.agent.runtime import AgentRuntime
 from bokaclaw_agent.core.config import AgentConfig
-from bokaclaw_agent.core.exceptions import MaxIterationsExceeded, ModelError, NoProgressError, ToolExecutionError
+from bokaclaw_agent.core.exceptions import (
+    MaxIterationsExceeded,
+    ModelError,
+    ModelProtocolError,
+    NoProgressError,
+    ToolExecutionError,
+)
 from bokaclaw_agent.core.types import EventType, ModelResponse, ToolCall
 from bokaclaw_agent.sessions.memory import InMemorySessionStore
 from bokaclaw_agent.tools import tool
@@ -862,3 +868,94 @@ def test_progress_guard_raises_when_the_forced_answer_is_empty():
 
     assert excinfo.value.result is not None
     assert excinfo.value.result.stop_reason == "no_progress"
+
+
+# ---- raw DSML tool-call markup ------------------------------------------------
+
+DSML_ADD_CALL = """<｜｜DSML｜｜ calls>
+<｜｜DSML｜｜ invoke name="add">
+<｜｜DSML｜｜ parameter name="a" string="false">1</｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ parameter name="b" string="false">2</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+</｜｜DSML｜｜ calls>"""
+
+DSML_BASH_CALL = """<｜｜DSML｜｜ calls>
+<｜｜DSML｜｜ invoke name="Bash">
+<｜｜DSML｜｜ parameter name="command" string="true">echo hi</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+</｜｜DSML｜｜ calls>"""
+
+
+def test_dsml_tool_call_is_recovered_and_executed():
+    provider = FakeProvider(
+        [
+            ModelResponse(content=DSML_ADD_CALL, finish_reason="stop"),
+            ModelResponse(content="3", finish_reason="stop"),
+        ]
+    )
+    runtime = AgentRuntime(AgentConfig(), provider=provider, tools=[add], store=InMemorySessionStore())
+
+    result = runtime.run("add", session_id="s1")
+
+    assert result.content == "3"
+    assert result.iterations == 2
+    assert result.tool_results[0].name == "add"
+    assert result.tool_results[0].content == "3"
+    assistant = result.new_messages[1]
+    assert assistant["role"] == "assistant"
+    assert assistant["content"] is None
+    assert assistant["tool_calls"][0]["function"]["name"] == "add"
+    assert "<｜｜DSML｜｜" not in json.dumps(result.new_messages, ensure_ascii=False)
+
+
+def test_dsml_markup_is_stripped_from_a_final_answer():
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                content="The answer is 42.\n<｜｜DSML｜｜ calls>\n</｜｜DSML｜｜ calls>",
+                finish_reason="stop",
+            )
+        ]
+    )
+    runtime = AgentRuntime(AgentConfig(), provider=provider, store=InMemorySessionStore())
+
+    result = runtime.run("hi", session_id="s1")
+
+    assert result.content == "The answer is 42."
+    assert result.stop_reason == "final"
+
+
+def test_unparseable_dsml_is_rejected_instead_of_accepted_as_a_final_answer():
+    provider = FakeProvider(
+        [ModelResponse(content="<｜｜DSML｜｜ calls>\n</｜｜DSML｜｜ calls>", finish_reason="stop")]
+    )
+    store = InMemorySessionStore()
+    runtime = AgentRuntime(AgentConfig(), provider=provider, store=store)
+
+    with pytest.raises(ModelProtocolError, match="could not be parsed"):
+        runtime.run("hi", session_id="s1")
+
+    assert store.get_session("s1").status == "failed"
+
+
+def test_dsml_in_the_forced_final_answer_is_rejected():
+    responses = [
+        ModelResponse(
+            tool_calls=[ToolCall(id=f"call_{index}", name="add", arguments={"a": 1, "b": 2})],
+            finish_reason="tool_calls",
+        )
+        for index in range(1, 5)
+    ]
+    responses.append(ModelResponse(content=DSML_BASH_CALL, finish_reason="stop"))
+    store = InMemorySessionStore()
+    runtime = AgentRuntime(
+        AgentConfig(progress_guard=True, progress_nudge_after=2, progress_stop_after=3, max_iterations=8),
+        provider=FakeProvider(responses),
+        tools=[add],
+        store=store,
+    )
+
+    with pytest.raises(ModelProtocolError, match="tools were disabled"):
+        runtime.run("stuck", session_id="s1")
+
+    assert store.get_session("s1").status == "failed"

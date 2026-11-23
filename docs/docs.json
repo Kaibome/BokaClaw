@@ -42,6 +42,7 @@
         "group": "Dashboard",
         "pages": [
           "dashboard/agent-chat-design",
+          "dashboard/agent-image-input",
           "dashboard/agent-execution-decoupling",
           "dashboard/i18n"
         ]
