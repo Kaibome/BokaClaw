@@ -295,8 +295,8 @@ data: {"run_id":"uuid","conversation_id":"uuid","seq":6,"message_id":"uuid","que
 ```
 
 - `used_tokens`：本次 run 最后一次 `agent_loop` 模型调用上报的 `prompt_tokens`。压缩调用只发 `context_compressed`，不计入；不包含输出 token，也不取峰值。没有有效值时整个 `context` 键省略（`done` 中不出现，run 快照中为 `null`），dashboard 隐藏指示器。
-- `window_tokens`：模型真实上下文窗口，取自 `AGENT_CONTEXT_WINDOW`；未配置时回退压缩预算 `AGENT_CONTEXT_MAX_TOKENS`。两者都关闭时为 `null`。
-- `budget_tokens`：压缩预算 `AGENT_CONTEXT_MAX_TOKENS`，用于 tooltip 说明；压缩关闭时为 `null`。
+- `window_tokens`：模型真实上下文窗口，取自 `AGENT_CONTEXT_WINDOW`；未配置时回退上限 `AGENT_CONTEXT_MAX_TOKENS`。两者都关闭时为 `null`。
+- `budget_tokens`：压缩触发阈值 `floor(AGENT_CONTEXT_MAX_TOKENS × AGENT_CONTEXT_TRIGGER_RATIO)`，用于 tooltip 说明；压缩关闭时为 `null`。
 - 百分比不序列化，由 dashboard 用 `used_tokens / window_tokens` 计算，避免两处取整不一致。
 
 - `cached_tokens` / `cache_miss_tokens` / `cache_hit_rate` 是**可选**字段，只在至少一次调用返回了缓存计数时出现；`cache_hit_rate = cached / (cached + miss)`。provider 差异在 `agent-loop/src/bokaclaw_agent/providers/openai_compatible.py` 统一拍平：DeepSeek 的 `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`、OpenAI 的 `prompt_tokens_details.cached_tokens`（缺失 miss 时按 `prompt - cached` 推导）、`completion_tokens_details.reasoning_tokens`。

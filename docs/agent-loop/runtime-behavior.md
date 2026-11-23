@@ -386,10 +386,12 @@ return "ok"
 
 `compress()` 返回新列表，只用于该次 `MODEL_REQUEST`。
 
+触发阈值是 `context_max_tokens × context_trigger_ratio`（默认 `1.0`；设为 `0.85` 会把 15% 留给模型输出和运行时块），再扣除工具 schema 的 token 数。
+
 ### 7.2 四层防丢机制
 
 1. **最近窗口 + 最后一条 user 固定保留**（`compression.py:82-89, 124-126`）
-   - 默认保留一半预算
+   - 默认保留触发预算的一半
    - 最后一条 user 消息无论落在哪都会被重新插入 tail
 2. **Fact Ledger**（`agent/ledger.py`）
    - 专门为"压缩后忘事"设计
@@ -408,8 +410,8 @@ return "ok"
 | # | 窗口 | 位置 | 后果 |
 |---|---|---|---|
 | 1 | 摘要失败仍推进 `_folded_until` | `compression.py:104-122` | 该段历史**永久不再尝试摘要**，只剩一行 "N messages omitted" |
-| 2 | 摘要输入被截断 | `compression.py:289-309` | 单条 2,000 字符，整体只留最后 24,000 字符 |
-| 3 | 摘要自身有上限 | `compression.py:28-29` | 1,024 tokens / 8,000 字符 |
+| 2 | 摘要输入被截断 | `compression.py` | 单条最多 8,000 字符，整体只留最后 64,000 字符 |
+| 3 | 摘要自身有上限 | `compression.py:28-31` | 1,536 tokens / 12,000 字符 |
 | 4 | Ledger 也会遗忘 | `ledger.py:19-22, 86-91` | 超过 24 条 FIFO，单条 240 字符 |
 | 5 | `max_history_messages` 静默丢弃 | `context.py:209-215` | 无摘要、无提示；server 未设置该参数 |
 | 6 | 摘要不跨 run 复用 | `runtime.py:349-350` | 每次 run 重新压缩、重新调摘要模型 |
@@ -565,7 +567,7 @@ SDK TOOL_CALL / TOOL_RESULT 事件
 conversation_messages.meta["tool_trace"]          ← 压缩不参与
   ↓ ④ build_history cap 2,000 字符/条、24k 总字符、40 条
 payload["history"] → 发给 SDK
-  ↓ ⑤ context_max_tokens=32,000 时压缩
+  ↓ ⑤ 超过 context_max_tokens × context_trigger_ratio 时压缩（默认 1.0）
 模型请求                                          ← 压缩只在这里生效
 ```
 

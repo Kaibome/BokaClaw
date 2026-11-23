@@ -317,7 +317,8 @@ The stream emits `meta`, `message.delta`, `message.completed`, and `done`, with 
 | `AGENT_MAX_TOKENS` | provider default | Max tokens per model call. |
 | `AGENT_REQUEST_TIMEOUT_SECONDS` | `60` | Timeout for one model call. |
 | `AGENT_MAX_RETRIES` | `2` | Model client retries. |
-| `AGENT_CONTEXT_MAX_TOKENS` | `32000` | Model-view budget; `0` / `off` disables compression. |
+| `AGENT_CONTEXT_MAX_TOKENS` | `32000` | Model-view ceiling; `0` / `off` disables compression. |
+| `AGENT_CONTEXT_TRIGGER_RATIO` | `1.0` | Fraction of the ceiling at which compression triggers; `0.85` leaves 15% headroom. |
 | `AGENT_CONTEXT_WINDOW` | `AGENT_CONTEXT_MAX_TOKENS` | Context meter denominator (display only). |
 | `AGENT_CONTEXT_COMPRESSION` | `summary` | `summary` or `truncate`. |
 | `AGENT_COMPRESSION_MODEL` | `AGENT_MODEL` | Model used only for compression summaries. |

@@ -65,7 +65,7 @@ ReAct run
 
 ### 2.1 触发与降级
 
-压缩由 `agent-loop/src/bokaclaw_agent/agent/compression.py` 实现。当模型视图的分词器 token 数超过 `context_max_tokens` 时：
+压缩由 `agent-loop/src/bokaclaw_agent/agent/compression.py` 实现。当模型视图的分词器 token 数超过 `context_max_tokens × context_trigger_ratio`（默认比例 1.0）时：
 
 1. 保留最近 `context_keep_recent_tokens`。
 2. 对更早的消息调用压缩模型生成滚动摘要。

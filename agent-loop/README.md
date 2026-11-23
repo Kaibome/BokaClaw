@@ -444,8 +444,9 @@ off by default in the SDK:
 
 | `AgentConfig` field | Default | Meaning |
 |---|---|---|
-| `context_max_tokens` | `None` (off) | Approximate token budget for one model request. When exceeded, older messages are folded into a rolling summary or dropped. |
-| `context_keep_recent_tokens` | `None` | Tokens kept verbatim; defaults to half the budget. Must stay at least 256 tokens below `context_max_tokens` when both are set. |
+| `context_max_tokens` | `None` (off) | Token ceiling for one model request. Compression triggers at `context_trigger_ratio` of this value, folding older messages into a rolling summary or dropping them. |
+| `context_trigger_ratio` | `1.0` | Fraction of `context_max_tokens` at which compression triggers; `0.85` leaves 15% headroom for the response. |
+| `context_keep_recent_tokens` | `None` | Tokens kept verbatim; defaults to half the trigger budget. Must stay at least 256 tokens below the trigger threshold when both are set. |
 | `context_compression` | `"summary"` | `"summary"` folds old messages with one model call; `"truncate"` only drops them. |
 | `compression_model` | `None` | Separate `ModelConfig` used only for summaries. Defaults to the agent's own provider; set it to a cheaper model or endpoint. |
 | `tool_result_max_chars` | `None` (off) | Maximum characters of one tool result in the model view. Minimum 256. |

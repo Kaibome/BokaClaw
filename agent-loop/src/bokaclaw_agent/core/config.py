@@ -46,8 +46,17 @@ class AgentConfig(BaseModel):
         default=None,
         ge=1024,
         description=(
-            "Approximate token budget for the model view. When exceeded, older messages are "
-            "summarized or dropped. Disabled when None."
+            "Token ceiling for the model view. Compression triggers at context_trigger_ratio of "
+            "this value and folds older messages into a summary or drops them. Disabled when None."
+        ),
+    )
+    context_trigger_ratio: float = Field(
+        default=1.0,
+        gt=0.0,
+        le=1.0,
+        description=(
+            "Fraction of context_max_tokens at which compression triggers. 1.0 uses the full "
+            "ceiling; 0.85 leaves headroom for the model's response."
         ),
     )
     context_keep_recent_tokens: int | None = Field(
@@ -181,8 +190,12 @@ class AgentConfig(BaseModel):
     def _validate_context_budget(self) -> "AgentConfig":
         budget = self.context_max_tokens
         keep_recent = self.context_keep_recent_tokens
-        if budget is not None and keep_recent is not None and keep_recent >= budget - 256:
-            raise ValueError("context_keep_recent_tokens must be at least 256 tokens below context_max_tokens")
+        if budget is not None and keep_recent is not None:
+            trigger_tokens = int(budget * self.context_trigger_ratio)
+            if keep_recent >= trigger_tokens - 256:
+                raise ValueError(
+                    "context_keep_recent_tokens must be at least 256 tokens below the compression trigger threshold"
+                )
         return self
 
     @model_validator(mode="after")

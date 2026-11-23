@@ -182,6 +182,9 @@ class LocalAgentConfig:
     max_seconds: float
     final_answer_on_max_iterations: bool = True
     context_max_tokens: Optional[int] = None
+    # Compression triggers at this fraction of context_max_tokens, leaving the
+    # rest as headroom for the model's response and runtime context blocks.
+    context_trigger_ratio: float = 1.0
     # Display-only denominator for the dashboard context meter. Not passed to
     # the SDK; ``None`` hides the meter when no window is configured.
     context_window_tokens: Optional[int] = None
@@ -289,6 +292,9 @@ def load_local_config() -> Optional[LocalAgentConfig]:
         api_key = "local"
 
     context_max_tokens = _env_budget("AGENT_CONTEXT_MAX_TOKENS", 32_000)
+    # Keep the ratio inside a usable range even when the environment is
+    # misconfigured; 1.0 preserves the historical trigger-at-the-ceiling behavior.
+    context_trigger_ratio = min(1.0, max(0.1, _env_float("AGENT_CONTEXT_TRIGGER_RATIO", 1.0)))
     # The real model window is a display concern; fall back to the compression
     # budget so the dashboard has a denominator without extra configuration.
     context_window_tokens = _env_budget("AGENT_CONTEXT_WINDOW", context_max_tokens)
@@ -298,7 +304,8 @@ def load_local_config() -> Optional[LocalAgentConfig]:
         # the keep window must leave room for the part that gets compressed.
         context_keep_recent_tokens = max(0, context_keep_recent_tokens)
         if context_max_tokens is not None:
-            context_keep_recent_tokens = min(context_keep_recent_tokens, max(0, context_max_tokens - 256))
+            trigger_tokens = int(context_max_tokens * context_trigger_ratio)
+            context_keep_recent_tokens = min(context_keep_recent_tokens, max(0, trigger_tokens - 256))
 
     nudge_after = max(2, _env_int("AGENT_PROGRESS_NUDGE_AFTER", 3))
     stop_after = max(nudge_after, _env_int("AGENT_PROGRESS_STOP_AFTER", 5))
@@ -326,6 +333,7 @@ def load_local_config() -> Optional[LocalAgentConfig]:
         max_seconds=max(1.0, _env_float("AGENT_LOOP_MAX_SECONDS", 300.0)),
         final_answer_on_max_iterations=_env_flag("AGENT_FINAL_ANSWER_ON_MAX_ITERATIONS", True),
         context_max_tokens=context_max_tokens,
+        context_trigger_ratio=context_trigger_ratio,
         context_window_tokens=context_window_tokens,
         context_keep_recent_tokens=context_keep_recent_tokens,
         context_compression=_env_compression_mode("AGENT_CONTEXT_COMPRESSION"),
@@ -1100,6 +1108,7 @@ def build_runtime(
         model=model_config,
         compression_model=compression_model_config,
         context_max_tokens=config.context_max_tokens,
+        context_trigger_ratio=config.context_trigger_ratio,
         context_keep_recent_tokens=config.context_keep_recent_tokens,
         context_compression=config.context_compression,
         tool_result_max_chars=config.tool_result_max_chars,
@@ -1123,13 +1132,15 @@ def build_runtime(
     )
     _context_debug(
         "agent context config: model=%s compression_model=%s max_iterations=%s context_max_tokens=%s "
-        "context_keep_recent_tokens=%s context_compression=%s tool_result_max_chars=%s "
-        "tool_concurrency=%s fact_ledger=%s fact_ledger_max_chars=%s step_budget_notice=%s "
-        "progress_guard=%s progress_nudge_after=%s progress_stop_after=%s",
+        "context_trigger_ratio=%s trigger_tokens=%s context_keep_recent_tokens=%s context_compression=%s "
+        "tool_result_max_chars=%s tool_concurrency=%s fact_ledger=%s fact_ledger_max_chars=%s "
+        "step_budget_notice=%s progress_guard=%s progress_nudge_after=%s progress_stop_after=%s",
         config.model,
         config.compression_model or config.model,
         config.max_iterations,
         config.context_max_tokens,
+        config.context_trigger_ratio,
+        int(config.context_max_tokens * config.context_trigger_ratio) if config.context_max_tokens else None,
         config.context_keep_recent_tokens,
         config.context_compression,
         config.tool_result_max_chars,
@@ -1226,12 +1237,17 @@ def _context_metadata(used_tokens: Optional[int], config: Optional[LocalAgentCon
     """Build the dashboard context object, or ``None`` when usage is unknown."""
     if not isinstance(used_tokens, int) or isinstance(used_tokens, bool) or used_tokens <= 0:
         return None
-    budget = config.context_max_tokens if config is not None else None
+    ceiling = config.context_max_tokens if config is not None else None
+    budget = (
+        int(ceiling * config.context_trigger_ratio)
+        if ceiling is not None and config is not None
+        else None
+    )
     window = config.context_window_tokens if config is not None else None
     if window is None:
         # Directly constructed configs (tests, callers) may skip the env
-        # fallback; keep the meter usable by treating the budget as the window.
-        window = budget
+        # fallback; keep the meter usable by treating the ceiling as the window.
+        window = ceiling
     return {
         "used_tokens": used_tokens,
         "window_tokens": window,

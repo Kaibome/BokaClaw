@@ -562,6 +562,7 @@ class SubagentTool:
             max_iterations=max_turns,
             tool_error_mode="return",
             context_max_tokens=self._parent_config.context_max_tokens,
+            context_trigger_ratio=self._parent_config.context_trigger_ratio,
             context_keep_recent_tokens=self._parent_config.context_keep_recent_tokens,
             context_compression=self._parent_config.context_compression,
             tool_result_max_chars=self._parent_config.tool_result_max_chars,

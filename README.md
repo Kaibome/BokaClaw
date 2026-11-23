@@ -247,7 +247,8 @@ make prune-logs              # 清理 30 天前的请求日志
 | `AGENT_API_KEY` / `AGENT_BASE_URL` | 复用 LLM 配置 | 接入 Qwen、vLLM、Ollama、OpenRouter 等兼容端点 |
 | `AGENT_MAX_ITERATIONS` | `10` | 单轮 ReAct 最大步数 |
 | `AGENT_FINAL_ANSWER_ON_MAX_ITERATIONS` | `true` | 步数耗尽时再做一次无工具请求，尽力作答 |
-| `AGENT_CONTEXT_MAX_TOKENS` | `32000` | 模型视图的 Token 预算 |
+| `AGENT_CONTEXT_MAX_TOKENS` | `32000` | 模型视图的 Token 上限 |
+| `AGENT_CONTEXT_TRIGGER_RATIO` | `1.0` | 达到上限的该比例时触发压缩（`0.85` = 85%） |
 | `AGENT_CONTEXT_COMPRESSION` | `summary` | `summary` 摘要压缩 / `truncate` 仅截断 |
 | `AGENT_COMPRESSION_MODEL` | `AGENT_MODEL` | 压缩摘要专用模型，可指向更便宜的模型 |
 | `AGENT_FACT_LEDGER` | `true` | 保留 run 内事实账本，避免压缩后遗忘 |

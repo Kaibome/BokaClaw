@@ -26,10 +26,12 @@ from .tokenization import TokenCounter, get_token_counter
 
 logger = logging.getLogger(__name__)
 
-SUMMARY_MAX_TOKENS = 1024
-SUMMARY_MAX_CHARS = 8_000
-SUMMARY_INPUT_MAX_CHARS = 24_000
-SUMMARY_MESSAGE_MAX_CHARS = 2_000
+# Caps are sized so one summary call fits a 128K-token summarizer even in the
+# worst case: ~64K CJK input chars + ~12K previous-summary chars + 1.5K output.
+SUMMARY_MAX_TOKENS = 1_536
+SUMMARY_MAX_CHARS = 12_000
+SUMMARY_INPUT_MAX_CHARS = 64_000
+SUMMARY_MESSAGE_MAX_CHARS = 8_000
 SUMMARY_MIN_FOLD_TOKENS = 256
 SUMMARY_PREVIEW_CHARS = 4_000
 
@@ -65,6 +67,7 @@ class ContextCompressor:
         token_counter: TokenCounter | None = None,
     ) -> None:
         self.max_tokens = config.context_max_tokens
+        self.trigger_ratio = config.context_trigger_ratio
         self.keep_recent_tokens = config.context_keep_recent_tokens
         self.mode = config.context_compression
         self.provider = provider
@@ -84,7 +87,8 @@ class ContextCompressor:
         if self.max_tokens is None:
             return CompressionResult(messages)
 
-        budget = self.max_tokens - max(0, tools_tokens)
+        trigger_tokens = int(self.max_tokens * self.trigger_ratio)
+        budget = trigger_tokens - max(0, tools_tokens)
         before = count_messages_tokens(messages, counter=self.token_counter)
         if before <= budget:
             return CompressionResult(messages)
@@ -152,6 +156,8 @@ class ContextCompressor:
         stats: dict[str, Any] = {
             "before_tokens": before,
             "after_tokens": after,
+            "trigger_tokens": trigger_tokens,
+            "trigger_ratio": self.trigger_ratio,
             "dropped_messages": dropped_count,
             "summarized": summarized,
             "fallback": fallback,

@@ -223,6 +223,7 @@ def clean_agent_env(monkeypatch):
         "AGENT_REQUEST_TIMEOUT_SECONDS",
         "AGENT_MAX_RETRIES",
         "AGENT_CONTEXT_MAX_TOKENS",
+        "AGENT_CONTEXT_TRIGGER_RATIO",
         "AGENT_CONTEXT_WINDOW",
         "AGENT_CONTEXT_KEEP_RECENT_TOKENS",
         "AGENT_CONTEXT_COMPRESSION",
@@ -803,6 +804,47 @@ def test_keep_recent_budget_is_clamped_for_a_valid_sdk_config(monkeypatch):
     assert config.context_keep_recent_tokens == 768
 
 
+def test_context_trigger_ratio_is_loaded_and_validated(monkeypatch):
+    monkeypatch.setattr(agent_runtime, "_current_llm_config", lambda: {})
+    monkeypatch.setenv("AGENT_MODEL", "m")
+    monkeypatch.setenv("AGENT_API_KEY", "k")
+    monkeypatch.setenv("AGENT_CONTEXT_MAX_TOKENS", "262144")
+    monkeypatch.setenv("AGENT_CONTEXT_TRIGGER_RATIO", "0.85")
+
+    config = agent_runtime.load_local_config()
+
+    assert config is not None
+    assert config.context_trigger_ratio == 0.85
+    assert config.context_max_tokens == 262_144
+
+
+@pytest.mark.parametrize(("value", "expected"), [("0", 0.1), ("2", 1.0), ("nope", 1.0)])
+def test_context_trigger_ratio_is_clamped(monkeypatch, value, expected):
+    monkeypatch.setattr(agent_runtime, "_current_llm_config", lambda: {})
+    monkeypatch.setenv("AGENT_MODEL", "m")
+    monkeypatch.setenv("AGENT_API_KEY", "k")
+    monkeypatch.setenv("AGENT_CONTEXT_TRIGGER_RATIO", value)
+
+    config = agent_runtime.load_local_config()
+
+    assert config is not None
+    assert config.context_trigger_ratio == expected
+
+
+def test_keep_recent_is_clamped_to_the_trigger_threshold(monkeypatch):
+    monkeypatch.setattr(agent_runtime, "_current_llm_config", lambda: {})
+    monkeypatch.setenv("AGENT_MODEL", "m")
+    monkeypatch.setenv("AGENT_API_KEY", "k")
+    monkeypatch.setenv("AGENT_CONTEXT_MAX_TOKENS", "10000")
+    monkeypatch.setenv("AGENT_CONTEXT_TRIGGER_RATIO", "0.5")
+    monkeypatch.setenv("AGENT_CONTEXT_KEEP_RECENT_TOKENS", "9000")
+
+    config = agent_runtime.load_local_config()
+
+    assert config is not None
+    assert config.context_keep_recent_tokens == 4744
+
+
 def test_negative_keep_recent_budget_is_clamped_to_zero(monkeypatch):
     monkeypatch.setattr(agent_runtime, "_current_llm_config", lambda: {})
     monkeypatch.setenv("AGENT_MODEL", "m")
@@ -1124,6 +1166,30 @@ async def test_stream_local_agent_context_window_falls_back_to_budget(monkeypatc
         "used_tokens": 1234,
         "window_tokens": 8000,
         "budget_tokens": 8000,
+    }
+
+
+@pytest.mark.asyncio
+async def test_stream_local_agent_reports_the_trigger_budget(monkeypatch):
+    sdk = FakeSDK(result=_result("done"))
+    sdk.events = [_model_response(1234)]
+    monkeypatch.setattr(
+        agent_runtime,
+        "load_local_config",
+        lambda: _config(
+            context_max_tokens=100_000,
+            context_window_tokens=100_000,
+            context_trigger_ratio=0.85,
+        ),
+    )
+    monkeypatch.setattr(agent_runtime, "_load_sdk", lambda: sdk)
+
+    events = await _collect(_payload())
+
+    assert events[-1].metadata["context"] == {
+        "used_tokens": 1234,
+        "window_tokens": 100_000,
+        "budget_tokens": 85_000,
     }
 
 

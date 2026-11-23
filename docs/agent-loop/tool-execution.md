@@ -241,7 +241,7 @@ run 结束     → attach_trace(final_metadata) → conversation_messages.metada
 | 压缩能减少下一轮的 token 吗？ | 不能，下一轮重新装入原始记录并再压一次 |
 | 压缩失败会怎样？ | 退化为纯截断，`_folded_until` 仍然推进，那段内容只剩省略提示 |
 
-工具 schema 的 token 在压缩前就从预算里扣除（`runtime.py:394-399`），所以“工具多”和“历史长”会争抢同一个 `context_max_tokens`。
+工具 schema 的 token 在压缩前就从预算里扣除（`runtime.py:394-399`），所以“工具多”和“历史长”会争抢同一个触发预算 `context_max_tokens × context_trigger_ratio`。
 
 ---
 

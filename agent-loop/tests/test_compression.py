@@ -7,6 +7,7 @@ from bokaclaw_agent.agent.compression import ContextCompressor
 from bokaclaw_agent.agent.context import (
     TRUNCATION_MARKER,
     count_message_tokens,
+    count_messages_tokens,
     count_tokens,
     safe_start_index,
     truncate_text,
@@ -122,6 +123,28 @@ def test_compression_noop_when_under_budget():
     assert provider.calls == []
 
 
+def test_trigger_ratio_compresses_below_the_full_ceiling():
+    messages = _history()
+    ceiling = count_messages_tokens(messages) + 100
+
+    # At ratio 1.0 the view still fits under the ceiling.
+    below, provider, _ = _compressor(context_max_tokens=ceiling, context_keep_recent_tokens=256)
+    assert below.compress(messages).changed is False
+    assert provider.calls == []
+
+    # At 85% the same view is over the trigger threshold.
+    above, provider, _ = _compressor(
+        context_max_tokens=ceiling,
+        context_keep_recent_tokens=256,
+        context_trigger_ratio=0.85,
+    )
+    result = above.compress(messages)
+
+    assert result.changed is True
+    assert result.stats["trigger_ratio"] == 0.85
+    assert result.stats["trigger_tokens"] == int(ceiling * 0.85)
+
+
 def test_truncate_mode_drops_old_messages_at_a_safe_boundary():
     compressor, provider, _ = _compressor(
         context_max_tokens=1600,
@@ -169,9 +192,99 @@ def test_summary_mode_calls_the_provider_without_tools():
     call = provider.calls[0]
     assert call["tools"] is None
     assert call["tool_choice"] is None
-    assert call["kwargs"] == {"temperature": 0, "max_tokens": 1024}
+    assert call["kwargs"] == {"temperature": 0, "max_tokens": 1536}
     assert "S1" in result.messages[0]["content"]
     assert "## Summary of earlier conversation" in result.messages[0]["content"]
+
+
+def test_summary_transcript_keeps_up_to_8000_chars_per_message():
+    long_result = "x" * 6_000
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "task"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "Read", "arguments": "{}"}}],
+        },
+        {"role": "tool", "tool_call_id": "c1", "content": long_result},
+        {"role": "user", "content": "current"},
+    ]
+    compressor, provider, _ = _compressor(context_max_tokens=1600, context_keep_recent_tokens=400)
+
+    result = compressor.compress(messages)
+
+    assert result.stats["summarized"] is True
+    request_text = provider.calls[0]["messages"][1]["content"]
+    assert long_result in request_text
+
+
+def test_summary_transcript_truncates_one_message_above_the_8000_char_cap():
+    long_result = "x" * 20_000
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "task"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "Read", "arguments": "{}"}}],
+        },
+        {"role": "tool", "tool_call_id": "c1", "content": long_result},
+        {"role": "user", "content": "current"},
+    ]
+    compressor, provider, _ = _compressor(context_max_tokens=1600, context_keep_recent_tokens=400)
+
+    compressor.compress(messages)
+
+    request_text = provider.calls[0]["messages"][1]["content"]
+    assert TRUNCATION_MARKER in request_text
+    assert len(request_text) < 20_000
+
+
+def test_summary_transcript_keeps_only_the_last_64000_chars():
+    messages: list[dict[str, object]] = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "EARLY-MARKER task"},
+    ]
+    for index in range(10):
+        messages.append(
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": f"c{index}",
+                        "type": "function",
+                        "function": {"name": "Read", "arguments": "{}"},
+                    }
+                ],
+            }
+        )
+        messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": f"c{index}",
+                "content": f"T{index}-" + "z" * 10_000 + f"-LATE-{index}",
+            }
+        )
+    messages.append({"role": "user", "content": "current"})
+    compressor, provider, _ = _compressor(context_max_tokens=1600, context_keep_recent_tokens=400)
+
+    compressor.compress(messages)
+
+    request_text = provider.calls[0]["messages"][1]["content"]
+    assert "EARLY-MARKER" not in request_text
+    assert "LATE-9" in request_text
+
+
+def test_summary_output_is_capped_at_12000_chars():
+    compressor, provider, _ = _compressor(context_max_tokens=1600, context_keep_recent_tokens=400)
+    provider.responses = [ModelResponse(content="s" * 20_000, usage={"total_tokens": 5})]
+
+    result = compressor.compress(_history())
+
+    assert result.stats["summarized"] is True
+    assert result.stats["output"]["summary_chars"] == 12_000
 
 
 def test_summary_failure_falls_back_to_truncation():
@@ -263,6 +376,15 @@ def test_config_rejects_a_keep_recent_budget_that_fills_the_budget():
         AgentConfig(context_max_tokens=1024, context_keep_recent_tokens=800)
 
 
+def test_config_validates_keep_recent_against_the_trigger_threshold():
+    with pytest.raises(ValueError):
+        AgentConfig(
+            context_max_tokens=10_000,
+            context_trigger_ratio=0.5,
+            context_keep_recent_tokens=4_800,
+        )
+
+
 # ---- runtime integration ------------------------------------------------------
 
 
@@ -303,6 +425,8 @@ def test_context_compressed_event_precedes_the_model_request():
     assert set(compressed[0].data) == {
         "before_tokens",
         "after_tokens",
+        "trigger_tokens",
+        "trigger_ratio",
         "dropped_messages",
         "summarized",
         "fallback",
