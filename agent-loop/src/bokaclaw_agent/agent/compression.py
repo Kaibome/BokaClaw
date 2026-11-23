@@ -27,16 +27,13 @@ from .tokenization import TokenCounter, get_token_counter
 
 logger = logging.getLogger(__name__)
 
-# Caps are sized so one summary call fits a 128K-token summarizer even in the
-# worst case: ~64K chunk tokens + ~12K previous-summary chars + 1.5K output.
-# Large folds are split into chunks of at most SUMMARY_CHUNK_TOKENS rendered
-# tokens and merged into one rolling summary; SUMMARY_INPUT_MAX_CHARS is a
-# per-chunk safety cap.
+# One summary call folds the whole interval; the summarizer must therefore have
+# a >=256K-token window. SUMMARY_INPUT_MAX_TOKENS bounds the rendered transcript
+# so ~200K input + ~12K previous-summary chars + 1.5K output stays below 256K;
+# oversized folds keep their newest messages.
 SUMMARY_MAX_TOKENS = 1_536
 SUMMARY_MAX_CHARS = 12_000
-SUMMARY_CHUNK_TOKENS = 64_000
-SUMMARY_MAX_CHUNKS = 8
-SUMMARY_INPUT_MAX_CHARS = 256_000
+SUMMARY_INPUT_MAX_TOKENS = 200_000
 SUMMARY_MESSAGE_MAX_CHARS = 8_000
 SUMMARY_MIN_FOLD_TOKENS = 256
 SUMMARY_PREVIEW_CHARS = 4_000
@@ -86,15 +83,11 @@ class ContextCompressor:
         self._call_usage: dict[str, int] = {}
         self._call_count = 0
         self._call_unknown = 0
-        self._chunk_count = 0
-        self._chunk_failures = 0
 
     def compress(self, messages: list[dict[str, Any]], *, tools_tokens: int = 0) -> CompressionResult:
         self._call_usage = {}
         self._call_count = 0
         self._call_unknown = 0
-        self._chunk_count = 0
-        self._chunk_failures = 0
         if self.max_tokens is None:
             return CompressionResult(messages)
 
@@ -143,13 +136,11 @@ class ContextCompressor:
                         )
                         >= SUMMARY_MIN_FOLD_TOKENS
                     ):
-                        summary = self._summarize_chunks(self._summary_chunks(folded))
+                        summary = self._summarize(folded, self._summary)
                         if summary is not None:
                             self._summary = summary
-                            if self._chunk_failures == 0:
-                                self._summary_error = None
+                            self._summary_error = None
                             summarized = True
-                            fallback = self._chunk_failures > 0
                         else:
                             fallback = True
                     else:
@@ -218,8 +209,6 @@ class ContextCompressor:
                 stats["usage"] = dict(self._call_usage)
             stats["model_calls"] = self._call_count
             stats["usage_unknown_calls"] = self._call_unknown
-            stats["summary_chunks"] = self._chunk_count
-            stats["summary_chunks_failed"] = self._chunk_failures
         self._call_usage = {}
         self._call_count = 0
         self._call_unknown = 0
@@ -259,70 +248,35 @@ class ContextCompressor:
                 return index
         return None
 
-    def _summary_chunks(self, messages: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
-        """Split a fold into chunks that each fit one summarizer request.
+    def _render_transcript(self, messages: list[dict[str, Any]]) -> str:
+        """Render the newest messages that fit the summarizer's input budget.
 
-        Chunks are packed by the token count of their rendered transcript, so
-        per-message caps are already applied. A tool-call block (the assistant
-        with ``tool_calls`` plus its following tool messages) is never split.
+        The whole fold goes into one request. Messages are appended newest
+        first so an oversized fold keeps its most recent context instead of
+        truncating the tail of a rendered string.
         """
 
-        chunks: list[list[dict[str, Any]]] = []
-        current: list[dict[str, Any]] = []
-        current_tokens = 0
-        current_chars = 0
-
-        for unit in _message_units(messages):
-            transcript = _format_transcript(unit)
-            tokens = self.token_counter.count(transcript)
-            chars = len(transcript) + 1
-            if current and (
-                current_tokens + tokens > SUMMARY_CHUNK_TOKENS or current_chars + chars > SUMMARY_INPUT_MAX_CHARS
-            ):
-                chunks.append(current)
-                current = []
-                current_tokens = 0
-                current_chars = 0
-            current.extend(unit)
-            current_tokens += tokens
-            current_chars += chars
-
-        if current:
-            chunks.append(current)
-        return chunks
-
-    def _summarize_chunks(self, chunks: list[list[dict[str, Any]]]) -> str | None:
-        """Roll the summary through chunks oldest to newest.
-
-        A failed chunk is skipped and marks the result as partial; later chunks
-        still use the last successful summary. The hard call cap is advisory:
-        the current 256K window produces at most a handful of chunks, and
-        dropping folded content to honor the cap would defeat the purpose.
-        """
-
-        if len(chunks) > SUMMARY_MAX_CHUNKS:
+        lines: list[str] = []
+        total = 0
+        for message in reversed(messages):
+            line = _format_message(message)
+            tokens = self.token_counter.count(line)
+            if lines and total + tokens > SUMMARY_INPUT_MAX_TOKENS:
+                break
+            lines.append(line)
+            total += tokens
+        if len(lines) < len(messages):
             logger.warning(
-                "Context fold needs %d summary chunks (cap %d); summarizing all to keep coverage",
-                len(chunks),
-                SUMMARY_MAX_CHUNKS,
+                "Summary input truncated to the newest %d of %d messages (cap %d tokens)",
+                len(lines),
+                len(messages),
+                SUMMARY_INPUT_MAX_TOKENS,
             )
-
-        summary = self._summary
-        succeeded = False
-        failures = 0
-        self._chunk_count = len(chunks)
-        for chunk in chunks:
-            result = self._summarize(chunk, summary)
-            if result is None:
-                failures += 1
-                continue
-            summary = result
-            succeeded = True
-        self._chunk_failures = failures
-        return summary if succeeded else None
+        lines.reverse()
+        return "\n".join(lines)
 
     def _summarize(self, messages: list[dict[str, Any]], previous: str | None) -> str | None:
-        transcript = _format_transcript(messages)
+        transcript = self._render_transcript(messages)
         if not transcript:
             return None
 
@@ -496,27 +450,6 @@ def _messages_chars(messages: list[dict[str, Any]]) -> int:
     return total
 
 
-def _message_units(messages: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
-    """Group an assistant tool-call block with its tool results.
-
-    Chunking must never separate a ``tool_calls`` assistant from the tool
-    messages that answer it; each other message is its own unit.
-    """
-
-    units: list[list[dict[str, Any]]] = []
-    index = 0
-    while index < len(messages):
-        message = messages[index]
-        unit = [message]
-        index += 1
-        if message.get("role") == "assistant" and message.get("tool_calls"):
-            while index < len(messages) and messages[index].get("role") == "tool":
-                unit.append(messages[index])
-                index += 1
-        units.append(unit)
-    return units
-
-
 def _format_message(message: dict[str, Any]) -> str:
     role = str(message.get("role") or "unknown")
     text = content_text(message.get("content"))
@@ -529,13 +462,6 @@ def _format_message(message: dict[str, Any]) -> str:
     if role == "tool" and message.get("tool_call_id"):
         return f"tool {message['tool_call_id']}: {text}"
     return f"{role}: {text}"
-
-
-def _format_transcript(messages: list[dict[str, Any]]) -> str:
-    transcript = "\n".join(_format_message(message) for message in messages)
-    if len(transcript) > SUMMARY_INPUT_MAX_CHARS:
-        transcript = transcript[-SUMMARY_INPUT_MAX_CHARS:]
-    return transcript
 
 
 def _json_text(value: Any) -> str:

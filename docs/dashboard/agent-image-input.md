@@ -280,7 +280,7 @@ AGENT_REMOTE_VISION_SUPPORTED=false
      `AgentConfig.image_token_estimate`（默认 1200）；**不 JSON 序列化 base64**；
    - 未知 part 用有界 JSON 预览计数。
 2. `compression.py`
-   - `_format_transcript`：图片 part 渲染为 `[image: <id>]`，不把 base64 放进摘要 prompt；
+   - `_format_message`：图片 part 渲染为 `[image: <id>]`，不把 base64 放进摘要 prompt；
    - `_messages_chars`：图片按固定字符数计，避免 `len(json.dumps(...))` 爆炸；
    - `_fit_budget`：超预算时先移除最旧消息里的图片 part（保留最新用户轮的图），再截断文本；
      结构（tool_call/tool 配对）不能破坏。
@@ -404,7 +404,7 @@ AGENT_REMOTE_VISION_SUPPORTED=false
    `GET /agent/capabilities`、`ConversationMessageOut.attachments`；补 router/附件测试。
 3. **历史与模型输入**：`build_history` 描述符 + 保留预算、`build_messages` content parts、
    title/memory 占位；补 history/runtime 测试。
-4. **SDK 预算/压缩**：`count_message_tokens`、`_format_transcript`、`_messages_chars`、
+4. **SDK 预算/压缩**：`count_message_tokens`、`_format_message`、`_messages_chars`、
    `_fit_budget`；补 agent-loop 测试。
 5. **视觉模型**：`AGENT_VISION_*`、按 run 切换、503/400 错误码、context window；真实图片跑一次
    “图片 + 工具调用”。

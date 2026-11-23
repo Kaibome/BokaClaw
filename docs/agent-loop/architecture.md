@@ -293,7 +293,7 @@ build() ──▶ compress(messages, tools_tokens) ──▶ model_request
 
 - 触发阈值是 `context_max_tokens × context_trigger_ratio`（`context_trigger_ratio` 默认 `1.0`；设为 `0.85` 可预留 15% 给模型输出和运行时块），再扣除 tools schema 的 token 数；未超阈值直接返回原文，不产生额外模型调用。
 - 切点从尾部向前累积 `context_keep_recent_tokens`（默认触发预算一半），再前移到合法边界（`user`，或带 `tool_calls` 的 `assistant`，因为它的结果紧随其后）。最近一条 `user` 消息会被钉住保留，长工具循环不会丢失任务指令。`context_keep_recent_tokens` 必须至少比触发阈值低 256 token。
-- `summary` 模式把切点之前的消息连同上一次摘要折叠成滚动摘要，合并进唯一的 system 消息。摘要调用使用 `provider.complete(..., tools=None, tool_choice=None, temperature=0, max_tokens=1536)`，**不复用**会强制携带 tools 的 `_complete()`；usage 合并进本次 run。摘要输入单条最多 8,000 字符；折叠内容按渲染后的 token 数分块（每块最多 64K token、256,000 字符），从旧到新滚动合并进上一次摘要，带 `tool_calls` 的 assistant 与其 tool 结果不会被拆到不同块；输出最多 12,000 字符。单个分块失败只记录 warning、标记本次摘要为 partial 并继续后续分块；全部失败、异常、空内容或内容过少时才回退裁剪，不中断 run。
+- `summary` 模式把切点之前的消息连同上一次摘要折叠成滚动摘要，合并进唯一的 system 消息。摘要调用使用 `provider.complete(..., tools=None, tool_choice=None, temperature=0, max_tokens=1536)`，**不复用**会强制携带 tools 的 `_complete()`；usage 合并进本次 run。折叠区间一次性送入摘要模型（要求摘要模型窗口 ≥256K），输入按 token 上限 200,000 保留最新的消息，单条消息最多 8,000 字符；输出最多 1,536 token / 12,000 字符。摘要失败（异常、空内容、内容过少）只记录 warning 并回退裁剪，不中断 run。
 - `truncate` 模式直接丢弃切点之前的消息，并在 system 末尾追加省略说明。
 - 压缩后仍超预算时，`_fit_budget()` 对最大的非 system 消息做头尾截断（只改视图），不会拆散 tool_call 与其结果。
 - 每次真正改写视图都会发出 `context_compressed` 事件，位置在该轮 `model_request` 之前。`ContextCompressor` 的滚动摘要只存在于一次 run 内，不写入 SessionStore。

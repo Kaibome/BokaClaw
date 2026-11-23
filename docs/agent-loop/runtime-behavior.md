@@ -410,8 +410,8 @@ return "ok"
 | # | 窗口 | 位置 | 后果 |
 |---|---|---|---|
 | 1 | 摘要失败仍推进 `_folded_until` | `compression.py:104-122` | 该段历史**永久不再尝试摘要**，只剩一行 "N messages omitted" |
-| 2 | 摘要输入被截断 | `compression.py` | 单条最多 8,000 字符；折叠按 64K token / 256,000 字符分块滚动摘要，单块超限时只留该块尾部 |
-| 3 | 摘要自身有上限 | `compression.py:35-42` | 1,536 tokens / 12,000 字符 |
+| 2 | 摘要输入被截断 | `compression.py` | 单条最多 8,000 字符；折叠一次性摘要，输入超过 200,000 token 时只保留最新的消息 |
+| 3 | 摘要自身有上限 | `compression.py:34-39` | 1,536 tokens / 12,000 字符 |
 | 4 | Ledger 也会遗忘 | `ledger.py:19-22, 86-91` | 超过 24 条 FIFO，单条 240 字符 |
 | 5 | `max_history_messages` 静默丢弃 | `context.py:209-215` | 无摘要、无提示；server 未设置该参数 |
 | 6 | 摘要不跨 run 复用 | `runtime.py:349-350` | 每次 run 重新压缩、重新调摘要模型 |

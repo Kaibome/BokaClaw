@@ -486,14 +486,14 @@ is built, after history is loaded and before `MODEL_REQUEST` is emitted.
 store keep the full original content, so a later run can still work from it.
 
 - **Summary mode** keeps the system prompt, summarizes everything before the
-  recent window, and appends the summary to the system message. Large folds are
-  split into chunks of at most 64K rendered tokens (and 256K characters per
-  chunk) so the summarizer sees the whole fold; chunks are folded oldest to
-  newest into the previous summary. The summary rolls forward: the next
-  compression folds only newly dropped messages into it. Summarization is best
-  effort — a failed chunk is skipped and marked partial, and a provider error,
-  empty reply, or too little content falls back to deterministic truncation
-  while the run continues.
+  recent window in one model call, and appends the summary to the system
+  message. The summarizer needs a window of at least 256K tokens: the rendered
+  fold is capped at 200K input tokens and keeps its newest messages when the
+  cap is exceeded, so transcript + previous summary + output stay under 256K.
+  The summary rolls forward: the next compression folds only newly dropped
+  messages into it. Summarization is best effort — a provider error, empty
+  reply, or too little content falls back to deterministic truncation while
+  the run continues.
 - **Truncate mode** drops old messages at a safe boundary (never starting with
   an orphaned `tool` message). The most recent user turn is always pinned, so a
   single-user tool loop keeps its instruction.
@@ -603,7 +603,7 @@ runtime = AgentRuntime(config, provider=provider, on_event=on_event)
 
 Events: `run_started`, `model_request`, `model_response`, `tool_call`, `tool_result`, `context_compressed`, `subagent_started`, `subagent_event`, `subagent_finished`, `run_ended`, `error`. Callback exceptions are logged and never interrupt a run.
 
-`context_compressed` is emitted when a request was rewritten **or** when a summarization model call happened, immediately before the matching `model_request`. Its `data` is `{before_tokens, after_tokens, trigger_tokens, trigger_ratio, dropped_messages, summarized, fallback}`, plus `{usage, model_calls, usage_unknown_calls, summary_chunks, summary_chunks_failed}` when a summary call ran. The `seq` rule below applies to it like every other event.
+`context_compressed` is emitted when a request was rewritten **or** when a summarization model call happened, immediately before the matching `model_request`. Its `data` is `{before_tokens, after_tokens, trigger_tokens, trigger_ratio, dropped_messages, summarized, fallback}`, plus `{usage, model_calls, usage_unknown_calls}` when a summary call ran. The `seq` rule below applies to it like every other event.
 
 `model_response` always carries `usage` with `prompt_tokens` / `completion_tokens` / `total_tokens` for that one call. An empty object means the endpoint did not report usage — consumers must count it as an unknown call rather than zero tokens. Streaming requests ask for usage via `stream_options.include_usage` and retry once without it if an endpoint rejects the parameter.
 

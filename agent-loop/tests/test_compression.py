@@ -4,7 +4,7 @@ import pytest
 from conftest import FakeProvider
 
 from bokaclaw_agent.agent import compression as compression_module
-from bokaclaw_agent.agent.compression import ContextCompressor, _format_transcript, _message_units
+from bokaclaw_agent.agent.compression import ContextCompressor
 from bokaclaw_agent.agent.context import (
     TRUNCATION_MARKER,
     count_message_tokens,
@@ -275,106 +275,53 @@ def test_summary_transcript_truncates_one_message_above_the_8000_char_cap():
     assert len(request_text) < 20_000
 
 
-def test_format_transcript_caps_each_chunk_at_the_input_limit(monkeypatch):
-    monkeypatch.setattr(compression_module, "SUMMARY_INPUT_MAX_CHARS", 10_000)
-    messages = [
-        {"role": "user", "content": "EARLY-MARKER " + "a" * 9_000},
-        {"role": "assistant", "content": "b" * 9_000},
-        {"role": "tool", "tool_call_id": "c1", "content": "c" * 9_000 + "-LATE-MARKER"},
-    ]
-
-    transcript = _format_transcript(messages)
-
-    assert len(transcript) <= 10_000
-    assert "EARLY-MARKER" not in transcript
-    assert "LATE-MARKER" in transcript
-
-
-def _fold_with_tool_units(contents: list[str]) -> list[dict[str, object]]:
-    messages: list[dict[str, object]] = [
-        {"role": "system", "content": "sys"},
-        {"role": "user", "content": "task"},
-    ]
-    for index, content in enumerate(contents):
-        messages.append(
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    {
-                        "id": f"c{index}",
-                        "type": "function",
-                        "function": {"name": "Read", "arguments": "{}"},
-                    }
-                ],
-            }
-        )
-        messages.append({"role": "tool", "tool_call_id": f"c{index}", "content": content})
+def test_summary_folds_everything_in_a_single_call(monkeypatch):
+    monkeypatch.setattr(compression_module, "SUMMARY_INPUT_MAX_TOKENS", 100_000)
+    provider = FakeProvider([ModelResponse(content="S1", usage={"total_tokens": 5})])
+    compressor = ContextCompressor(
+        AgentConfig(context_max_tokens=1024, context_keep_recent_tokens=0),
+        provider,
+        {},
+    )
+    messages: list[dict[str, object]] = [{"role": "system", "content": "sys"}]
+    for index in range(6):
+        messages.append({"role": "user", "content": f"u{index} " + "x" * 1_000})
+        messages.append({"role": "assistant", "content": f"a{index} " + "y" * 1_000})
     messages.append({"role": "user", "content": "current"})
-    return messages
+
+    result = compressor.compress(messages)
+
+    assert result.stats["summarized"] is True
+    assert result.stats["model_calls"] == 1
+    assert len(provider.calls) == 1
+    request_text = provider.calls[0]["messages"][1]["content"]
+    assert "u0 " in request_text
+    assert "a5 " in request_text
 
 
-def test_summary_rolls_through_multiple_chunks(monkeypatch):
-    monkeypatch.setattr(compression_module, "SUMMARY_CHUNK_TOKENS", 500)
-    provider = FakeProvider([ModelResponse(content=f"S{index}", usage={"total_tokens": 5}) for index in range(1, 4)])
+def test_summary_keeps_the_newest_messages_when_the_fold_exceeds_the_input_cap(monkeypatch):
+    monkeypatch.setattr(compression_module, "SUMMARY_INPUT_MAX_TOKENS", 300)
+    provider = FakeProvider([ModelResponse(content="S1", usage={"total_tokens": 5})])
     compressor = ContextCompressor(
-        AgentConfig(context_max_tokens=1024, context_keep_recent_tokens=100),
+        AgentConfig(context_max_tokens=1024, context_keep_recent_tokens=0),
         provider,
         {},
     )
-
-    result = compressor.compress(_fold_with_tool_units(["A" * 1_000, "B" * 1_000, "C" * 1_000]))
-
-    assert result.stats["summarized"] is True
-    assert result.stats["model_calls"] == 3
-    assert result.stats["summary_chunks"] == 3
-    assert result.stats["summary_chunks_failed"] == 0
-    assert len(provider.calls) == 3
-    assert "A" * 1_000 in provider.calls[0]["messages"][1]["content"]
-    assert "Previous summary:\nS1" in provider.calls[1]["messages"][1]["content"]
-    assert "Previous summary:\nS2" in provider.calls[2]["messages"][1]["content"]
-    assert "S3" in result.messages[0]["content"]
-
-
-def test_summary_chunk_failure_is_partial_and_continues(monkeypatch):
-    monkeypatch.setattr(compression_module, "SUMMARY_CHUNK_TOKENS", 500)
-    provider = FakeProvider(
-        [
-            RuntimeError("first chunk failed"),
-            ModelResponse(content="S2", usage={"total_tokens": 5}),
-            ModelResponse(content="S3", usage={"total_tokens": 5}),
-        ]
-    )
-    compressor = ContextCompressor(
-        AgentConfig(context_max_tokens=1024, context_keep_recent_tokens=100),
-        provider,
-        {},
-    )
-
-    result = compressor.compress(_fold_with_tool_units(["A" * 1_000, "B" * 1_000, "C" * 1_000]))
-
-    assert len(provider.calls) == 3
-    assert result.stats["summarized"] is True
-    assert result.stats["fallback"] is True
-    assert result.stats["model_calls"] == 3
-    assert result.stats["summary_chunks"] == 3
-    assert result.stats["summary_chunks_failed"] == 1
-    assert "S3" in result.messages[0]["content"]
-
-
-def test_message_units_keep_tool_call_blocks_together():
     messages = [
-        {"role": "assistant", "content": None, "tool_calls": [{"id": "c1"}]},
-        {"role": "tool", "tool_call_id": "c1", "content": "one"},
-        {"role": "tool", "tool_call_id": "c2", "content": "two"},
-        {"role": "user", "content": "next"},
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "EARLY-MARKER " + "a" * 1_000},
+        {"role": "assistant", "content": "b" * 1_000},
+        {"role": "user", "content": "LATE-MARKER " + "c" * 1_000},
+        {"role": "user", "content": "current"},
     ]
 
-    units = _message_units(messages)
+    result = compressor.compress(messages)
 
-    assert [len(unit) for unit in units] == [3, 1]
-    assert units[0] == messages[:3]
-    assert units[1] == messages[3:]
+    assert result.stats["summarized"] is True
+    assert result.stats["model_calls"] == 1
+    request_text = provider.calls[0]["messages"][1]["content"]
+    assert "LATE-MARKER" in request_text
+    assert "EARLY-MARKER" not in request_text
 
 
 def test_summary_output_is_capped_at_12000_chars():
@@ -533,8 +480,6 @@ def test_context_compressed_event_precedes_the_model_request():
         "usage",
         "model_calls",
         "usage_unknown_calls",
-        "summary_chunks",
-        "summary_chunks_failed",
         "input",
         "output",
     }
