@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 import pytest
+
 from scripts.import_drbench_goldens import build_golden
 from scripts.run_drbench_benchmark import _safe_destination, extract_report
 
@@ -63,6 +64,22 @@ def test_extract_report_prefers_a_fenced_json_block():
     assert report is not None
     assert report["report_insights"][0]["claim"] == "A"
     assert report["report_text"] == "Body"
+
+
+def test_extract_report_salvages_insights_from_invalid_report_text():
+    content = (
+        "Compiling the report.\n\n"
+        "```json\n"
+        '{"report_insights":[{"claim":"A","citations":["shared/a.pdf"]}],'
+        '"report_text":"## 1. What baseline would "15%" apply to?\n\nMore text."}\n'
+        "```\n"
+    )
+
+    report = extract_report(content)
+
+    assert report is not None
+    assert report["report_insights"] == [{"claim": "A", "citations": ["shared/a.pdf"]}]
+    assert '## 1. What baseline would "15%" apply to?' in report["report_text"]
 
 
 def test_extract_report_rejects_plain_text():

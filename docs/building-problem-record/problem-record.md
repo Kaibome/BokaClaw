@@ -1151,6 +1151,18 @@
 - **解决后效果**：文件不再被并发写；minival 报告保留 15 行（DR0004 标记为 cancelled 后单独重跑）；重复 run 被取消。
 - **可复用结论**：暂停/恢复容器内的批处理必须终止容器内 PID，而不是只停 `docker exec` 外壳；runner 应加 PID/锁文件，发现已有实例时拒绝启动或只允许一个写者。
 
+## P-44 DRBench 提示词在召回与干扰项之间失衡，报告正文破坏 JSON 契约
+
+- **状态**：已解决
+- **发现时间**：2026-11-24
+- **解决时间**：2026-11-24
+- **场景**：DR0014（research domain）失败后，连续调整 `DRBENCH_SYSTEM_NOTE` 并重跑评分。
+- **现象**：原始 prompt 倾向直接给结论，`insights_recall=0.100`（avoidance 0.857）；改成“覆盖全部定量事实”后 recall 升到 0.600，但报告膨胀到 110 条 insight、`distractor_recall=0.714`（avoidance 0.286）；平衡版首次运行输出 29 条 insight，但 `report_text` 内嵌未转义的 Markdown 引号（`## What baseline would "15%" apply to?`），整段 JSON 非法，runner 报 `no structured report_insights found`。
+- **根因**：模型把“覆盖事实”理解成“逐行穷举文件”，把与问题无关的 HR/IT/设施数据也写进 insight；`report_text` 是自由 Markdown，模型不会为 JSON 转义其中的引号和换行，而提取器只接受整体合法的 JSON。
+- **解决措施**：prompt 改为“只报告与问题相关的定量事实（值、日期、单位），排除 HR、IT、设施、培训、奖金等无关运营数据；每 insight 一条事实；不要用结论替代证据”；`extract_report` 增加容错提取——整体 JSON 解析失败时按括号配对截取 `report_insights` 数组，`report_text` 保留原始 Markdown；新增回归测试。
+- **解决后效果**：DR0014 `insights_recall=0.600`、`distractor_recall=0.071`、`distractor_avoidance=0.929`，同时优于原始版（0.100/0.857）和全量版（0.600/0.286）；29 条 insight，445,691 tokens。
+- **可复用结论**：事实型 benchmark 的 prompt 必须同时约束“覆盖范围”和“相关性边界”，只加“覆盖全部事实”会让分数在 recall 与 avoidance 之间来回摆；解析模型输出时不要假设 JSON 合法，`report_insights` 数组可以脱离 `report_text` 独立恢复。
+
 ---
 
 ## 变更记录
@@ -1224,3 +1236,4 @@
 | 2026-11-24 | 追加 P-42：DRBench P0 接入——新增 importer/runner/scorer、`.extracted.md` sidecar、独立 `AGENT_DRBENCH_MAX_TOKENS`，移除 `ENVIRONMENT.md` 的 insight/distractor 标签，scorer 改为源码 clone + `PYTHONPATH`；DR0001 完成并得分 insights_recall 0.500 / distractor_avoidance 0.714，minival 15 题启动（发现时间 2026-11-24，解决时间 2026-11-24） |
 | 2026-11-24 | DRBench minival 结果：15/15 有报告，平均 insights_recall 0.467、distractor_recall 0.166（avoidance 0.834），15 题约 1,180 万 token；单题最高 DR0009 1,359,560、最低 DR0001 223,175；按 domain csm 0.570 最高、research 0.100 最低；DR0004 取消后补跑得分 insights_recall 0.556 |
 | 2026-11-24 | 追加并修复 P-43：暂停 `docker exec` 批处理后容器内 runner 继续运行，resume 造成两个 runner 同时写报告；用容器内 `/proc` + SIGTERM 终止重复 runner，并取消重复 run（发现时间 2026-11-24，解决时间 2026-11-24） |
+| 2026-11-24 | 追加并修复 P-44：DR0014 三版 prompt 对比确认需要“相关事实”边界——平衡版 `insights_recall=0.600` / `distractor_avoidance=0.929`，优于原始 0.100/0.857 与全量 0.600/0.286；同时给 `extract_report` 增加容错提取，恢复正文含未转义引号的 `report_insights`（发现时间 2026-11-24，解决时间 2026-11-24） |

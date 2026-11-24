@@ -15,6 +15,9 @@ def test_drbench_uses_its_own_report_prompt():
     assert _benchmark_system_note({"benchmark": "gaia"}) == BENCHMARK_SYSTEM_NOTE
     assert "report_insights" in DRBENCH_SYSTEM_NOTE
     assert "ENVIRONMENT.md" in DRBENCH_SYSTEM_NOTE
+    assert "one fact per insight" in DRBENCH_SYSTEM_NOTE
+    assert "do not dump unrelated operational data" in DRBENCH_SYSTEM_NOTE
+    assert "Do not answer the opening question with a verdict" in DRBENCH_SYSTEM_NOTE
     assert "Do not add a `Final answer:` line" in DRBENCH_SYSTEM_NOTE
 
 

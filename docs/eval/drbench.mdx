@@ -119,5 +119,10 @@ embedding-capable provider.
 
 - File-based environment only; app-specific navigation is not reproduced.
 - DOCX/XLSX/PPTX are read through extracted sidecars; the original path is kept for citations.
-- Reports must follow the fenced JSON contract; free-form reports lose insight recall.
+- Reports must follow the fenced JSON contract; free-form reports lose insight recall. The runner still
+  salvages `report_insights` when `report_text` contains unescaped characters, but the agent is told to
+  emit valid JSON.
+- The benchmark prompt asks for question-relevant facts only — one fact per insight, with value, date,
+  and unit — and explicitly excludes unrelated HR, IT, facilities, training, and bonus data. Ask for
+  "all quantitative facts" and distractor avoidance collapses (DR0014: 0.286 vs 0.929).
 - Token cost is much higher than GAIA; start with one task, then the 15-task minival.

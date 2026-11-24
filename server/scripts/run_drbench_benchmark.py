@@ -36,6 +36,8 @@ TERMINAL_RUN_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
 CASE_PREFIX = "drbench-"
 SAFE_TASK_ID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
+_INSIGHTS_KEY = '"report_insights"'
+_REPORT_TEXT_KEY = '"report_text"'
 
 
 class ApiError(RuntimeError):
@@ -285,12 +287,72 @@ def _wait_run(api: Api, run_id: str, args: argparse.Namespace) -> dict[str, Any]
         time.sleep(max(1.0, args.poll_seconds))
 
 
+def _salvage_report(block: str) -> dict[str, Any] | None:
+    """Recover a report whose ``report_text`` is not valid JSON.
+
+    Models sometimes paste raw Markdown into ``report_text`` (for example
+    ``## What baseline would "15%" apply to?``), which leaves unescaped quotes
+    and breaks the whole block even though ``report_insights`` is intact.
+    """
+    key_index = block.find(_INSIGHTS_KEY)
+    if key_index < 0:
+        return None
+    start = block.find("[", key_index)
+    if start < 0:
+        return None
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(block)):
+        char = block[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "[":
+            depth += 1
+        elif char == "]":
+            depth -= 1
+            if depth == 0:
+                try:
+                    insights = json.loads(block[start : index + 1], strict=False)
+                except json.JSONDecodeError:
+                    return None
+                if not isinstance(insights, list):
+                    return None
+                return {"report_insights": insights, "report_text": _salvage_report_text(block)}
+    return None
+
+
+def _salvage_report_text(block: str) -> str:
+    key_index = block.find(_REPORT_TEXT_KEY)
+    if key_index < 0:
+        return ""
+    colon = block.find(":", key_index)
+    if colon < 0:
+        return ""
+    text = block[colon + 1 :].lstrip()
+    if text.startswith('"'):
+        text = text[1:]
+    text = text.rstrip()
+    while text and text[-1] in '}"':
+        text = text[:-1]
+    return text.rstrip()
+
+
 def extract_report(content: str) -> dict[str, Any] | None:
     for block in reversed(_FENCE_RE.findall(content or "")):
+        block = block.strip()
         try:
-            parsed = json.loads(block.strip())
+            parsed = json.loads(block)
         except json.JSONDecodeError:
-            continue
+            parsed = _salvage_report(block)
         if isinstance(parsed, dict) and isinstance(parsed.get("report_insights"), list):
             return parsed
     stripped = (content or "").strip()

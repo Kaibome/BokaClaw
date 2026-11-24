@@ -494,6 +494,13 @@ def _memory_note(block: str) -> str:
 DRBENCH_SYSTEM_NOTE = (
     "This is an automated DRBench enterprise research run. Memory tools are unavailable.\n"
     "Your enterprise environment is under `drbench/<task_id>/`; read `ENVIRONMENT.md` first.\n"
+    "Report the internal facts as stated: one fact per insight, including the value, date, and unit. "
+    "Cover the quantitative facts relevant to the research question, but do not dump unrelated "
+    "operational data such as HR, IT infrastructure, facilities, training, or bonuses unless the "
+    "question asks for them. If relevant files disagree, report each value as its own insight "
+    "instead of replacing the facts with commentary about the inconsistency. "
+    "Do not answer the opening question with a verdict; compile the supporting evidence. "
+    "Prefer concise, question-focused insights over exhaustive row-by-row dumps.\n"
     "Every claim must cite the original file path exactly as listed in `ENVIRONMENT.md`, or a URL.\n"
     "When finished, output exactly one fenced ```json block and nothing after it:\n"
     '{"report_insights":[{"claim":"...","citations":["shared/example.pdf"]}],"report_text":"..."}\n'
