@@ -1127,6 +1127,30 @@
   - 模型仍可能不选 `SheetCreate` 而走 Bash；工具描述与 `sheet-agent` 提示词已明确“从零创建”场景，但无法强制路由。
 - **可复用结论**：当模型既会输出自然语言又会输出工具调用时，“终答形状校验”必须和工具策略一样当作硬约束；只读/写权限解决了能不能做，解决不了“调用有没有真正发生”。
 
+## P-42 DRBench P0 接入：泄题、token 上限与 scorer 提示词缺失
+
+- **状态**：部分缓解
+- **发现时间**：2026-11-24
+- **解决时间**：2026-11-24
+- **场景**：把 ServiceNow DRBench minival（15 题、350 个 env 文件）接入 BokaClaw 评测，使用文件物化 + `/agent` + 官方 `score_report`。
+- **现象**：首轮 DR0001 在 607k token 被 GAIA 的 benchmark 上限截断；物化的 `ENVIRONMENT.md` 直接列出了 `insight`/`distractor` 标签；官方 scorer 安装后找不到 `drbench/prompts/eval_metrics/insight_scoring.txt`；`Read` 不支持 DOCX。
+- **根因**：`AGENT_BENCHMARK_MAX_TOKENS` 是给 GAIA 单答案题设的；`ENVIRONMENT.md` 误把 `qa_type` 渲染给 Agent；`pip install git+...` 只安装包数据，不包含仓库里的 prompt 文件；server 只预装 PDF/XLSX/PPTX 读取能力。
+- **解决措施**：新增独立的 `AGENT_DRBENCH_MAX_TOKENS`（当前 150 万）；`ENVIRONMENT.md` 删除 kind 列；DOCX/XLSX/PPTX/JSONL 生成 `.extracted.md` sidecar 并在 `server/requirements.txt` 增加 `python-docx`；scorer 镜像改为 clone 仓库并设置 `PYTHONPATH=/opt/drbench`。
+- **解决后效果**：minival 最终 **15/15** 有报告（DR0004 取消后单独补跑），15 题平均 `insights_recall=0.467`、`distractor_recall=0.166`、`distractor_avoidance=0.834`；按 domain 最高为 csm 0.570 / market_analysis 0.556，最低为 research 0.100 / itsm 0.222。15 题合计约 1,180 万 token，单题 22.3 万–136 万；报告 insight 数 17–35，本地引用大多多于网页引用，未误引 sidecar。DR0013 的 `report_text` 是占位句，但 insight 列表正常。
+- **可复用结论**：benchmark 接入时“给 Agent 看的文件清单”不能带评估标签；不同 benchmark 的 token 上限要分开配置；官方 scorer 的运行时文件（prompts）可能不在 pip 包里，必须从源码目录加载。
+
+## P-43 暂停 docker exec 跑批后容器内 runner 继续运行，resume 造成双写
+
+- **状态**：已解决
+- **发现时间**：2026-11-24
+- **解决时间**：2026-11-24
+- **场景**：DRBench minival 跑到第 4 题时暂停后台任务，随后用 `--resume` 继续。
+- **现象**：TaskStop 只终止了宿主机的 `docker exec` 包装进程，容器内的 `run_drbench_benchmark.py` 继续跑完了 DR0005–DR0015；resume 又启动第二个 runner，两个进程同时写 `/tmp/drbench_results/minival.json`、重复跑 DR0004。
+- **根因**：`docker exec` 的子进程运行在容器 PID 命名空间，宿主 TaskStop 不会自动级联终止；runner 没有锁文件或“已有实例”检测，resume 也不知道另一个 runner 仍在运行。
+- **解决措施**：用 `docker top` 找到容器内 PID，再在容器内扫描 `/proc/*/cmdline` 并按 `--resume` 标记 SIGTERM 第二个 runner；通过 `/agent/runs/{id}/cancel` 取消重复 run；最终保留原 runner 的 15 行报告，DR0004 单独补跑。
+- **解决后效果**：文件不再被并发写；minival 报告保留 15 行（DR0004 标记为 cancelled 后单独重跑）；重复 run 被取消。
+- **可复用结论**：暂停/恢复容器内的批处理必须终止容器内 PID，而不是只停 `docker exec` 外壳；runner 应加 PID/锁文件，发现已有实例时拒绝启动或只允许一个写者。
+
 ---
 
 ## 变更记录
@@ -1197,3 +1221,6 @@
 | 2026-11-23 | 追加并解决 P-41 的工具缺口：新增 `SheetCreate`，从 `columns` + `rows` 新建 `.xlsx` / `.csv`，支持对象行推断、表头样式/冻结、数字格式与公式文本化；加入 `sheet-agent` 白名单；sheet 相关 57 passed、扩展 215 passed；真实 run 创建 `huawei-top10.xlsx` 并由 `SheetInspect` 复核（发现时间 2026-11-23，解决时间 2026-11-23） |
 | 2026-11-23 | P-41 补充：改写 `skills/bokaclaw-office-routing/SKILL.md`，新建工作簿映射到 `SheetCreate`，既有表映射到 `SheetInspect` / `SheetQuery` / `SheetTransform` / `SheetPivot` / `sheet-agent`，PPT/PDF/DOCX 改为 BokaClaw 实际能力；真实请求验证 `Skill → SheetCreate → SheetInspect`，生成 `routing-test.xlsx`（发现时间 2026-11-23，解决时间 2026-11-23） |
 | 2026-11-23 | routing 技能补强：禁止用 ToolSearch 查 Sheet 工具、搜索不足时直接用已有数据建表；真实华为请求验证 `Skill → SheetCreate → SheetInspect`，生成 `huawei_top10_sales.xlsx`（17×8），9 款无公开数据留空并标注（发现时间 2026-11-23，解决时间 2026-11-23） |
+| 2026-11-24 | 追加 P-42：DRBench P0 接入——新增 importer/runner/scorer、`.extracted.md` sidecar、独立 `AGENT_DRBENCH_MAX_TOKENS`，移除 `ENVIRONMENT.md` 的 insight/distractor 标签，scorer 改为源码 clone + `PYTHONPATH`；DR0001 完成并得分 insights_recall 0.500 / distractor_avoidance 0.714，minival 15 题启动（发现时间 2026-11-24，解决时间 2026-11-24） |
+| 2026-11-24 | DRBench minival 结果：15/15 有报告，平均 insights_recall 0.467、distractor_recall 0.166（avoidance 0.834），15 题约 1,180 万 token；单题最高 DR0009 1,359,560、最低 DR0001 223,175；按 domain csm 0.570 最高、research 0.100 最低；DR0004 取消后补跑得分 insights_recall 0.556 |
+| 2026-11-24 | 追加并修复 P-43：暂停 `docker exec` 批处理后容器内 runner 继续运行，resume 造成两个 runner 同时写报告；用容器内 `/proc` + SIGTERM 终止重复 runner，并取消重复 run（发现时间 2026-11-24，解决时间 2026-11-24） |

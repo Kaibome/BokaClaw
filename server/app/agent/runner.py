@@ -101,6 +101,8 @@ class RunConfig:
     span_retention_days: int = 30
     # Applies only to runs whose request metadata carries `benchmark`.
     benchmark_max_tokens: int = 0
+    # DRBench tasks are much larger than GAIA; give them a separate cap.
+    drbench_max_tokens: int = 0
 
 
 def load_run_config() -> RunConfig:
@@ -121,7 +123,14 @@ def load_run_config() -> RunConfig:
         span_tool_content=_env_bool("AGENT_SPAN_TOOL_CONTENT", True),
         span_retention_days=max(1, _env_int("AGENT_SPAN_RETENTION_DAYS", 30)),
         benchmark_max_tokens=max(0, _env_int("AGENT_BENCHMARK_MAX_TOKENS", 0)),
+        drbench_max_tokens=max(0, _env_int("AGENT_DRBENCH_MAX_TOKENS", 0)),
     )
+
+
+def _benchmark_token_limit(request_metadata: Any, config: RunConfig) -> int:
+    if isinstance(request_metadata, dict) and request_metadata.get("benchmark") == "drbench":
+        return config.drbench_max_tokens
+    return config.benchmark_max_tokens
 
 
 def _benchmark_token_budget_exceeded(request_metadata: Any, total_tokens: Any, limit: int) -> bool:
@@ -500,14 +509,11 @@ class AgentRunManager:
                             memory_injected = True
                         await self._handle_event(writer, spans, trace, metadata, event, usage_meter)
                         live_tokens = usage_meter.total_tokens()
-                        if _benchmark_token_budget_exceeded(
-                            request_metadata,
-                            live_tokens,
-                            self.config.benchmark_max_tokens,
-                        ):
+                        token_limit = _benchmark_token_limit(request_metadata, self.config)
+                        if _benchmark_token_budget_exceeded(request_metadata, live_tokens, token_limit):
                             raise AgentLoopError(
                                 "agent_token_budget_exceeded",
-                                f"Benchmark run exceeded {self.config.benchmark_max_tokens} tokens.",
+                                f"Benchmark run exceeded {token_limit} tokens.",
                             )
                     # Deltas are buffered; settle them before judging the reply,
                     # or a short answer with no tool events looks like no content.

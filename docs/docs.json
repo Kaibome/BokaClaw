@@ -53,7 +53,8 @@
           "eval/deepeval-architecture",
           "eval/eval-console-design",
           "eval/agent-span-evaluation",
-          "eval/gaia-benchmark"
+          "eval/gaia-benchmark",
+          "eval/drbench"
         ]
       },
       {

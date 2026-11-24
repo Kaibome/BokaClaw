@@ -1,0 +1,123 @@
+---
+title: "DRBench"
+description: "Run DRBench enterprise deep-research tasks through BokaClaw and score the reports with the official DRBench scorer."
+icon: "building"
+---
+
+DRBench is ServiceNow Research's benchmark for enterprise deep research. Each task gives an agent a company/persona context, 10–50 internal files (PDF, DOCX, XLSX, PPTX, email/chat JSONL), and a research question. The agent must produce a report with cited insights; the official scorer measures insight recall, distractor avoidance, factuality, and report quality.
+
+This page covers the P0 **file-based approximation**: DRBench files are materialized into the workspace and the agent uses the normal file/web tools. The Nextcloud/Mattermost/RoundCube app environments are not reproduced.
+
+## 1. Download the data
+
+The dataset is public (Apache-2.0, not gated) and stays outside the repository:
+
+```bash
+python - <<'PY'
+from huggingface_hub import snapshot_download
+
+ids = [f"DR{i:04d}" for i in range(1, 16)]  # minival
+patterns = ["README.md", "metadata/minival.jsonl", "data/subsets/minival.jsonl",
+            "data/contexts/*", "data/summary/facts/*"]
+patterns += [f"data/tasks/{task_id}/*" for task_id in ids]
+snapshot_download("ServiceNow/drbench", repo_type="dataset",
+                  allow_patterns=patterns,
+                  local_dir="~/BokaClaw/drbench_data")
+PY
+```
+
+Do not commit `drbench_data/`.
+
+## 2. Import goldens
+
+```bash
+docker cp ~/BokaClaw/drbench_data bokaclaw-server:/tmp/drbench_data
+
+docker exec bokaclaw-server python scripts/import_drbench_goldens.py \
+  --data-root /tmp/drbench_data --subset minival --dry-run
+
+docker exec bokaclaw-server python scripts/import_drbench_goldens.py \
+  --data-root /tmp/drbench_data --subset minival
+```
+
+Cases are named `drbench-minival-<task_id>` and store the task id, domain, persona,
+env file map, and eval config hash in `eval_goldens.metadata`. The `qa_type`
+(insight/distractor) stays out of the agent-visible environment description.
+
+## 3. Run the benchmark
+
+```bash
+docker exec bokaclaw-server python scripts/run_drbench_benchmark.py \
+  --base-url http://127.0.0.1:8000 \
+  --data-root /tmp/drbench_data \
+  --workspace-host /app/workspace \
+  --limit 15 \
+  --run-timeout-seconds 1800 \
+  --out /tmp/drbench_results/minival.json
+
+docker cp bokaclaw-server:/tmp/drbench_results/minival.json \
+  ~/BokaClaw/drbench_results/minival.json
+```
+
+For each task the runner:
+
+1. Copies `env.json` files into `workspace/drbench/<task_id>/`.
+2. Writes `ENVIRONMENT.md` with original paths and reader sidecars. DOCX/XLSX/PPTX/JSONL get `.extracted.md` sidecars; citations must use the original path.
+3. Starts a benchmark agent run and captures the fenced `report_insights` JSON block.
+4. Writes a result JSON with the report, run id, tokens, and failures.
+
+DRBench runs use `AGENT_DRBENCH_MAX_TOKENS` rather than the GAIA
+`AGENT_BENCHMARK_MAX_TOKENS` cap. The default is unlimited; set a value
+appropriate for your cost budget.
+
+## 4. Score the reports
+
+Build the scorer image once. Clone the repository (the PyPI/git install does
+not ship the prompt files) and put it on `PYTHONPATH`:
+
+```dockerfile
+FROM python:3.12-slim
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+RUN git clone --depth 1 https://github.com/ServiceNow/drbench.git /opt/drbench
+RUN pip install --no-cache-dir /opt/drbench
+ENV PYTHONPATH=/opt/drbench
+COPY score_drbench_results.py /app/score_drbench_results.py
+```
+
+Then run:
+
+```bash
+docker run --rm \
+  -v ~/BokaClaw/drbench_data:/data:ro \
+  -v ~/BokaClaw/drbench_results:/results \
+  --env-file ~/BokaClaw/drbench_scorer/deepseek.env \
+  drbench-scorer:test \
+  python /app/score_drbench_results.py \
+    --results /results/minival.json \
+    --out /results/minival-scored.json \
+    --metrics insights_recall,distractor_recall
+```
+
+The scorer uses the official `QASimilarityV2` and `DistractorRecall` metrics.
+The P0 scorer patches DRBench's judge call to DeepSeek (`deepseek-chat`), so
+scores are **not** directly comparable with the official GPT-4o-mini
+leaderboard. Add `factuality` and `report_quality` only after configuring an
+embedding-capable provider.
+
+`distractor_recall` is lower-is-better; the summary also reports
+`distractor_avoidance = 1 - recall`.
+
+## 5. Report fields
+
+- `insights_recall`: fraction of ground-truth insights present in the report.
+- `distractor_recall`: fraction of distractor QA hit; lower is better.
+- `factuality`: claim-level citation support (requires embeddings).
+- `report_quality`: six LLM-scored dimensions (1–10).
+
+## Limitations
+
+- File-based environment only; app-specific navigation is not reproduced.
+- DOCX/XLSX/PPTX are read through extracted sidecars; the original path is kept for citations.
+- Reports must follow the fenced JSON contract; free-form reports lose insight recall.
+- Token cost is much higher than GAIA; start with one task, then the 15-task minival.

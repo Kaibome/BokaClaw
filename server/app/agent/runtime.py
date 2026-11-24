@@ -491,6 +491,16 @@ def _memory_note(block: str) -> str:
     )
 
 
+DRBENCH_SYSTEM_NOTE = (
+    "This is an automated DRBench enterprise research run. Memory tools are unavailable.\n"
+    "Your enterprise environment is under `drbench/<task_id>/`; read `ENVIRONMENT.md` first.\n"
+    "Every claim must cite the original file path exactly as listed in `ENVIRONMENT.md`, or a URL.\n"
+    "When finished, output exactly one fenced ```json block and nothing after it:\n"
+    '{"report_insights":[{"claim":"...","citations":["shared/example.pdf"]}],"report_text":"..."}\n'
+    "The JSON must be valid. `report_text` is the full report and may be up to 60,000 characters. "
+    "Do not add a `Final answer:` line."
+)
+
 BENCHMARK_SYSTEM_NOTE = (
     "This is an automated benchmark run. Memory tools are unavailable.\n"
     "Answer format is part of the task and is scored exactly:\n"
@@ -510,6 +520,12 @@ BENCHMARK_SYSTEM_NOTE = (
 def _is_benchmark_payload(payload: Dict[str, Any]) -> bool:
     metadata = payload.get("metadata")
     return isinstance(metadata, dict) and bool(metadata.get("benchmark"))
+
+
+def _benchmark_system_note(metadata: Any) -> str:
+    if isinstance(metadata, dict) and metadata.get("benchmark") == "drbench":
+        return DRBENCH_SYSTEM_NOTE
+    return BENCHMARK_SYSTEM_NOTE
 
 
 def _research_memory_note(block: str) -> str:
@@ -1290,7 +1306,7 @@ def build_runtime(
     if user_input_enabled:
         system_prompt = f"{system_prompt}\n\n{USER_INPUT_GUIDANCE}"
     if benchmark:
-        system_prompt = f"{system_prompt}\n\n{BENCHMARK_SYSTEM_NOTE}"
+        system_prompt = f"{system_prompt}\n\n{_benchmark_system_note(payload.get('metadata'))}"
     agent_config = sdk.AgentConfig(
         name="bokaclaw-agent",
         system_prompt=system_prompt,

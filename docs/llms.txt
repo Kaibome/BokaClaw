@@ -11,3 +11,4 @@
 ## Evaluation
 
 - [GAIA Benchmark](https://docs.bokaclaw.ai/eval/gaia-benchmark) [Both]: Use when you need to import GAIA validation cases, materialize attachments, run the smoke benchmark, or interpret the deterministic exact-match score.
+- [DRBench](https://docs.bokaclaw.ai/eval/drbench) [Both]: Use when you need to import DRBench enterprise research tasks, materialize task files, run the minival smoke, or score reports with the official DRBench metrics.
