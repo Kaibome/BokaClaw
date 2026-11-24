@@ -4,7 +4,8 @@ import pytest
 from conftest import FakeProvider
 
 from bokaclaw_agent.agent import compression as compression_module
-from bokaclaw_agent.agent.compression import ContextCompressor
+from bokaclaw_agent.agent import runtime as runtime_module
+from bokaclaw_agent.agent.compression import CompressionResult, ContextCompressor
 from bokaclaw_agent.agent.context import (
     TRUNCATION_MARKER,
     count_message_tokens,
@@ -322,6 +323,88 @@ def test_summary_keeps_the_newest_messages_when_the_fold_exceeds_the_input_cap(m
     request_text = provider.calls[0]["messages"][1]["content"]
     assert "LATE-MARKER" in request_text
     assert "EARLY-MARKER" not in request_text
+
+
+def test_compressed_view_is_not_refolded_while_it_fits_the_budget():
+    compressor, provider, _ = _compressor(context_max_tokens=1600, context_keep_recent_tokens=400)
+    messages = _history()
+
+    first = compressor.compress(messages)
+    assert first.folded is True
+    assert first.stats["model_calls"] == 1
+
+    # The raw list is still over budget, but the compressed view is not: no
+    # second fold, no second summary call.
+    second = compressor.compress(messages)
+
+    assert second.folded is False
+    assert second.changed is True
+    assert second.messages == first.messages
+    assert second.stats["summarized"] is False
+    assert "model_calls" not in second.stats
+    assert len(provider.calls) == 1
+
+
+def test_compressed_view_is_refolded_after_it_outgrows_the_budget():
+    compressor, provider, _ = _compressor(context_max_tokens=1600, context_keep_recent_tokens=400)
+    messages = _history()
+    compressor.compress(messages)
+
+    extra: list[dict[str, object]] = []
+    for index in range(4):
+        extra.append({"role": "user", "content": f"extra{index} " + "q" * 400})
+        extra.append({"role": "assistant", "content": f"reply{index} " + "r" * 400})
+    grown = [*messages, *extra]
+
+    result = compressor.compress(grown)
+
+    assert result.folded is True
+    assert result.stats["model_calls"] == 1
+    assert "S2" in result.messages[0]["content"]
+    assert len(provider.calls) == 2
+
+
+def test_reused_view_keeps_the_omission_note():
+    compressor, provider, _ = _compressor(
+        context_max_tokens=1600,
+        context_keep_recent_tokens=400,
+        context_compression="truncate",
+    )
+    messages = _history()
+
+    first = compressor.compress(messages)
+    assert "earlier messages were omitted" in first.messages[0]["content"]
+
+    # No new fold: the note must still explain the missing messages.
+    second = compressor.compress(messages)
+    assert second.folded is False
+    assert "earlier messages were omitted" in second.messages[0]["content"]
+
+
+def test_runtime_uses_a_prebuilt_view_without_emitting_compression(monkeypatch):
+    view = [
+        {"role": "system", "content": "compressed system"},
+        {"role": "user", "content": "compressed user"},
+    ]
+
+    class StubCompressor:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def compress(self, messages, *, tools_tokens=0):
+            return CompressionResult(messages=view, changed=True, folded=False)
+
+    monkeypatch.setattr(runtime_module, "ContextCompressor", StubCompressor)
+    events = []
+    provider = FakeProvider([ModelResponse(content="done", finish_reason="stop")])
+    runtime = AgentRuntime(AgentConfig(context_max_tokens=1024), provider=provider, on_event=events.append)
+
+    runtime.run("go", session_id="s1")
+
+    assert not [event for event in events if event.type == EventType.CONTEXT_COMPRESSED]
+    request = next(event for event in events if event.type == EventType.MODEL_REQUEST)
+    assert request.data["messages"][0]["content"] == "compressed system"
+    assert request.data["messages"][1]["content"] == "compressed user"
 
 
 def test_summary_output_is_capped_at_12000_chars():

@@ -48,10 +48,16 @@ SUMMARY_SYSTEM_PROMPT = (
 
 @dataclass(slots=True)
 class CompressionResult:
-    """The model view plus what changed while building it."""
+    """The model view plus what changed while building it.
+
+    ``changed`` means the returned view differs from the raw message list and
+    must be used for the request. ``folded`` means this call actually dropped a
+    new interval into the summary (or fallback), which is what emits an event.
+    """
 
     messages: list[dict[str, Any]]
     changed: bool = False
+    folded: bool = False
     stats: dict[str, Any] = field(default_factory=dict)
 
 
@@ -79,6 +85,8 @@ class ContextCompressor:
         self.token_counter = token_counter or get_token_counter()
         self._summary: str | None = None
         self._folded_until = 0
+        self._pinned_user_index: int | None = None
+        self._omitted = False
         self._summary_error: str | None = None
         self._call_usage: dict[str, int] = {}
         self._call_count = 0
@@ -93,15 +101,32 @@ class ContextCompressor:
 
         trigger_tokens = int(self.max_tokens * self.trigger_ratio)
         budget = trigger_tokens - max(0, tools_tokens)
-        before = count_messages_tokens(
-            messages,
-            counter=self.token_counter,
-            image_token_estimate=self.image_token_estimate,
-        )
+        system_end = 1 if messages and messages[0].get("role") == "system" else 0
+
+        if self._folded_until > system_end:
+            # A view already exists: re-fold only when that view itself outgrows
+            # the budget. The raw history keeps growing, but it is no longer what
+            # the model receives, so it must not drive the trigger.
+            current, dropped = self._compose_view(messages, self._folded_until, self._pinned_user_index)
+            current_tokens = self._count(current)
+            if current_tokens <= budget:
+                return CompressionResult(
+                    messages=current,
+                    changed=current != messages,
+                    stats={
+                        "after_tokens": current_tokens,
+                        "trigger_tokens": trigger_tokens,
+                        "trigger_ratio": self.trigger_ratio,
+                        "dropped_messages": dropped,
+                        "summarized": False,
+                        "fallback": False,
+                    },
+                )
+
+        before = self._count(messages)
         if before <= budget:
             return CompressionResult(messages)
 
-        system_end = 1 if messages and messages[0].get("role") == "system" else 0
         keep_recent = self.keep_recent_tokens
         if keep_recent is None:
             keep_recent = max(1024, budget // 2)
@@ -112,6 +137,7 @@ class ContextCompressor:
 
         summarized = False
         fallback = False
+        folded_now = False
         dropped_count = 0
 
         if cut <= system_end:
@@ -119,24 +145,24 @@ class ContextCompressor:
             view = list(messages)
         else:
             last_user = self._last_user_index(messages, system_end, cut)
-            dropped_count = max(0, cut - system_end - (1 if last_user is not None else 0))
             # Everything before the cut is covered by the summary, including the
             # pinned user turn: it is both summarized and kept, so a later turn
             # can drop it without losing the instruction entirely.
             new_indices = [index for index in range(system_end, cut) if index >= self._folded_until]
 
             if new_indices:
+                folded_now = True
                 if self.mode == "summary":
-                    folded = [messages[index] for index in new_indices]
+                    new_messages = [messages[index] for index in new_indices]
                     if (
                         count_messages_tokens(
-                            folded,
+                            new_messages,
                             counter=self.token_counter,
                             image_token_estimate=self.image_token_estimate,
                         )
                         >= SUMMARY_MIN_FOLD_TOKENS
                     ):
-                        summary = self._summarize(folded, self._summary)
+                        summary = self._summarize(new_messages, self._summary)
                         if summary is not None:
                             self._summary = summary
                             self._summary_error = None
@@ -149,22 +175,13 @@ class ContextCompressor:
                 else:
                     fallback = True
                 self._folded_until = cut
+                self._pinned_user_index = last_user
+                if fallback:
+                    # The dropped messages are not in any summary; keep the
+                    # omission note on every later view, not just this one.
+                    self._omitted = True
 
-            tail: list[dict[str, Any]] = list(messages[cut:])
-            if last_user is not None:
-                tail = [messages[last_user], *tail]
-
-            notes: list[str] = []
-            if self._summary:
-                notes.append("## Summary of earlier conversation\n" + self._summary)
-            if fallback and dropped_count:
-                notes.append(f"[Note: {dropped_count} earlier messages were omitted to fit the context window.]")
-            if notes:
-                system_content = messages[0]["content"] if system_end else ""
-                prefix = f"{system_content}\n\n" if isinstance(system_content, str) and system_content else ""
-                view = [{"role": "system", "content": prefix + "\n\n".join(notes)}, *tail]
-            else:
-                view = [*messages[:system_end], *tail]
+            view, dropped_count = self._compose_view(messages, cut, last_user)
 
         view = self._fit_budget(view, budget)
         after = count_messages_tokens(
@@ -215,8 +232,40 @@ class ContextCompressor:
         return CompressionResult(
             messages=view,
             changed=view != messages,
+            folded=folded_now,
             stats=stats,
         )
+
+    def _compose_view(
+        self,
+        messages: list[dict[str, Any]],
+        tail_start: int,
+        pinned_user_index: int | None,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Build the model view for a given fold point.
+
+        The view is the system prompt (with the summary and omission note), the
+        pinned user turn, and everything from ``tail_start`` on. ``dropped`` is
+        the cumulative number of messages before ``tail_start`` that the model
+        no longer sees.
+        """
+
+        system_end = 1 if messages and messages[0].get("role") == "system" else 0
+        tail: list[dict[str, Any]] = list(messages[tail_start:])
+        if pinned_user_index is not None:
+            tail = [messages[pinned_user_index], *tail]
+        dropped = max(0, tail_start - system_end - (1 if pinned_user_index is not None else 0))
+
+        notes: list[str] = []
+        if self._summary:
+            notes.append("## Summary of earlier conversation\n" + self._summary)
+        if self._omitted and dropped:
+            notes.append(f"[Note: {dropped} earlier messages were omitted to fit the context window.]")
+        if notes:
+            system_content = messages[0]["content"] if system_end else ""
+            prefix = f"{system_content}\n\n" if isinstance(system_content, str) and system_content else ""
+            return [{"role": "system", "content": prefix + "\n\n".join(notes)}, *tail], dropped
+        return [*messages[:system_end], *tail], dropped
 
     def _find_cut(self, messages: list[dict[str, Any]], system_end: int, keep_recent: int) -> int:
         total = 0

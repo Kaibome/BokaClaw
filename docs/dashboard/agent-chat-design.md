@@ -176,7 +176,7 @@ X-Accel-Buffering: no
 
 `memory.recall` 在第一次模型请求之前发出，`memory.save` 在 `done` 之后发出（见 4.4）；两者都同时写入同名 `memory` span，供 Trace 页查看。
 
-`context.compressed` 在某轮请求因上下文预算被压缩或裁剪后、该轮 `model_request` 之前发出（每个发生压缩的迭代一条）：
+`context.compressed` 在新折叠了一段历史（首次压缩，或压缩视图再次超出预算）时、该轮 `model_request` 之前发出；仅复用已有压缩视图的迭代不发出：
 
 ```text
 id: 2

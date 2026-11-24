@@ -451,9 +451,9 @@ class AgentRuntime:
                         counter=token_counter,
                     )
                     compressed = compressor.compress(messages, tools_tokens=tools_tokens)
-                    if compressed.changed or compressed.stats.get("model_calls"):
-                        if compressed.changed:
-                            messages = compressed.messages
+                    if compressed.changed:
+                        messages = compressed.messages
+                    if compressed.folded:
                         self._emit(
                             EventType.CONTEXT_COMPRESSED,
                             session_id,
@@ -854,9 +854,9 @@ class AgentRuntime:
         messages = context.build()
         if compressor is not None:
             compressed = compressor.compress(messages, tools_tokens=0)
-            if compressed.changed or compressed.stats.get("model_calls"):
-                if compressed.changed:
-                    messages = compressed.messages
+            if compressed.changed:
+                messages = compressed.messages
+            if compressed.folded:
                 self._emit(
                     EventType.CONTEXT_COMPRESSED,
                     session_id,

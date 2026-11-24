@@ -291,12 +291,12 @@ token 计数使用 `tiktoken` 分词器（`agent/tokenization.py`）：`Tiktoken
 build() ──▶ compress(messages, tools_tokens) ──▶ model_request
 ```
 
-- 触发阈值是 `context_max_tokens × context_trigger_ratio`（`context_trigger_ratio` 默认 `1.0`；设为 `0.85` 可预留 15% 给模型输出和运行时块），再扣除 tools schema 的 token 数；未超阈值直接返回原文，不产生额外模型调用。
+- 触发判断分两段：尚未压缩过时，比较**原始 message 列表**的 token 数；已有压缩视图后，改为比较**该视图本身**的 token 数，只有视图重新超出预算才再次折叠。阈值是 `context_max_tokens × context_trigger_ratio`（`context_trigger_ratio` 默认 `1.0`；设为 `0.85` 可预留 15% 给模型输出和运行时块），再扣除 tools schema 的 token 数；未超阈值直接返回原文或复用已有视图，不产生额外模型调用。
 - 切点从尾部向前累积 `context_keep_recent_tokens`（默认触发预算一半），再前移到合法边界（`user`，或带 `tool_calls` 的 `assistant`，因为它的结果紧随其后）。最近一条 `user` 消息会被钉住保留，长工具循环不会丢失任务指令。`context_keep_recent_tokens` 必须至少比触发阈值低 256 token。
 - `summary` 模式把切点之前的消息连同上一次摘要折叠成滚动摘要，合并进唯一的 system 消息。摘要调用使用 `provider.complete(..., tools=None, tool_choice=None, temperature=0, max_tokens=1536)`，**不复用**会强制携带 tools 的 `_complete()`；usage 合并进本次 run。折叠区间一次性送入摘要模型（要求摘要模型窗口 ≥256K），输入按 token 上限 200,000 保留最新的消息，单条消息最多 8,000 字符；输出最多 1,536 token / 12,000 字符。摘要失败（异常、空内容、内容过少）只记录 warning 并回退裁剪，不中断 run。
 - `truncate` 模式直接丢弃切点之前的消息，并在 system 末尾追加省略说明。
 - 压缩后仍超预算时，`_fit_budget()` 对最大的非 system 消息做头尾截断（只改视图），不会拆散 tool_call 与其结果。
-- 每次真正改写视图都会发出 `context_compressed` 事件，位置在该轮 `model_request` 之前。`ContextCompressor` 的滚动摘要只存在于一次 run 内，不写入 SessionStore。
+- 每次真正折叠新消息（`CompressionResult.folded`）才发出 `context_compressed` 事件；仅复用/重建已有压缩视图不会重复发事件。位置在该轮 `model_request` 之前。`ContextCompressor` 的滚动摘要只存在于一次 run 内，不写入 SessionStore。
 
 消息构造规则：
 
@@ -607,7 +607,7 @@ CREATE TABLE IF NOT EXISTS bokaclaw_agent_messages (
 | `model_response` | 每次模型返回后 | `content`、`tool_calls`、`finish_reason` |
 | `tool_call` | 执行工具前 | `tool_call_id`、`name`、`arguments`、`raw_arguments`、`arguments_error`、`status="running"` |
 | `tool_result` | 工具返回/abort 后 | `tool_call_id`、`name`、`content`（已按 `tool_result_max_chars` 裁剪）、`truncated`、`original_chars`、`is_error`、`status`（`completed/failed/aborted`） |
-| `context_compressed` | 模型视图被压缩/裁剪后、对应 `model_request` 之前 | `before_tokens`、`after_tokens`、`trigger_tokens`、`trigger_ratio`、`dropped_messages`、`summarized`、`fallback`、`input`（前后视图的 message_count/roles/chars/tokens 描述符）、`output`（含滚动摘要预览） |
+| `context_compressed` | 新折叠了一段消息（首次压缩，或压缩视图再次超预算）后、对应 `model_request` 之前 | `before_tokens`、`after_tokens`、`trigger_tokens`、`trigger_ratio`、`dropped_messages`、`summarized`、`fallback`、`input`（前后视图的 message_count/roles/chars/tokens 描述符）、`output`（含滚动摘要预览） |
 | `run_ended` | 正常结束、超轮数或取消 | `stop_reason`（含 `cancelled`） |
 | `error` | 非取消异常 | `error`、`type` |
 

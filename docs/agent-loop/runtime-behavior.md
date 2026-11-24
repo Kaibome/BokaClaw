@@ -386,7 +386,7 @@ return "ok"
 
 `compress()` 返回新列表，只用于该次 `MODEL_REQUEST`。
 
-触发阈值是 `context_max_tokens × context_trigger_ratio`（默认 `1.0`；设为 `0.85` 会把 15% 留给模型输出和运行时块），再扣除工具 schema 的 token 数。
+触发阈值是 `context_max_tokens × context_trigger_ratio`（默认 `1.0`；设为 `0.85` 会把 15% 留给模型输出和运行时块），再扣除工具 schema 的 token 数。尚未压缩时比较原始 message 列表；已有压缩视图后改为比较视图本身，只有视图重新超预算才再次折叠（因此原始历史持续增长不会导致每轮都压缩）。
 
 ### 7.2 四层防丢机制
 
