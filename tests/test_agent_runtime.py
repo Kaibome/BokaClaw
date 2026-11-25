@@ -1576,6 +1576,30 @@ def test_build_runtime_registers_dev_tools_when_enabled(monkeypatch, tmp_path):
     assert "search_memories" not in names
 
 
+def test_build_runtime_excludes_tools_whose_probe_fails(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENT_TOOL_PROBES", "1")
+    monkeypatch.setenv("AGENT_DEV_TOOLS", "true")
+    monkeypatch.setenv("AGENT_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.delenv("AGENT_TOOLS_ALLOW_SHELL", raising=False)
+    monkeypatch.delenv("AGENT_EXECUTOR_URL", raising=False)
+
+    import app.agent.tool_availability as availability
+
+    monkeypatch.setattr(availability, "TOOL_AVAILABILITY", availability.ToolAvailabilityTracker())
+    monkeypatch.setattr(availability, "_web_fetch_check", lambda config: False)
+    monkeypatch.setattr(availability, "_web_search_check", lambda config: False)
+    sdk = FakeSDK()
+
+    agent_runtime.build_runtime(sdk, _config(), {"user_id": None, "message": "hi"})
+
+    # sdk.tools records every tool the SDK was asked to wrap; the runtime only
+    # receives the ones that survived probing.
+    names = {tool.name for tool in sdk.runtimes[0].tools}
+    assert "WebFetch" not in names
+    assert "WebSearch" not in names
+    assert {"Read", "Write", "Edit", "Glob", "Grep"} <= names
+
+
 def test_build_runtime_forwards_context_settings():
     sdk = FakeSDK()
     config = _config(

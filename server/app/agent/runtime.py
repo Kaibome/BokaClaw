@@ -52,6 +52,12 @@ from app.agent.subagents import (
     build_scope_validator,
     build_subagent_specs,
 )
+from app.agent.tool_availability import (
+    build_tool_probes,
+    filter_tool_mapping,
+    filter_tools,
+    probes_enabled,
+)
 from app.agent.usage import RunUsageMeter, meter_context, normalize_usage
 from app.agent.user_input import USER_INPUT_GUIDANCE, build_user_input_tool
 
@@ -1236,6 +1242,7 @@ def build_runtime(
     max_seconds: Optional[float] = None,
     extra_tools: Optional[List[Any]] = None,
     use_vision: bool = False,
+    mcp_config: Any = None,
 ):
     benchmark = _is_benchmark_payload(payload)
     active_model = config.vision_model if use_vision and config.vision_model else config.model
@@ -1384,6 +1391,15 @@ def build_runtime(
             )
         )
 
+    # Probe dependencies before the tools enter the model context. The tracker
+    # is process-wide, so runs inside the same 30s window reuse one result.
+    probes = (
+        build_tool_probes(tools, dev_config=dev_config, mcp_config=mcp_config)
+        if probes_enabled()
+        else {}
+    )
+    tools = filter_tools(tools, probes)
+
     # Keep MCP and low-frequency Office schemas out of every request. They stay
     # registered, so dispatch works once ToolSearch activates them for this run.
     deferred = collect_deferred(tools)
@@ -1403,7 +1419,7 @@ def build_runtime(
             """
 
             return tool_search_result(
-                deferred,
+                filter_tool_mapping(deferred, probes),
                 registry_holder.get("registry"),
                 query,
                 limit=limit,
@@ -1682,7 +1698,10 @@ async def stream_local_agent(
                 "MCP tool preparation failed; continuing without MCP tools", exc_info=True
             )
 
-    runtime = build_runtime(
+    # Probing can wait on the workspace, the executor or an MCP server; keep it
+    # off the event loop so other requests are not blocked by a slow dependency.
+    runtime = await asyncio.to_thread(
+        build_runtime,
         sdk,
         config,
         payload,
@@ -1692,6 +1711,7 @@ async def stream_local_agent(
         max_seconds=max_seconds,
         extra_tools=[*mcp_tools, *skill_tools],
         use_vision=use_vision,
+        mcp_config=mcp_config,
     )
 
     deferred_tools = getattr(runtime, "deferred_tools", None)

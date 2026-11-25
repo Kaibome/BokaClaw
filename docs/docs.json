@@ -23,7 +23,8 @@
           "server/agent-execution-decoupling",
           "server/human-in-the-loop",
           "server/mcp-integration",
-          "server/skill-integration"
+          "server/skill-integration",
+          "server/tool-availability-probing"
         ]
       },
       {
